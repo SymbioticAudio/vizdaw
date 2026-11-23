@@ -98,28 +98,55 @@ impl StripRowKind {
     ];
 }
 
-/// Each row's height (Decision M8). Slice 6b fills the instrument, input,
-/// EQ, insert and send rows; until then they are left blank at these
-/// heights (their empty state), so the faders already line up.
+/// Each row's height (Decision M8). The inserts and sends grow with
+/// their count; every strip takes the tallest strip's row, so the faders
+/// line up.
 pub struct RowHeights;
 
 impl RowHeights {
     /// The colour bar (4), the name (16), the kind (14), two 2-point gaps.
     pub const HEADER: f64 = 38.;
-    /// One slot row.
+    /// One slot row (the instrument's, an insert's).
     pub const SLOT: f64 = 20.;
+    /// The EQ slot: its "EQ \u{FF0B}" face, or the loaded EQ beside its
+    /// 24-point bypass button.
+    pub const EQ: f64 = 24.;
+    /// The gap between a section's parts (`spacing.xxs`).
+    pub const PART_GAP: f64 = 2.;
+    /// The inserts' "+" and the sends' menu.
+    pub const ADD: f64 = 24.;
+    /// A send's name line.
+    pub const SEND_NAME: f64 = 14.;
+    /// A send's knob row (the small knob's 28-point hit).
+    pub const SEND_KNOB: f64 = 28.;
+    /// One send: its name line, a gap and its knob row.
+    pub const SEND: f64 = Self::SEND_NAME + Self::PART_GAP + Self::SEND_KNOB;
     /// The audio path's input and monitor row.
     pub const INPUT: f64 = 24.;
     /// A section's small heading ("INSERTS", "SENDS").
     pub const HEADING: f64 = 14.;
-    /// The inserts: the heading, a 2-point gap and the 24-point "+".
+    /// The inserts with no slot: the heading, a 2-point gap and the
+    /// 24-point "+".
     pub const INSERTS: f64 = Self::HEADING + 2. + 24.;
-    /// The sends: the heading, a 2-point gap and the 24-point menu.
+    /// The sends with none: the heading, a 2-point gap and the 24-point
+    /// menu.
     pub const SENDS: f64 = Self::HEADING + 2. + 24.;
     /// The output menu.
     pub const OUTPUT: f64 = 24.;
     /// The medium pan knob's hit size.
     pub const PAN: f64 = 38.;
+
+    /// The inserts with `n` slots: the heading, the slots and the "+",
+    /// two points apart.
+    pub fn inserts(n: usize) -> f64 {
+        Self::HEADING + n as f64 * Self::SLOT + (n + 1) as f64 * Self::PART_GAP + Self::ADD
+    }
+
+    /// The sends with `n` sends: the heading, the sends and the menu, two
+    /// points apart.
+    pub fn sends(n: usize) -> f64 {
+        Self::HEADING + n as f64 * Self::SEND + (n + 1) as f64 * Self::PART_GAP + Self::ADD
+    }
 }
 
 /// One strip's rows and heights. `input`: the strip has an input track.
@@ -127,8 +154,8 @@ impl RowHeights {
 pub fn rows_of(s: &StripRow, input: bool) -> BTreeMap<StripRowKind, f64> {
     let mut rows = BTreeMap::from([
         (StripRowKind::Header, RowHeights::HEADER),
-        (StripRowKind::Eq, RowHeights::SLOT),
-        (StripRowKind::Inserts, RowHeights::INSERTS),
+        (StripRowKind::Eq, RowHeights::EQ),
+        (StripRowKind::Inserts, RowHeights::inserts(s.inserts.len())),
     ]);
     if s.instrument.is_some() || s.kind == StripKindRow::BuiltinSynth {
         rows.insert(StripRowKind::Instrument, RowHeights::SLOT);
@@ -137,7 +164,7 @@ pub fn rows_of(s: &StripRow, input: bool) -> BTreeMap<StripRowKind, f64> {
         rows.insert(StripRowKind::Input, RowHeights::INPUT);
     }
     if s.kind != StripKindRow::Master {
-        rows.insert(StripRowKind::Sends, RowHeights::SENDS);
+        rows.insert(StripRowKind::Sends, RowHeights::sends(s.sends.len()));
         rows.insert(StripRowKind::Output, RowHeights::OUTPUT);
         rows.insert(StripRowKind::Pan, RowHeights::PAN);
     }

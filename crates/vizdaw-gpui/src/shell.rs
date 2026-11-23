@@ -43,7 +43,9 @@ use crate::detail_pane::{self, DetailPaneState};
 use crate::frame_stats::{self, FrameStats};
 use crate::list_editor::{ListEditor, ListState};
 use crate::menu_bar::MenuBar;
-use crate::menus::{self, CloseWindow, PlayStop, RunCommand, Save, SaveAs, StopAndReturn};
+use crate::menus::{
+    self, CloseWindow, MixerMenuItem, PlayStop, RunCommand, Save, SaveAs, StopAndReturn,
+};
 use crate::mixer_view::{self, MixerView};
 use crate::panes::{self, HostState, PaneDrag};
 use crate::piano_roll::{PianoRoll, RollState};
@@ -527,6 +529,23 @@ impl DocumentWindow {
             }
             _ => {}
         }
+        cx.notify();
+    }
+
+    /// A Mixer menu item, on this window's document and its selected
+    /// strips; a refusal is the mixer's alert.
+    pub fn run_mixer_item(
+        &mut self,
+        action: &MixerMenuItem,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let doc = self.doc;
+        self.app.update(cx, |s, cx| {
+            cx.notify();
+            s.store
+                .with_document(doc, |d, _| menus::run_mixer_item(action.op, d));
+        });
         cx.notify();
     }
 
@@ -1398,6 +1417,7 @@ impl DocumentWindow {
                 cx.listener(|this, _, _, cx| this.shuttle_release(false, cx)),
             )
             .on_action(cx.listener(Self::run_command))
+            .on_action(cx.listener(Self::run_mixer_item))
             .on_action(cx.listener(Self::play_stop))
             .on_action(cx.listener(Self::stop_and_return))
             .on_action(cx.listener(Self::save))

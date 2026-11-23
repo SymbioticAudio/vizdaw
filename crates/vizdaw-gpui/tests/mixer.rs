@@ -260,6 +260,57 @@ impl Setup {
             .collect()
     }
 
+    fn right_click(&mut self, role: &str, label: &str) {
+        let at = self.element(role, label).bounds.center();
+        self.cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Right,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        self.cx.simulate_event(MouseUpEvent {
+            button: MouseButton::Right,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        self.cx.run_until_parked();
+    }
+
+    /// The open menus' items: (title, enabled, checked).
+    fn items(&mut self) -> Vec<(String, bool, bool)> {
+        self.elements()
+            .into_iter()
+            .filter(|e| e.role == "menuitem")
+            .map(|e| (e.label, e.enabled, e.selected))
+            .collect()
+    }
+
+    fn titles(&mut self) -> Vec<String> {
+        self.items().into_iter().map(|i| i.0).collect()
+    }
+
+    fn enabled_item(&mut self, title: &str) -> bool {
+        self.element("menuitem", title).enabled
+    }
+
+    /// A click on the menu's backdrop closes it.
+    fn close_menus(&mut self) {
+        if !self.titles().is_empty() {
+            self.click_at(point(px(2.), px(2.)), Modifiers::none());
+        }
+        assert!(self.titles().is_empty());
+    }
+
+    fn mixer_calls(&self) -> Vec<(String, String)> {
+        self.fake
+            .run_mixers()
+            .into_iter()
+            .map(|(id, args)| (id, format!("{args:?}")))
+            .collect()
+    }
+
     fn scroll(&mut self, at: Point<Pixels>, dx: f32, dy: f32) {
         self.cx.simulate_event(ScrollEvent {
             position: at,
@@ -1246,4 +1297,210 @@ fn a_rename_dropped_with_its_placement_commits(cx: &mut TestAppContext) {
     );
     assert!(s.model(|d| d.mixer().unwrap().renaming().is_none()));
     assert!(s.model(|d| d.transport_keys_enabled()));
+}
+
+#[gpui::test]
+fn the_strip_menu_has_the_swift_items(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    s.right_click("text", "Bus 1");
+    assert_eq!(
+        s.titles(),
+        [
+            "Rename\u{2026}",
+            "Set All Strips to",
+            "Remove Bus",
+            "Colour",
+            "Group",
+            "Assign to VCA",
+            "Remove from VCA"
+        ]
+    );
+    assert!(s.enabled_item("Group"));
+    assert!(!s.enabled_item("Remove from VCA"), "no VCA holds it");
+    s.click("menuitem", "Set All Strips to");
+    let titles = s.titles();
+    assert_eq!(
+        titles[7..],
+        ["Off", "Read", "Touch", "Latch", "Write", "Trim"],
+        "{titles:?}"
+    );
+    s.close_menus();
+    // Only a bus has Remove Bus; master has no group or VCA items.
+    s.right_click("text", "Audio 1");
+    assert!(!s.titles().contains(&"Remove Bus".to_owned()));
+    s.close_menus();
+    s.right_click("text", "Master");
+    assert_eq!(
+        s.titles(),
+        ["Rename\u{2026}", "Set All Strips to", "Colour"]
+    );
+    s.close_menus();
+    // A right-click does not select.
+    assert!(s.model(|d| d.selected_strips().is_empty()));
+}
+
+#[gpui::test]
+fn the_strip_menu_colours_renames_sets_all_and_removes_a_bus(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    s.right_click("text", "Audio 1");
+    s.click("menuitem", "Colour");
+    let items = s.items();
+    // Audio 1 is no bus: six items, then the submenu's.
+    let colours: Vec<&str> = items[6..].iter().map(|i| i.0.as_str()).collect();
+    assert_eq!(
+        colours,
+        [
+            "None", "Red", "Orange", "Yellow", "Green", "Teal", "Blue", "Purple", "Pink"
+        ]
+    );
+    assert!(items[6].2, "no colour of its own: None is checked");
+    s.click("menuitem", "Teal");
+    assert!(
+        s.fake
+            .calls()
+            .contains(&"set_strip_colour(5,Some(Teal))".to_owned()),
+        "{:?}",
+        s.fake.calls()
+    );
+    s.right_click("text", "Audio 1");
+    s.click("menuitem", "Set All Strips to");
+    s.click("menuitem", "Latch");
+    assert_eq!(
+        s.fake.mode_calls().last(),
+        Some(&(vec![5, 6, 1, 2, 0], AutomationModeRow::Latch))
+    );
+    s.right_click("text", "Audio 2");
+    s.click("menuitem", "Rename\u{2026}");
+    assert!(s.element("textfield", NAME).focused);
+    s.cx.simulate_keystrokes("escape");
+    s.cx.run_until_parked();
+    s.right_click("text", "Bus 1");
+    s.click("menuitem", "Remove Bus");
+    assert!(s.fake.calls().contains(&"remove_bus(2)".to_owned()));
+    assert!(s.find("slider", "Fader of Bus 1").is_none());
+}
+
+/// [`fake`] with VCA 1 (9) holding Audio 2.
+fn vca_fake() -> FakeSession {
+    let f = fake();
+    f.edit_mixer(|m| {
+        m.vcas = vec![vizdaw_app::testing::vca_row(9, "VCA 1", &[6], 0.0)];
+        for st in m.strips.iter_mut().filter(|st| st.id == 6) {
+            st.vcas = vec![9];
+        }
+    });
+    f
+}
+
+#[gpui::test]
+fn the_strip_menu_groups_and_assigns_its_strips(cx: &mut TestAppContext) {
+    let mut s = setup(cx, vca_fake());
+    // Not in the selection: the strip alone.
+    s.right_click("text", "Audio 1");
+    s.click("menuitem", "Assign to VCA");
+    assert_eq!(s.titles()[6..], ["VCA 1", "New VCA"]);
+    assert!(s.enabled_item("VCA 1"));
+    s.click("menuitem", "VCA 1");
+    assert_eq!(s.mixer_calls().last().unwrap().0, "mixer.assign_vca");
+    assert!(s.mixer_calls().last().unwrap().1.contains("\"5\""));
+    // In the selection: the selection.
+    s.click("text", "Audio 1");
+    let at = s.element("text", "Audio 2").bounds.center();
+    s.click_at(at, Modifiers::shift());
+    s.right_click("text", "Audio 2");
+    s.click("menuitem", "Group");
+    let (id, args) = s.mixer_calls().last().unwrap().clone();
+    assert_eq!(id, "mixer.new_group");
+    assert!(args.contains("\"5,6\""), "{args}");
+    s.right_click("text", "Audio 2");
+    s.click("menuitem", "Assign to VCA");
+    s.click("menuitem", "New VCA");
+    let (id, args) = s.mixer_calls().last().unwrap().clone();
+    assert_eq!(id, "mixer.new_vca");
+    assert!(args.contains("\"5,6\""), "{args}");
+    // Remove from VCA ▸ takes the members only.
+    s.right_click("text", "Audio 2");
+    assert!(s.enabled_item("Remove from VCA"));
+    s.click("menuitem", "Remove from VCA");
+    s.click("menuitem", "VCA 1");
+    let (id, args) = s.mixer_calls().last().unwrap().clone();
+    assert_eq!(id, "mixer.unassign_vca");
+    assert!(args.contains("\"6\""), "{args}");
+    // A VCA holding every strip of the menu is off in Assign to VCA ▸.
+    s.close_menus();
+    s.click("text", "Audio 2");
+    s.right_click("text", "Audio 2");
+    s.click("menuitem", "Assign to VCA");
+    assert!(!s.enabled_item("VCA 1"));
+}
+
+#[gpui::test]
+fn the_mixer_menu_acts_on_the_selection(cx: &mut TestAppContext) {
+    use vizdaw_gpui::menus::{MixerMenuItem, MixerOp};
+    let f = vca_fake();
+    f.edit_mixer(|m| {
+        m.groups = vec![vizdaw_app::testing::group_row(7, "Drums", &[5, 6])];
+        for st in m.strips.iter_mut().filter(|st| st.id == 5 || st.id == 6) {
+            st.group = Some(7);
+        }
+    });
+    let mut s = setup(cx, f);
+    s.click("text", "Audio 1");
+    let at = s.element("text", "Audio 2").bounds.center();
+    s.click_at(at, Modifiers::shift());
+    let run = |s: &mut Setup, op: MixerOp| {
+        s.cx.dispatch_action(MixerMenuItem { op });
+        s.cx.run_until_parked();
+        s.mixer_calls().last().cloned()
+    };
+    let (id, args) = run(&mut s, MixerOp::Ungroup).unwrap();
+    assert_eq!(id, "mixer.delete_group");
+    assert!(args.contains("7"), "{args}");
+    let (id, args) = run(&mut s, MixerOp::Assign { vca: 9 }).unwrap();
+    assert_eq!(id, "mixer.assign_vca");
+    assert!(args.contains("\"5\""), "only the strips it lacks: {args}");
+    let (id, args) = run(&mut s, MixerOp::Unassign { vca: 9 }).unwrap();
+    assert_eq!(id, "mixer.unassign_vca");
+    assert!(args.contains("\"6\""), "only its members: {args}");
+    let (id, args) = run(&mut s, MixerOp::NewVca).unwrap();
+    assert_eq!(id, "mixer.new_vca");
+    assert!(args.contains("\"5,6\""), "{args}");
+    let (id, args) = run(&mut s, MixerOp::Group).unwrap();
+    assert_eq!(id, "mixer.new_group");
+    assert!(args.contains("\"5,6\""), "{args}");
+}
+
+/// Puts the app-wide suspend switch back however the test ends.
+struct Unsuspend;
+
+impl Drop for Unsuspend {
+    fn drop(&mut self) {
+        vizdaw_ffi::automation::set_automation_suspended(false);
+    }
+}
+
+#[gpui::test]
+fn suspend_automation_runs_from_its_menu_item(cx: &mut TestAppContext) {
+    let _guard = Unsuspend;
+    let mut s = setup(cx, fake());
+    assert!(!vizdaw_ffi::automation::automation_suspended());
+    s.run_menu("automation.suspend");
+    assert!(vizdaw_ffi::automation::automation_suspended());
+    s.run_menu("automation.suspend");
+    assert!(!vizdaw_ffi::automation::automation_suspended());
+}
+
+#[gpui::test]
+fn a_mode_command_on_a_busy_core_says_so_in_the_status_line(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    s.click("text", "Audio 1");
+    s.fake.fail_next("set_automation_mode", busy());
+    s.run_menu("automation.mode.latch");
+    let doc = s.doc();
+    let (status, alert) = s.app.read_with(&s.cx, |a, _| {
+        let d = a.store.document(doc).unwrap();
+        (d.status().map(String::from), a.store.alert().is_some())
+    });
+    assert_eq!(status.as_deref(), Some("editor opening"));
+    assert!(!alert, "Swift's .busy: the status line, no alert");
 }

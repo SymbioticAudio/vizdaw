@@ -73,6 +73,30 @@ pub struct UnavailableCommand {
     pub id: SharedString,
 }
 
+/// A Mixer menu item (Swift `AppCommands.mixerMenu`): it calls the
+/// mixer model on the selected strips, as Swift's does, not the command
+/// path (a key's `mixer.new_group` or `mixer.new_vca`).
+#[derive(Clone, Debug, PartialEq, Eq, gpui::Action)]
+#[action(namespace = vizdaw, no_json)]
+pub struct MixerMenuItem {
+    pub op: MixerOp,
+}
+
+/// What a Mixer menu item does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MixerOp {
+    /// A group of the selected strips.
+    Group,
+    /// Deletes the group every selected strip is in.
+    Ungroup,
+    /// A VCA of the selected strips.
+    NewVca,
+    /// Assigns the selected strips `vca` lacks to it.
+    Assign { vca: u64 },
+    /// Takes `vca`'s members among the selected strips out of it.
+    Unassign { vca: u64 },
+}
+
 /// The key context of a document window's root.
 pub const WINDOW_CONTEXT: &str = "DocumentWindow";
 /// The editor commands (`commands::EDITOR_COMMANDS`) the GPUI app routes
@@ -124,6 +148,20 @@ pub enum ItemSpec {
         enabled: bool,
         checked: Option<bool>,
     },
+    /// A Mixer menu item.
+    Mixer {
+        op: MixerOp,
+        title: String,
+        enabled: bool,
+    },
+    /// A submenu: its title, whether it opens, its items.
+    Submenu {
+        title: String,
+        enabled: bool,
+        items: Vec<ItemSpec>,
+    },
+    /// A heading that does nothing ("Selected Strips").
+    Heading(String),
     Separator,
 }
 
@@ -198,6 +236,7 @@ fn bound_ids() -> Vec<&'static str> {
         .chain(ROUTED_EDITOR_COMMANDS)
         .chain(VIEW_COMMANDS)
         .chain(MIXER_COMMANDS)
+        .chain(std::iter::once(&"automation.suspend"))
         .chain(transport)
         .copied()
         .collect()
@@ -259,7 +298,8 @@ fn command(id: &'static str, front: Option<&DocumentModel>, keymap: &Keymap) -> 
     };
     let checked = matches!(
         id,
-        "editors.snap"
+        "automation.suspend"
+            | "editors.snap"
             | "ui.view_arrange"
             | "ui.view_mix"
             | "ui.toggle_left"
@@ -361,11 +401,106 @@ pub fn menu_model(front: Option<&DocumentModel>, keymap: &Keymap) -> MenuModel {
                 ],
             ),
             menu("Transport", transport_items(front, keymap)),
+            menu(
+                "Automation",
+                vec![
+                    ItemSpec::Heading("Selected Strips".into()),
+                    cmd("automation.mode.off"),
+                    cmd("automation.mode.read"),
+                    cmd("automation.mode.touch"),
+                    cmd("automation.mode.latch"),
+                    cmd("automation.mode.write"),
+                    cmd("automation.mode.trim"),
+                    ItemSpec::Separator,
+                    cmd("automation.suspend"),
+                ],
+            ),
+            menu("Mixer", mixer_items(front)),
             // The Plug-in Manager, Media Pool and Song Notes come with
             // their windows; macOS adds the window list.
             menu("Window", vec![cmd("window.mixer")]),
         ],
     }
+}
+
+/// The Mixer menu (Swift `AppCommands.mixerMenu`): Group, Ungroup, New
+/// VCA, Assign to VCA ▸ (each VCA, then New VCA) and Remove from VCA ▸,
+/// on the selected strips; each is off where its command would be
+/// refused. None has a key.
+fn mixer_items(front: Option<&DocumentModel>) -> Vec<ItemSpec> {
+    let mixer = front.and_then(|d| d.mixer().map(|m| (m, d)));
+    let strips = mixer.map_or_else(Vec::new, |(m, d)| m.selected_members(d));
+    let item = |op, title: &str, enabled| ItemSpec::Mixer {
+        op,
+        title: title.to_owned(),
+        enabled,
+    };
+    let new_vca = || item(MixerOp::NewVca, "New VCA", front.is_some());
+    let vcas = mixer.map_or(&[][..], |(m, _)| m.vcas());
+    let mut assign: Vec<ItemSpec> = vcas
+        .iter()
+        .map(|v| {
+            let add = mixer.map_or_else(Vec::new, |(m, _)| m.assignable(&strips, v));
+            item(MixerOp::Assign { vca: v.id }, &v.name, !add.is_empty())
+        })
+        .collect();
+    if !vcas.is_empty() {
+        assign.push(ItemSpec::Separator);
+    }
+    assign.push(new_vca());
+    let holding: Vec<ItemSpec> = mixer
+        .map(|(m, _)| m.vcas_holding(&strips))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|v| item(MixerOp::Unassign { vca: v.id }, &v.name, true))
+        .collect();
+    vec![
+        item(
+            MixerOp::Group,
+            "Group",
+            mixer.is_some_and(|(m, d)| m.can_group_selection(d)),
+        ),
+        item(
+            MixerOp::Ungroup,
+            "Ungroup",
+            mixer.is_some_and(|(m, d)| m.selection_group(d).is_some()),
+        ),
+        ItemSpec::Separator,
+        new_vca(),
+        ItemSpec::Submenu {
+            title: "Assign to VCA".into(),
+            enabled: !strips.is_empty(),
+            items: assign,
+        },
+        ItemSpec::Submenu {
+            title: "Remove from VCA".into(),
+            enabled: !holding.is_empty(),
+            items: holding,
+        },
+    ]
+}
+
+/// Runs Mixer menu item `op` on `doc`'s mixer and its selected strips.
+pub fn run_mixer_item(op: MixerOp, doc: &mut DocumentModel) {
+    doc.with_mixer(|m, d| match op {
+        MixerOp::Group => m.group_selection(d),
+        MixerOp::Ungroup => m.ungroup_selection(d),
+        MixerOp::NewVca => m.new_vca_from_selection(d, true),
+        MixerOp::Assign { vca } | MixerOp::Unassign { vca } => {
+            let Some(v) = m.vca(vca).cloned() else { return };
+            let strips = m.selected_members(d);
+            let on = matches!(op, MixerOp::Assign { .. });
+            let which: Vec<u64> = if on {
+                m.assignable(&strips, &v)
+            } else {
+                strips
+                    .into_iter()
+                    .filter(|s| v.members.contains(s))
+                    .collect()
+            };
+            m.assign(d, &which, vca, on);
+        }
+    });
 }
 
 /// The Transport menu: every transport command with a menu item, in
@@ -515,32 +650,57 @@ pub fn menus(model: &MenuModel) -> Vec<Menu> {
     model
         .menus
         .iter()
-        .map(|m| {
-            Menu::new(m.title.clone()).items(m.items.iter().map(|i| {
-                match i {
-                    ItemSpec::Separator => MenuItem::separator(),
-                    ItemSpec::Command {
-                        id, title, enabled, ..
-                    } if !enabled => MenuItem::action(
-                        title.clone(),
-                        UnavailableCommand {
-                            id: SharedString::new_static(id),
-                        },
-                    )
-                    .disabled(true),
-                    ItemSpec::Command {
-                        id, title, checked, ..
-                    } => MenuItem::Action {
-                        name: title.clone().into(),
-                        action: action_for(id),
-                        os_action: None,
-                        checked: checked.unwrap_or(false),
-                        disabled: false,
-                    },
-                }
-            }))
-        })
+        .map(|m| Menu::new(m.title.clone()).items(m.items.iter().map(menu_item)))
         .collect()
+}
+
+/// An unavailable item: an action with no handler, shown disabled.
+fn unavailable_item(title: &str) -> MenuItem {
+    MenuItem::action(
+        title.to_owned(),
+        UnavailableCommand {
+            id: SharedString::new_static(""),
+        },
+    )
+    .disabled(true)
+}
+
+fn menu_item(i: &ItemSpec) -> MenuItem {
+    match i {
+        ItemSpec::Separator => MenuItem::separator(),
+        ItemSpec::Heading(title) => unavailable_item(title),
+        ItemSpec::Submenu {
+            title,
+            enabled,
+            items,
+        } => MenuItem::submenu(
+            Menu::new(title.clone())
+                .items(items.iter().map(menu_item))
+                .disabled(!enabled),
+        ),
+        ItemSpec::Mixer { title, enabled, .. } if !enabled => unavailable_item(title),
+        ItemSpec::Mixer { op, title, .. } => {
+            MenuItem::action(title.clone(), MixerMenuItem { op: *op })
+        }
+        ItemSpec::Command {
+            id, title, enabled, ..
+        } if !enabled => MenuItem::action(
+            title.clone(),
+            UnavailableCommand {
+                id: SharedString::new_static(id),
+            },
+        )
+        .disabled(true),
+        ItemSpec::Command {
+            id, title, checked, ..
+        } => MenuItem::Action {
+            name: title.clone().into(),
+            action: action_for(id),
+            os_action: None,
+            checked: checked.unwrap_or(false),
+            disabled: false,
+        },
+    }
 }
 
 /// The menu model the platform menus show now.

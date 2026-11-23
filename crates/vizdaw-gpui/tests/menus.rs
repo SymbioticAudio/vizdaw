@@ -60,6 +60,8 @@ fn the_menu_model_follows_the_swift_order() {
                 "Editors",
                 "Track",
                 "Transport",
+                "Automation",
+                "Mixer",
                 "Window"
             ]
         );
@@ -70,7 +72,7 @@ fn the_menu_model_follows_the_swift_order() {
         .iter()
         .map(|i| match i {
             ItemSpec::Command { title, .. } => Some(title.as_str()),
-            ItemSpec::Separator => None,
+            _ => None,
         })
         .collect();
     assert_eq!(
@@ -90,7 +92,7 @@ fn the_menu_model_follows_the_swift_order() {
         .iter()
         .map(|i| match i {
             ItemSpec::Command { id, .. } => Some(*id),
-            ItemSpec::Separator => None,
+            _ => None,
         })
         .collect();
     assert_eq!(
@@ -112,7 +114,7 @@ fn the_menu_model_follows_the_swift_order() {
             .iter()
             .map(|i| match i {
                 ItemSpec::Command { id, .. } => Some(*id),
-                ItemSpec::Separator => None,
+                _ => None,
             })
             .collect()
     };
@@ -127,7 +129,7 @@ fn the_menu_model_follows_the_swift_order() {
             Some("ui.toggle_right"),
         ]
     );
-    assert_eq!(ids(7), [Some("window.mixer")]);
+    assert_eq!(ids(9), [Some("window.mixer")]);
     assert_eq!(
         ids(4),
         [
@@ -308,7 +310,7 @@ fn the_transport_menu_lists_every_transport_command() {
         .iter()
         .filter_map(|i| match i {
             ItemSpec::Command { id, .. } => Some(*id),
-            ItemSpec::Separator => None,
+            _ => None,
         })
         .collect();
     // Every transport command with a menu item, in registry order.
@@ -525,4 +527,147 @@ fn off_macos_the_command_keys_own_the_control_keys() {
         item(&m, "View", "Arrange View").2,
         menus::key_text("ui.view_arrange", &keymap, mac).as_deref()
     );
+}
+
+/// A document over the groups' mixer: Kick (2), Snare (3), Bass (4), Bus 1
+/// (5); VCA 1 (9) holds Snare; Kick and Snare are in Drums (7) and
+/// selected.
+fn groups_doc() -> DocumentModel {
+    use vizdaw_app::testing::{group_row, groups_fake, vca_row};
+    let f = groups_fake(
+        vec![vca_row(9, "VCA 1", &[3], 0.0)],
+        vec![group_row(7, "Drums", &[2, 3])],
+    );
+    let mut d = DocumentModel::new(Arc::new(f)).expect("a document");
+    assert!(d.ensure_mixer());
+    d.set_selected_strips([2, 3].into());
+    d
+}
+
+fn menu_of<'a>(m: &'a MenuModel, title: &str) -> &'a [ItemSpec] {
+    &m.menus
+        .iter()
+        .find(|s| s.title == title)
+        .unwrap_or_else(|| panic!("no menu {title}"))
+        .items
+}
+
+#[test]
+fn the_automation_menu_sets_the_selected_strips_and_suspends() {
+    let keymap = Keymap::default();
+    let mut doc = demo_doc();
+    let m = menu_model(Some(&doc), &keymap);
+    let items = menu_of(&m, "Automation");
+    assert_eq!(items[0], ItemSpec::Heading("Selected Strips".into()));
+    let modes: Vec<(&str, &str, bool)> = items[1..7]
+        .iter()
+        .map(|i| match i {
+            ItemSpec::Command {
+                id, title, enabled, ..
+            } => (*id, title.as_str(), *enabled),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        modes,
+        [
+            ("automation.mode.off", "Off", false),
+            ("automation.mode.read", "Read", false),
+            ("automation.mode.touch", "Touch", false),
+            ("automation.mode.latch", "Latch", false),
+            ("automation.mode.write", "Write", false),
+            ("automation.mode.trim", "Trim", false),
+        ],
+        "off without a strip selection"
+    );
+    assert_eq!(items[7], ItemSpec::Separator);
+    let ItemSpec::Command {
+        id,
+        title,
+        enabled,
+        checked,
+        ..
+    } = &items[8]
+    else {
+        panic!("{:?}", items[8])
+    };
+    assert_eq!(
+        (*id, title.as_str(), *enabled, *checked),
+        (
+            "automation.suspend",
+            "Suspend Automation",
+            true,
+            Some(automation_suspended_now())
+        )
+    );
+    assert_eq!(items.len(), 9);
+    doc.set_selected_strips([0].into());
+    let m = menu_model(Some(&doc), &keymap);
+    assert!(matches!(
+        menu_of(&m, "Automation")[4],
+        ItemSpec::Command { enabled: true, .. }
+    ));
+}
+
+fn automation_suspended_now() -> bool {
+    vizdaw_ffi::automation::automation_suspended()
+}
+
+#[test]
+fn the_mixer_menu_follows_the_selection_groups_and_vcas() {
+    use vizdaw_gpui::menus::MixerOp;
+    let keymap = Keymap::default();
+    let mut doc = groups_doc();
+    let m = menu_model(Some(&doc), &keymap);
+    let mixer = |op, title: &str, enabled| ItemSpec::Mixer {
+        op,
+        title: title.into(),
+        enabled,
+    };
+    assert_eq!(
+        menu_of(&m, "Mixer"),
+        [
+            // Both are grouped already: Group is off; Ungroup takes Drums.
+            mixer(MixerOp::Group, "Group", false),
+            mixer(MixerOp::Ungroup, "Ungroup", true),
+            ItemSpec::Separator,
+            mixer(MixerOp::NewVca, "New VCA", true),
+            ItemSpec::Submenu {
+                title: "Assign to VCA".into(),
+                enabled: true,
+                items: vec![
+                    mixer(MixerOp::Assign { vca: 9 }, "VCA 1", true),
+                    ItemSpec::Separator,
+                    mixer(MixerOp::NewVca, "New VCA", true),
+                ],
+            },
+            ItemSpec::Submenu {
+                title: "Remove from VCA".into(),
+                enabled: true,
+                items: vec![mixer(MixerOp::Unassign { vca: 9 }, "VCA 1", true)],
+            },
+        ]
+    );
+    // Bass alone: Group on, Ungroup off, VCA 1 takes it, none to remove.
+    doc.set_selected_strips([4].into());
+    let m = menu_of(&menu_model(Some(&doc), &keymap), "Mixer").to_vec();
+    assert_eq!(m[0], mixer(MixerOp::Group, "Group", true));
+    assert_eq!(m[1], mixer(MixerOp::Ungroup, "Ungroup", false));
+    assert!(matches!(&m[5], ItemSpec::Submenu { enabled: false, items, .. } if items.is_empty()));
+    // Snare alone: VCA 1 holds it, so Assign's VCA 1 is off.
+    doc.set_selected_strips([3].into());
+    let m = menu_of(&menu_model(Some(&doc), &keymap), "Mixer").to_vec();
+    let ItemSpec::Submenu { items, .. } = &m[4] else {
+        panic!()
+    };
+    assert_eq!(items[0], mixer(MixerOp::Assign { vca: 9 }, "VCA 1", false));
+    // Nothing selected: Assign to VCA ▸ is off; New VCA stays on.
+    doc.set_selected_strips(Default::default());
+    let m = menu_of(&menu_model(Some(&doc), &keymap), "Mixer").to_vec();
+    assert!(matches!(&m[4], ItemSpec::Submenu { enabled: false, .. }));
+    assert_eq!(m[3], mixer(MixerOp::NewVca, "New VCA", true));
+    // No document: all off.
+    let m = menu_of(&menu_model(None, &keymap), "Mixer").to_vec();
+    assert_eq!(m[3], mixer(MixerOp::NewVca, "New VCA", false));
+    assert_eq!(m[0], mixer(MixerOp::Group, "Group", false));
 }

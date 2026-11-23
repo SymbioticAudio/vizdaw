@@ -23,11 +23,17 @@ pub struct MenuBar {
     model: MenuModel,
     /// The index of the menu whose list is open.
     open: Option<usize>,
+    /// The row of the open list whose submenu is open.
+    sub: Option<usize>,
 }
 
 impl MenuBar {
     pub fn new(model: MenuModel) -> Self {
-        MenuBar { model, open: None }
+        MenuBar {
+            model,
+            open: None,
+            sub: None,
+        }
     }
 
     pub fn model(&self) -> &MenuModel {
@@ -38,6 +44,7 @@ impl MenuBar {
     pub fn set_model(&mut self, model: MenuModel) {
         if self.open.is_some_and(|i| i >= model.menus.len()) {
             self.open = None;
+            self.sub = None;
         }
         self.model = model;
     }
@@ -52,10 +59,12 @@ impl MenuBar {
     /// Opens menu `index`, or closes the open one with `None`.
     pub fn set_open(&mut self, index: Option<usize>) {
         self.open = index.filter(|i| *i < self.model.menus.len());
+        self.sub = None;
     }
 
     /// Closes the open list; false when none was open.
     pub fn close(&mut self) -> bool {
+        self.sub = None;
         self.open.take().is_some()
     }
 
@@ -133,7 +142,8 @@ impl MenuBar {
                 d.child(
                     div().absolute().top_full().left_0().child(
                         deferred(anchored().snap_to_window().child(Self::list(
-                            spec,
+                            &spec.items,
+                            Some(self.sub),
                             &mut scope.container(),
                             cx,
                         )))
@@ -144,8 +154,11 @@ impl MenuBar {
             .into_any_element()
     }
 
+    /// A list of `items`; `sub` is the row whose submenu is open (`None`:
+    /// a submenu's own list, whose rows open nothing further).
     fn list(
-        spec: &MenuSpec,
+        items: &[ItemSpec],
+        sub: Option<Option<usize>>,
         scope: &mut RegistryScope,
         cx: &mut Context<DocumentWindow>,
     ) -> AnyElement {
@@ -161,9 +174,12 @@ impl MenuBar {
             .border_color(rgb(BORDER))
             .rounded_md()
             .shadow_md();
-        for (row, item) in spec.items.iter().enumerate() {
+        for (row, item) in items.iter().enumerate() {
             list = list.child(match item {
                 ItemSpec::Separator => div().h(px(1.)).my_1().bg(rgb(BORDER)).into_any_element(),
+                ItemSpec::Heading(title) => {
+                    Self::row(row, title, None, false, None, scope).into_any_element()
+                }
                 ItemSpec::Command {
                     id,
                     title,
@@ -171,58 +187,121 @@ impl MenuBar {
                     enabled,
                     checked,
                 } => {
-                    let (id, enabled, checked) = (*id, *enabled, *checked);
-                    let mark = match checked {
-                        Some(true) => "\u{2713} ",
-                        Some(false) => "    ",
-                        None => "",
-                    };
-                    div()
-                        .id(("menuitem", row))
-                        .relative()
-                        .flex()
-                        .flex_row()
-                        .justify_between()
-                        .gap_4()
-                        .px_3()
-                        .py_1()
-                        .text_color(rgb(if enabled {
-                            colors::TEXT
-                        } else {
-                            colors::DISABLED
-                        }))
-                        .child(format!("{mark}{title}"))
-                        .child(
-                            div()
-                                .text_color(rgb(if enabled {
-                                    colors::DIM
-                                } else {
-                                    colors::DISABLED
-                                }))
-                                .child(keys.clone().unwrap_or_default()),
-                        )
-                        .child(scope.control_with(
-                            "menuitem",
-                            title,
-                            enabled,
-                            checked.map(|on| if on { "on" } else { "off" }),
-                            false,
-                        ))
-                        .when(enabled, |d| {
-                            d.cursor_pointer()
-                                .hover(|s| s.bg(rgb(colors::BUTTON)))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    if let Some(bar) = this.menu_bar_mut() {
-                                        bar.close();
-                                    }
-                                    window.dispatch_action(menus::action_for(id), cx);
-                                    cx.notify();
-                                }))
+                    let id = *id;
+                    Self::row(row, title, keys.clone(), *enabled, *checked, scope)
+                        .when(*enabled, |d| {
+                            d.on_click(cx.listener(move |this, _, window, cx| {
+                                if let Some(bar) = this.menu_bar_mut() {
+                                    bar.close();
+                                }
+                                window.dispatch_action(menus::action_for(id), cx);
+                                cx.notify();
+                            }))
                         })
                         .into_any_element()
+                }
+                ItemSpec::Mixer { op, title, enabled } => {
+                    let op = *op;
+                    Self::row(row, title, None, *enabled, None, scope)
+                        .when(*enabled, |d| {
+                            d.on_click(cx.listener(move |this, _, window, cx| {
+                                if let Some(bar) = this.menu_bar_mut() {
+                                    bar.close();
+                                }
+                                window.dispatch_action(Box::new(menus::MixerMenuItem { op }), cx);
+                                cx.notify();
+                            }))
+                        })
+                        .into_any_element()
+                }
+                ItemSpec::Submenu {
+                    title,
+                    enabled,
+                    items,
+                } => {
+                    let open = *enabled && sub == Some(Some(row));
+                    let opens = *enabled && sub.is_some();
+                    Self::row(
+                        row,
+                        &format!("{title} \u{25B8}"),
+                        None,
+                        *enabled,
+                        None,
+                        scope,
+                    )
+                    .when(opens, |d| {
+                        d.on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(bar) = this.menu_bar_mut() {
+                                bar.sub = (bar.sub != Some(row)).then_some(row);
+                            }
+                            cx.notify();
+                        }))
+                    })
+                    .when(open, |d| {
+                        d.child(div().absolute().top_0().left_full().child(Self::list(
+                            items,
+                            None,
+                            &mut scope.container(),
+                            cx,
+                        )))
+                    })
+                    .into_any_element()
                 }
             });
         }
         list.into_any_element()
+    }
+
+    /// One row: its title (a check mark for a toggle), its keys, recorded
+    /// as a `menuitem` (a toggle's value `on` / `off`). The record keeps
+    /// the plain title.
+    fn row(
+        row: usize,
+        title: &str,
+        keys: Option<String>,
+        enabled: bool,
+        checked: Option<bool>,
+        scope: &mut RegistryScope,
+    ) -> gpui::Stateful<gpui::Div> {
+        let mark = match checked {
+            Some(true) => "\u{2713} ",
+            Some(false) => "    ",
+            None => "",
+        };
+        let label = title.strip_suffix(" \u{25B8}").unwrap_or(title);
+        div()
+            .id(("menuitem", row))
+            .relative()
+            .flex()
+            .flex_row()
+            .justify_between()
+            .gap_4()
+            .px_3()
+            .py_1()
+            .text_color(rgb(if enabled {
+                colors::TEXT
+            } else {
+                colors::DISABLED
+            }))
+            .child(format!("{mark}{title}"))
+            .child(
+                div()
+                    .text_color(rgb(if enabled {
+                        colors::DIM
+                    } else {
+                        colors::DISABLED
+                    }))
+                    .child(keys.unwrap_or_default()),
+            )
+            .child(scope.control_with(
+                "menuitem",
+                label,
+                enabled,
+                checked.map(|on| if on { "on" } else { "off" }),
+                false,
+            ))
+            .when(enabled, |d| {
+                d.cursor_pointer().hover(|s| s.bg(rgb(colors::BUTTON)))
+            })
     }
 }

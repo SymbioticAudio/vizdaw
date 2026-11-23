@@ -145,3 +145,35 @@ fn each_row_is_as_tall_as_the_tallest_strips() {
         44. + 22. + 58. + 80. + 3. * StripGrid::ROW_GAP
     );
 }
+
+#[test]
+fn inserts_and_sends_grow_with_their_count() {
+    let mut audio = strip_row(5, "Audio 1", StripKindRow::AudioPath { path: 1 });
+    let plain = rows_of(&audio, false);
+    assert_eq!(plain[&K::Inserts], RowHeights::INSERTS);
+    assert_eq!(plain[&K::Sends], RowHeights::SENDS);
+    assert_eq!(plain[&K::Eq], 24.0, "the EQ face's 24-point hit");
+    audio.inserts = vec![
+        vizdaw_app::testing::slot_row(51, "Comp"),
+        vizdaw_app::testing::slot_row(52, "Verb"),
+    ];
+    audio.sends = vec![
+        vizdaw_ffi::mixer::SendRow {
+            target: 2,
+            level_db: 0.0,
+            pre_fader: false,
+            enabled: true,
+        };
+        3
+    ];
+    let rows = rows_of(&audio, false);
+    // The heading (14), two slots (20) and the "+" (24), 2 apart.
+    assert_eq!(rows[&K::Inserts], 14.0 + 2.0 * 20.0 + 24.0 + 3.0 * 2.0);
+    // The heading, three sends (name 14, gap 2, knob 28) and the menu.
+    assert_eq!(rows[&K::Sends], 14.0 + 3.0 * 44.0 + 24.0 + 4.0 * 2.0);
+    // Every strip takes the tallest strip's rows: the faders line up.
+    let synth = strip_row(1, "Synth", StripKindRow::BuiltinSynth);
+    let g = StripGrid::new([&rows, &rows_of(&synth, false)], 700.);
+    assert_eq!(g.rows[&K::Inserts], rows[&K::Inserts]);
+    assert_eq!(g.rows[&K::Sends], rows[&K::Sends]);
+}
