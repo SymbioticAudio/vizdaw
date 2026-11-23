@@ -925,23 +925,33 @@ fn gpui_blocks_select_and_open_in_the_list() {
     app.quit();
 }
 
-/// The children of the first node labelled exactly `label` (a group).
+/// A node's tree path: its id before the `:` (`ui.tree` is flat; a
+/// child's path extends its container's, "4.3.2" → "4.3.2.0").
+fn path_of(n: &Value) -> Option<&str> {
+    n["id"].as_str()?.split(':').next()
+}
+
+/// Whether node `n` lies inside the container at `path`.
+fn under(n: &Value, path: &str) -> bool {
+    path_of(n).is_some_and(|p| p.starts_with(&format!("{path}.")))
+}
+
+/// The nodes inside the first node labelled exactly `label` (a group),
+/// as a flat list.
 fn children_of(nodes: &Value, label: &str) -> Option<Value> {
-    find_node(nodes, label).map(|n| n["children"].clone())
+    let group = find_node(nodes, label)?;
+    let path = path_of(&group)?.to_owned();
+    let inside = nodes.as_array()?.iter().filter(|n| under(n, &path));
+    Some(Value::Array(inside.cloned().collect()))
 }
 
 /// The first node labelled exactly `label` outside the group labelled
 /// `outside` (the arrangement's tool bar, not the roll's).
 fn find_node_outside(nodes: &Value, label: &str, outside: &str) -> Option<Value> {
-    nodes.as_array().into_iter().flatten().find_map(|n| {
-        let l = n["label"].as_str();
-        if l == Some(outside) {
-            None
-        } else if l == Some(label) {
-            Some(n.clone())
-        } else {
-            find_node_outside(&n["children"], label, outside)
-        }
+    let excluded = find_node(nodes, outside).and_then(|g| path_of(&g).map(str::to_owned));
+    nodes.as_array()?.iter().find_map(|n| {
+        let inside = excluded.as_deref().is_some_and(|p| under(n, p));
+        (!inside && n["label"].as_str() == Some(label)).then(|| n.clone())
     })
 }
 
