@@ -4,7 +4,7 @@
 mod block_drag;
 mod editing;
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -34,7 +34,7 @@ pub struct DocumentModel {
     /// The error showing, if any.
     pub alert: Option<AlertItem>,
     selected_seq: Option<u64>,
-    lanes: Vec<LaneRow>,
+    lanes: Arc<[LaneRow]>,
     /// What the lanes were fetched for (Swift: `LanesKey`).
     lanes_key: Option<(u64, Option<u64>)>,
     lanes_fetches: u64,
@@ -54,8 +54,10 @@ pub struct DocumentModel {
     infos: Vec<(u64, OnceLock<Option<SequenceInfo>>)>,
     /// The last good transport read; the transport model feeds it too.
     transport: Arc<Mutex<TransportState>>,
-    /// Each shown track's blocks and events, read once per lanes fetch.
+    /// Each shown track's blocks, read once per lanes fetch.
     lane_reads: Vec<(u64, LaneReads)>,
+    /// Any sequence's tracks and any track's events, per snapshot version.
+    reads: Mutex<Reads>,
     /// The app's list preferences (default filter, columns), as last given.
     pub(crate) list_prefs: crate::list::ListPrefs,
     /// The list table has the keyboard (Swift `EditorModel.listFocused`).
@@ -66,7 +68,49 @@ pub struct DocumentModel {
 #[derive(Default)]
 struct LaneReads {
     blocks: OnceLock<Arc<[BlockRow]>>,
-    events: OnceLock<Arc<[EventRow]>>,
+}
+
+/// The `(seq, lane)` reads, each with the snapshot version it was read
+/// at: an older one is read again, and is the answer while the core is
+/// busy.
+#[derive(Default)]
+struct Reads {
+    rows: HashMap<u64, Versioned<LaneRow>>,
+    events: HashMap<(u64, u64), Versioned<EventRow>>,
+}
+
+/// Rows and the snapshot version they were read at.
+type Versioned<T> = (u64, Arc<[T]>);
+
+/// `cache[key]` at `version`, else read by `read`: a busy core answers
+/// with the older rows (or none), another refusal with none, and both
+/// are read again next time.
+fn read_at<K: std::hash::Hash + Eq, T>(
+    cache: &mut HashMap<K, Versioned<T>>,
+    key: K,
+    version: u64,
+    read: impl FnOnce() -> Result<Vec<T>, VizError>,
+) -> Arc<[T]> {
+    if let Some((v, rows)) = cache.get(&key)
+        && *v == version
+    {
+        return rows.clone();
+    }
+    match read() {
+        Ok(rows) => {
+            let rows: Arc<[T]> = rows.into();
+            cache.insert(key, (version, rows.clone()));
+            rows
+        }
+        Err(VizError::Busy { .. }) => cache
+            .get(&key)
+            .map_or_else(|| Arc::from([]), |(_, r)| r.clone()),
+        Err(_) => Arc::from([]),
+    }
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl DocumentModel {
@@ -84,7 +128,7 @@ impl DocumentModel {
             selected_seq: first_sequence(&snapshot),
             snapshot,
             alert: None,
-            lanes: vec![],
+            lanes: Arc::from([]),
             lanes_key: None,
             lanes_fetches: 0,
             selected_events: selection.events.iter().copied().collect(),
@@ -97,6 +141,7 @@ impl DocumentModel {
             infos: vec![],
             transport: Arc::new(Mutex::new(transport)),
             lane_reads: vec![],
+            reads: Mutex::new(Reads::default()),
             list_prefs: crate::list::ListPrefs::default(),
             list_focused: false,
         };
@@ -118,6 +163,15 @@ impl DocumentModel {
             self.selected_seq = first_sequence(&s);
         }
         self.editor.prune(&s);
+        {
+            let reads = self.reads.get_mut().unwrap_or_else(|e| e.into_inner());
+            reads
+                .rows
+                .retain(|seq, _| s.sequences.iter().any(|q| q.id == *seq));
+            reads.events.retain(|(seq, lane), _| {
+                s.lane_revs.iter().any(|r| r.seq == *seq && r.lane == *lane)
+            });
+        }
         self.snapshot = s;
         self.reset_infos();
         self.refresh_lanes();
@@ -275,13 +329,31 @@ impl DocumentModel {
         })
     }
 
-    /// Track `lane`'s events in time order, read once per snapshot; none
-    /// while the core cannot answer.
-    pub fn lane_events(&self, lane: u64) -> Arc<[EventRow]> {
-        let Some((seq, reads)) = self.reads(lane) else {
+    /// Track `lane` (of the shown sequence)'s events in time order: see
+    /// [`DocumentModel::lane_events`]. None for a track it does not have.
+    pub fn shown_lane_events(&self, lane: u64) -> Arc<[EventRow]> {
+        let Some((seq, _)) = self.reads(lane) else {
             return Arc::from([]);
         };
-        read_once(&reads.events, || {
+        self.lane_events(seq, lane)
+    }
+
+    /// Sequence `seq`'s tracks (any sequence, not only the shown one),
+    /// read once per snapshot version; none while the core cannot answer
+    /// (a busy core: the last ones).
+    pub fn lane_rows(&self, seq: u64) -> Arc<[LaneRow]> {
+        let version = self.snapshot.version;
+        read_at(&mut lock(&self.reads).rows, seq, version, || {
+            self.session.lanes(seq)
+        })
+    }
+
+    /// Track `lane` of `seq`'s events in time order, read once per
+    /// snapshot version; none while the core cannot answer (a busy core:
+    /// the last ones).
+    pub fn lane_events(&self, seq: u64, lane: u64) -> Arc<[EventRow]> {
+        let version = self.snapshot.version;
+        read_at(&mut lock(&self.reads).events, (seq, lane), version, || {
             self.session.lane_events(seq, lane).map(|e| e.events)
         })
     }
@@ -551,14 +623,20 @@ impl DocumentModel {
         self.lanes_key = Some(key);
         self.lane_reads.clear();
         let Some(seq) = self.selected_seq else {
-            self.lanes = vec![];
+            self.lanes = Arc::from([]);
             return;
         };
         self.lanes_fetches += 1;
         match self.session.lanes(seq) {
-            Ok(rows) => self.lanes = rows,
+            Ok(rows) => {
+                self.lanes = rows.into();
+                let version = self.snapshot.version;
+                lock(&self.reads)
+                    .rows
+                    .insert(seq, (version, self.lanes.clone()));
+            }
             Err(e) => {
-                self.lanes = vec![];
+                self.lanes = Arc::from([]);
                 self.alert = Some(AlertItem::from_error(&e, "Tracks Unavailable"));
             }
         }

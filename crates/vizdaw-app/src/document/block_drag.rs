@@ -99,7 +99,7 @@ impl DocumentModel {
             block_start: pressed.start,
             events: BlockDrag::events(pressed, &blocks, &self.selected_events),
             rows: if copy {
-                self.lane_events(lane).to_vec()
+                self.shown_lane_events(lane).to_vec()
             } else {
                 vec![]
             },

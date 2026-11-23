@@ -192,6 +192,20 @@ impl DocumentModel {
         }
     }
 
+    /// A double-clicked events block of track `lane` (of the shown
+    /// sequence): the detail opens on it in the last-used editor (the
+    /// Piano Roll at first), which stays the last-used one.
+    pub fn open_block_detail(&mut self, lane: u64, block: &BlockRow) {
+        let Some(seq) = self.selected_seq else { return };
+        let target = EditorTarget::Block {
+            seq,
+            lane,
+            start: block.start,
+            end: block.end,
+        };
+        self.open_detail(target, None);
+    }
+
     pub fn close_detail(&mut self) {
         self.editor.close_detail();
     }
@@ -228,11 +242,7 @@ impl DocumentModel {
                 .find(|l| l.id == lane)
                 .map_or_else(|| "Track".to_owned(), |l| l.name.clone())
         };
-        let lane_name = if Some(seq) == self.selected_seq {
-            name(&self.lanes)
-        } else {
-            name(&self.session.lanes(seq).unwrap_or_default())
-        };
+        let lane_name = name(&self.lane_rows(seq));
         let EditorTarget::Block { start, end, .. } = *t else {
             return format!("{seq_name} \u{203a} {lane_name}");
         };

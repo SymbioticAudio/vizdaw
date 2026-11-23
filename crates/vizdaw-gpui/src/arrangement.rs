@@ -746,7 +746,7 @@ impl ArrangementState {
                     index,
                     name: l.name.clone(),
                     events: if sketched {
-                        doc.lane_events(l.id)
+                        doc.shown_lane_events(l.id)
                     } else {
                         Arc::from([])
                     },

@@ -2,8 +2,8 @@
 //! `WindowLayout.swift`): stored by the session in the package's
 //! `ui.json`, written on Save, never an undo step. Decoding is tolerant (a
 //! missing or malformed field keeps its default); writing merges into the
-//! JSON already there, so keys this app does not model (piano roll, torn
-//! windows, controllers, …) survive.
+//! JSON already there, so keys this app does not model (torn windows,
+//! controllers, …) survive.
 
 use std::ops::RangeInclusive;
 
@@ -15,6 +15,7 @@ use vizdaw_ffi::blocks::BlockRule;
 use super::detail::{DetailEditorKind, DetailState};
 use super::snap::Snap;
 use crate::arrangement::PPQ;
+use crate::piano_roll::PianoRollSettings;
 
 /// Light drawing mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -297,6 +298,8 @@ pub struct EditorLayout {
     pub follow: bool,
     /// Per-view pane setups and the window frame.
     pub views: ViewLayouts,
+    /// The piano roll's view settings (`pianoRoll`).
+    pub piano_roll: PianoRollSettings,
 }
 
 impl Default for EditorLayout {
@@ -311,6 +314,7 @@ impl Default for EditorLayout {
             ticks_per_point: 384.,
             follow: true,
             views: ViewLayouts::default(),
+            piano_roll: PianoRollSettings::default(),
         }
     }
 }
@@ -384,6 +388,9 @@ impl EditorLayout {
             views: obj
                 .get("views")
                 .map_or_else(ViewLayouts::default, ViewLayouts::decode),
+            piano_roll: obj
+                .get("pianoRoll")
+                .map_or_else(PianoRollSettings::default, PianoRollSettings::decode),
         }
     }
 
@@ -400,6 +407,7 @@ impl EditorLayout {
             ("ticksPerPoint", Some(Value::from(self.ticks_per_point))),
             ("follow", Some(Value::Bool(self.follow))),
             ("views", Some(to_value(&self.views))),
+            ("pianoRoll", Some(to_value(&self.piano_roll))),
         ]
     }
 
@@ -438,7 +446,7 @@ impl EditorLayout {
 /// unmodelled fields ride in `DetailState::extra`) are replaced whole.
 fn merge_key(key: &str, old: Option<&Value>, new: Value) -> Value {
     match key {
-        "snap" => merge_struct(old, new, &[]),
+        "snap" | "pianoRoll" => merge_struct(old, new, &[]),
         "views" => {
             let mut views = merge_struct(old, new, &["frame"]);
             for main in ["arrange", "mix"] {

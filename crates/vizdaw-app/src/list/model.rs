@@ -10,10 +10,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 use vizdaw_ffi::edit::LaneRef;
-use vizdaw_ffi::events::EventRow;
 use vizdaw_ffi::mixer::DestRow;
 use vizdaw_ffi::selection::SelectionRow;
-use vizdaw_ffi::snapshot::LaneRow;
 
 use super::edit::{ListChange, ListDelete, ListEdit, ListInsert};
 use super::rows::{
@@ -240,28 +238,10 @@ impl DocumentModel {
         Some(built)
     }
 
-    fn list_lane_rows(&self, seq: u64) -> Vec<LaneRow> {
-        if self.selected_seq() == Some(seq) {
-            self.lanes().to_vec()
-        } else {
-            self.session.lanes(seq).unwrap_or_default()
-        }
-    }
-
-    fn list_lane_events(&self, seq: u64, lane: u64) -> Arc<[EventRow]> {
-        if self.selected_seq() == Some(seq) {
-            self.lane_events(lane)
-        } else {
-            self.session
-                .lane_events(seq, lane)
-                .map_or_else(|_| Arc::from([]), |e| e.events.into())
-        }
-    }
-
     fn build_list(&self, key: RowsKey) -> Built {
         let t = key.target;
         let seq = t.seq();
-        let lane_rows = self.list_lane_rows(seq);
+        let lane_rows = self.lane_rows(seq);
         let keys: Vec<LaneRef> = match t.lane() {
             Some(lane) => vec![LaneRef { seq, lane }],
             None => lane_rows
@@ -279,7 +259,7 @@ impl DocumentModel {
                 .iter()
                 .map(|k| ListLane {
                     key: *k,
-                    events: self.list_lane_events(seq, k.lane),
+                    events: self.lane_events(seq, k.lane),
                     dest: lane_rows
                         .iter()
                         .find(|l| l.id == k.lane)
@@ -419,7 +399,7 @@ impl DocumentModel {
         let lane = match t.lane() {
             Some(lane) => Some(LaneRef { seq, lane }),
             None => self.list_cursor_row().and_then(|r| r.lane()).or_else(|| {
-                self.list_lane_rows(seq)
+                self.lane_rows(seq)
                     .first()
                     .map(|l| LaneRef { seq, lane: l.id })
             }),

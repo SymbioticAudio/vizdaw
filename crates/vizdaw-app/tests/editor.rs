@@ -425,7 +425,6 @@ fn saving_keeps_ui_json_keys_this_app_does_not_know() {
     let written: serde_json::Value = serde_json::from_str(&text).unwrap();
     for key in [
         "version",
-        "pianoRoll",
         "windows",
         "controllers",
         "sequenceOrder",
@@ -433,6 +432,10 @@ fn saving_keeps_ui_json_keys_this_app_does_not_know() {
     ] {
         assert_eq!(written[key], original[key], "{key}");
     }
+    // The piano roll's settings are modelled now: its unknown keys stay.
+    assert_eq!(written["pianoRoll"]["velocityLane"], true);
+    assert_eq!(written["pianoRoll"]["keyWidth"], 40);
+    assert_eq!(written["pianoRoll"]["rowHeight"], 10.0);
     assert_eq!(written["detail"]["lanes"], original["detail"]["lanes"]);
     assert_eq!(
         written["detail"]["stripRows"],
@@ -458,7 +461,7 @@ fn saving_keeps_ui_json_keys_this_app_does_not_know() {
     assert_eq!(m.save(), vizdaw_app::SaveAction::Saved);
     let written: serde_json::Value = serde_json::from_str(&f.layout().unwrap()).unwrap();
     assert!(written.get("detail").is_none());
-    assert_eq!(written["pianoRoll"], original["pianoRoll"]);
+    assert_eq!(written["pianoRoll"]["keyWidth"], 40);
 }
 
 #[test]

@@ -64,6 +64,8 @@ pub struct EditorModel {
     pub(crate) ui_json: Option<String>,
     /// The detail pane's list (cursor, last inserted kind, cached rows).
     pub(crate) list: crate::list::ListModel,
+    /// The detail pane's piano roll (edit lane, reveal, cached notes).
+    pub(crate) roll: crate::piano_roll::PianoRollModel,
 }
 
 impl EditorModel {
@@ -75,6 +77,7 @@ impl EditorModel {
             gesture: None,
             ui_json: json.map(String::from),
             list: crate::list::ListModel::default(),
+            roll: crate::piano_roll::PianoRollModel::default(),
         }
     }
 
@@ -98,8 +101,10 @@ impl EditorModel {
     /// Shows `target` in the detail pane in `kind`, else the last-used
     /// editor; the current view's bottom pane shows the editor. The piano
     /// roll's extra lanes stay only while the target is the same; the
-    /// list filter and the other saved fields stay.
+    /// list filter and the other saved fields stay. A pending piano roll
+    /// reveal is dropped.
     pub fn open_detail(&mut self, target: EditorTarget, kind: Option<DetailEditorKind>) {
+        self.roll.reveal = None;
         let l = &mut self.layout;
         let bottom = &mut l.views.current_mut().bottom;
         bottom.shown = true;
@@ -114,7 +119,7 @@ impl EditorModel {
             next.list_filter = old.list_filter;
             next.extra = old.extra;
             if old.target != target {
-                next.extra.remove("lanes");
+                next.set_lanes(None);
             }
         }
         l.detail = Some(next);
@@ -133,18 +138,32 @@ impl EditorModel {
             .map_or("none", |d| d.kind.name())
     }
 
-    /// Drops the detail when its sequence or track is gone from `s`.
+    /// Drops the detail when its sequence or track is gone from `s`; the
+    /// piano roll's shown tracks that are gone leave it silently (none
+    /// left is none).
     pub fn prune(&mut self, s: &DocSnapshot) {
-        let Some(d) = &self.layout.detail else { return };
+        let Some(d) = &mut self.layout.detail else {
+            return;
+        };
         let t = d.target;
-        let seq_gone = !s.sequences.iter().any(|q| q.id == t.seq());
-        let lane_gone = t.lane().is_some_and(|lane| {
-            !s.lane_revs
+        let alive = |lane: u64| {
+            s.lane_revs
                 .iter()
                 .any(|r| r.seq == t.seq() && r.lane == lane)
-        });
+        };
+        let seq_gone = !s.sequences.iter().any(|q| q.id == t.seq());
+        let lane_gone = t.lane().is_some_and(|lane| !alive(lane));
         if seq_gone || lane_gone {
             self.layout.detail = None;
+            return;
+        }
+        if let Some(extra) = d.lanes() {
+            // As Swift: an empty list (a sequence showing none) becomes
+            // the default set too.
+            let kept: Vec<u64> = extra.iter().copied().filter(|&l| alive(l)).collect();
+            if kept.is_empty() || kept.len() != extra.len() {
+                d.set_lanes((!kept.is_empty()).then_some(kept));
+            }
         }
     }
 }

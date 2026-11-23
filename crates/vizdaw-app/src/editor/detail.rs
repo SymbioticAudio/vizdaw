@@ -118,4 +118,24 @@ impl DetailState {
             extra: Map::new(),
         }
     }
+
+    /// The piano roll's shown tracks (`lanes`): besides a track target's
+    /// own, or exactly those of a sequence target; `None` (also when
+    /// malformed) is the default set.
+    pub fn lanes(&self) -> Option<Vec<u64>> {
+        Vec::<u64>::deserialize(self.extra.get("lanes")?).ok()
+    }
+
+    /// Sets the shown tracks; `None` leaves the key out (as Swift omits a
+    /// nil optional).
+    pub fn set_lanes(&mut self, lanes: Option<Vec<u64>>) {
+        match lanes {
+            Some(l) => {
+                self.extra.insert("lanes".into(), Value::from(l));
+            }
+            None => {
+                self.extra.remove("lanes");
+            }
+        }
+    }
 }

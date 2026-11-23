@@ -383,8 +383,11 @@ fn reads_of_one_snapshot_share_their_rows() {
     f.set_events(3, 31, vec![EventRow::blank(1, 0, EventKindRow::Note)]);
     let m = DocumentModel::new(f.clone()).unwrap();
     assert!(Arc::ptr_eq(&m.blocks(31), &m.blocks(31)));
-    assert!(Arc::ptr_eq(&m.lane_events(31), &m.lane_events(31)));
-    assert_eq!(m.lane_events(31).len(), 1);
+    assert!(Arc::ptr_eq(
+        &m.shown_lane_events(31),
+        &m.shown_lane_events(31)
+    ));
+    assert_eq!(m.shown_lane_events(31).len(), 1);
 }
 
 #[test]

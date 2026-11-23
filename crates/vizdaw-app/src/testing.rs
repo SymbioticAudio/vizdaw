@@ -63,6 +63,8 @@ struct State {
     /// Errors a call answers with once each, first, by call name.
     next_errors: HashMap<String, VecDeque<VizError>>,
     dests: Vec<DestRow>,
+    lanes_reads: usize,
+    event_reads: usize,
 }
 
 /// What the session keeps of a selection it is given (after dropping
@@ -152,6 +154,8 @@ impl FakeSession {
             call_errors: HashMap::new(),
             next_errors: HashMap::new(),
             dests: vec![],
+            lanes_reads: 0,
+            event_reads: 0,
         }))
     }
 
@@ -429,6 +433,16 @@ impl FakeSession {
         self.st().dests = rows;
     }
 
+    /// `lanes` calls.
+    pub fn lanes_reads(&self) -> usize {
+        self.st().lanes_reads
+    }
+
+    /// `lane_events` calls.
+    pub fn event_reads(&self) -> usize {
+        self.st().event_reads
+    }
+
     /// Every `edit_all(label, cmds)`, in order.
     pub fn edit_alls(&self) -> Vec<(String, Vec<EditCommand>)> {
         self.st().edit_alls.clone()
@@ -548,7 +562,9 @@ impl DocSession for FakeSession {
         Ok(n)
     }
     fn lanes(&self, seq: u64) -> Result<Vec<LaneRow>, VizError> {
-        Ok(self.st().lanes.get(&seq).cloned().unwrap_or_default())
+        let mut s = self.st();
+        s.lanes_reads += 1;
+        Ok(s.lanes.get(&seq).cloned().unwrap_or_default())
     }
     fn new_track(
         &self,
@@ -761,7 +777,8 @@ impl DocSession for FakeSession {
         Ok(s.blocks.get(&(seq, lane)).cloned().unwrap_or_default())
     }
     fn lane_events(&self, seq: u64, lane: u64) -> Result<LaneEvents, VizError> {
-        let s = self.st();
+        let mut s = self.st();
+        s.event_reads += 1;
         Ok(LaneEvents {
             seq,
             lane,

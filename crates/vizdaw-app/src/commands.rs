@@ -33,6 +33,7 @@ pub const DOCUMENT_COMMANDS: &[&str] = &[
 /// channel route them once their views exist.
 pub const EDITOR_COMMANDS: &[&str] = &[
     "editors.snap",
+    "editors.piano_roll",
     "editors.list",
     "editors.close_detail",
     "editors.insert_event",
@@ -448,6 +449,7 @@ fn run_editor(
             let on = on_flag(id, args)?;
             doc.update_layout(|l| l.snap.enabled = on.unwrap_or(!l.snap.enabled));
         }
+        "editors.piano_roll" => doc.show_detail(DetailEditorKind::PianoRoll),
         "editors.list" => doc.show_detail(DetailEditorKind::List),
         "editors.insert_event" => {
             if !insert_event_ready(doc) {
