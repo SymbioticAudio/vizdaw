@@ -24,10 +24,11 @@ struct Setup {
     cx: VisualTestContext,
 }
 
-/// The app with one demo document window over `fake`.
-/// A window the whole standard bar fits.
-const WIDE: f32 = 1240.;
+/// The default window's width (Swift's 1440): the whole standard bar
+/// fits.
+const WIDE: f32 = 1440.;
 
+/// The app with one demo document window over `fake`.
 fn setup(cx: &mut TestAppContext, fake: FakeSession) -> Setup {
     let fake = Arc::new(fake);
     let shared = fake.clone();
@@ -42,9 +43,6 @@ fn setup(cx: &mut TestAppContext, fake: FakeSession) -> Setup {
         (app, window)
     });
     let vcx = VisualTestContext::from_window(window.into(), cx);
-    // Wide enough for the standard bar, its Main View and pane toggles
-    // included (slice 6a): nothing folds.
-    vcx.simulate_resize(size(px(WIDE), px(640.)));
     vcx.run_until_parked();
     Setup {
         fake,

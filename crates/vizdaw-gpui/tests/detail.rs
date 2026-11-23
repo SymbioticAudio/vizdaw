@@ -137,6 +137,25 @@ impl Setup {
         self.cx.run_until_parked();
     }
 
+    /// The bottom pane's picker (not the transport bar's toggle, whose
+    /// value is on or off).
+    fn picker(&mut self) -> Element {
+        self.elements()
+            .into_iter()
+            .find(|e| {
+                e.role == "button"
+                    && e.label == PANE
+                    && !matches!(e.value.as_deref(), Some("on" | "off"))
+            })
+            .expect("the bottom pane's picker")
+    }
+
+    fn click_picker(&mut self) {
+        let at = self.picker().bounds.center();
+        self.cx.simulate_click(at, Modifiers::none());
+        self.cx.run_until_parked();
+    }
+
     fn click(&mut self, role: &str, label: &str) {
         let at = self.element(role, label).bounds.center();
         self.cx.simulate_click(at, Modifiers::none());
@@ -219,12 +238,12 @@ fn editors_list_opens_the_list_on_the_shown_sequence(cx: &mut TestAppContext) {
     assert!(s.find("table", LIST_SLOT).is_some(), "the List slot");
     assert!(s.find("button", CLOSE).is_some());
     assert!(s.find("text", EMPTY).is_none());
-    assert_eq!(s.element("button", PANE).value.as_deref(), Some("List"));
+    assert_eq!(s.picker().value.as_deref(), Some("List"));
     assert!(s.menu_item("Editors", CLOSE).0);
 
     // The pane's picker lists the Piano Roll and the List, then the
     // pane's other views (slice 6a); choosing the List keeps it.
-    s.click("button", PANE);
+    s.click_picker();
     let items: Vec<String> = s
         .elements()
         .into_iter()

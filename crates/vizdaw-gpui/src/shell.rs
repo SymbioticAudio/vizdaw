@@ -112,7 +112,8 @@ impl DocumentWindow {
             return Err("the document's transport could not be read".into());
         }
         let token = app.update(cx, |s, _| s.new_token());
-        let bounds = Bounds::centered(None, size(px(1000.), px(640.)), cx);
+        let visible = cx.primary_display().map(|d| d.visible_bounds());
+        let bounds = Bounds::centered(None, default_window_size(visible), cx);
         let state = app.clone();
         let opened = cx.open_window(
             WindowOptions {
@@ -657,6 +658,10 @@ impl DocumentWindow {
         };
         self.end_rename(true, window, cx);
         self.pane_menu = None;
+        if now.main != was.main {
+            // The drag's pane belongs to the view that went.
+            self.cancel_pane_drag(cx);
+        }
         if now.main == MainView::Mix && was.main != MainView::Mix {
             self.arrangement_hidden(window, cx);
         }
@@ -1369,6 +1374,24 @@ impl Render for DocumentWindow {
                 d.child(Self::status_line(status, &mut root.container(), cx))
             })
     }
+}
+
+/// The size a new document window opens at (Swift
+/// `PaneGeometry.defaultDocumentFrame`): 1440×900, or 90% of the screen's
+/// visible area where that is smaller, each side on its own; never under
+/// 980×620 where the screen holds that, and never under the window's
+/// minimum, 700×450. With no display known, 1440×900.
+pub fn default_window_size(visible: Option<Bounds<gpui::Pixels>>) -> gpui::Size<gpui::Pixels> {
+    let Some(v) = visible else {
+        return size(px(1440.), px(900.));
+    };
+    let side = |screen: f32, full: f32, old: f32, least: f32| {
+        (full.min((screen * 0.9).max(old.min(screen)))).max(least)
+    };
+    size(
+        px(side(f32::from(v.size.width), 1440., 980., 700.)),
+        px(side(f32::from(v.size.height), 900., 620., 450.)),
+    )
 }
 
 /// The main view and panes, without the window frame (which a pane change

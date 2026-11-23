@@ -9,8 +9,8 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, Context, DispatchPhase, Div, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point,
+    AnyElement, Context, DispatchPhase, Div, Focusable, InteractiveElement, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point,
     StatefulInteractiveElement, Styled, Window, anchored, canvas, deferred, div, point, px, rgb,
 };
 use vizdaw_app::editor::{
@@ -453,8 +453,17 @@ impl PaneDrag {
 }
 
 impl DocumentWindow {
-    /// A press on `side`'s divider.
-    fn pane_drag_begin(&mut self, side: PaneSide, at: Point<Pixels>, cx: &mut Context<Self>) {
+    /// A press on `side`'s divider: the grip takes it (nothing under it
+    /// sees it), and the keyboard goes to the window, as a press on any
+    /// chrome gives it (a text edit ends).
+    fn pane_drag_begin(
+        &mut self,
+        side: PaneSide,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle(cx), cx);
         let area = self.regions_area();
         let Some(setup) = self.read_model(cx, |d| *d.layout().views.current()) else {
             return;
@@ -758,6 +767,9 @@ pub(crate) fn dividers(
         };
         let mut grip = place(hit)
             .id(("pane-divider", side as usize))
+            // The grip overlaps its neighbours by 3 points: a press there
+            // is the divider's alone.
+            .occlude()
             .flex()
             .items_center()
             .justify_center()
@@ -773,8 +785,8 @@ pub(crate) fn dividers(
             .child(scope.control_with("slider", &label, true, Some(&value), false))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                    this.pane_drag_begin(side, e.position, cx)
+                cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                    this.pane_drag_begin(side, e.position, window, cx)
                 }),
             );
         if dragging.is_some() {

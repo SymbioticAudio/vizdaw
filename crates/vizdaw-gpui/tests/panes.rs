@@ -298,7 +298,7 @@ fn panes_follow_the_layout(cx: &mut TestAppContext) {
     let right = s.group(RIGHT).expect("the right pane");
     let bottom = s.group(BOTTOM).unwrap();
     assert_eq!(right.size.width, px(260.));
-    assert_eq!(right.origin.x + right.size.width, px(1000.));
+    assert_eq!(right.origin.x + right.size.width, px(1440.));
     assert_eq!(bottom.origin.x + bottom.size.width + px(1.), right.origin.x);
     // It runs beside the bottom pane only (the centre takes the room
     // above it, Swift layout A).
@@ -614,4 +614,89 @@ fn a_view_change_commits_the_track_rename(cx: &mut TestAppContext) {
     s.cx.run_until_parked();
     s.run_menu("ui.toggle_left");
     assert_eq!(s.renames(), vec!["Keys".to_string(), "Beat".to_string()]);
+}
+
+#[gpui::test]
+fn a_divider_press_over_the_canvas_only_resizes(cx: &mut TestAppContext) {
+    let mut s = setup(cx);
+    let before = s.model(|d| d.selection().clone());
+    let calls = s.fake.calls().len();
+    // 2 points above the bottom divider's line: inside its grip and the
+    // canvas's last points.
+    let line = s.element("slider", "Bottom Pane Size").bounds;
+    let canvas = s.group("Arrangement").unwrap();
+    let at = point(canvas.center().x, line.center().y - px(2.));
+    assert!(canvas.contains(&at), "the grip overlaps the canvas");
+    // Up and across the tracks: a press the canvas took would select.
+    let to = point(at.x - px(200.), canvas.origin.y + px(30.));
+    s.press(at);
+    s.move_to(point(at.x - px(100.), at.y - px(100.)));
+    s.move_to(to);
+    s.release(to);
+    assert!(s.pane(PaneSide::Bottom).size > 260.);
+    assert_eq!(s.model(|d| d.selection().clone()), before);
+    assert_eq!(s.fake.calls().len(), calls, "{:?}", s.fake.calls());
+}
+
+#[gpui::test]
+fn a_main_view_change_cancels_a_divider_drag(cx: &mut TestAppContext) {
+    let mut s = setup(cx);
+    // Both views show the left pane, so the drag's pane stays drawn.
+    s.update_model(|d| d.update_layout(|l| l.views.mix.left.shown = true));
+    let at = s.element("slider", "Left Pane Size").bounds.center();
+    s.press(at);
+    s.move_to(point(at.x + px(60.), at.y));
+    s.run_menu("ui.view_mix");
+    s.move_to(point(at.x + px(70.), at.y));
+    s.release(point(at.x + px(70.), at.y));
+    let l = s.model(|d| d.layout().views.clone());
+    assert_eq!(l.arrange.left.size, 220., "the drag was dropped");
+    assert_eq!(l.mix.left.size, 220., "nothing lands in the Mix view");
+}
+
+#[test]
+fn the_window_opens_at_the_swift_size() {
+    use vizdaw_gpui::shell::default_window_size;
+    let big = Bounds::new(point(px(0.), px(0.)), size(px(2560.), px(1415.)));
+    assert_eq!(default_window_size(Some(big)), size(px(1440.), px(900.)));
+    // A small screen: 90% of it, never under 980×620 where it holds that.
+    let small = Bounds::new(point(px(0.), px(25.)), size(px(1280.), px(775.)));
+    assert_eq!(default_window_size(Some(small)), size(px(1152.), px(697.5)));
+    let tiny = Bounds::new(point(px(0.), px(0.)), size(px(1000.), px(600.)));
+    assert_eq!(default_window_size(Some(tiny)), size(px(980.), px(600.)));
+    // Never under the window's minimum, 700×450.
+    let wee = Bounds::new(point(px(0.), px(0.)), size(px(500.), px(300.)));
+    assert_eq!(default_window_size(Some(wee)), size(px(700.), px(450.)));
+    // No display known: the Swift size.
+    assert_eq!(default_window_size(None), size(px(1440.), px(900.)));
+}
+
+#[gpui::test]
+fn a_new_window_opens_at_the_swift_size(cx: &mut TestAppContext) {
+    let mut s = setup(cx);
+    // The test display is 1920×1080.
+    let shown = s
+        .window
+        .update(&mut s.cx, |_, window, _| window.viewport_size())
+        .unwrap();
+    assert_eq!(shown, size(px(1440.), px(900.)));
+}
+
+#[gpui::test]
+fn a_divider_press_over_a_track_header_selects_nothing(cx: &mut TestAppContext) {
+    let mut s = setup(cx);
+    let line = s.element("slider", "Left Pane Size").bounds;
+    let row = s.element("button", CHORDS).bounds;
+    // 2 points right of the left divider's line, on a header row.
+    let at = point(line.center().x + px(2.), row.center().y);
+    assert!(row.contains(&at), "the grip overlaps the header");
+    s.press(at);
+    s.release(at);
+    assert!(s.model(|d| d.selected_lanes()).is_empty());
+    // A drag from there only resizes.
+    s.press(at);
+    s.move_to(point(at.x + px(40.), at.y));
+    s.release(point(at.x + px(40.), at.y));
+    assert_eq!(s.pane(PaneSide::Left).size, 260.);
+    assert!(s.model(|d| d.selected_lanes()).is_empty());
 }

@@ -191,6 +191,24 @@ impl Setup {
 
     /// Clicks the `role` labelled `label` inside the roll's editor (the
     /// arrangement's tool bar has the same labels).
+    /// The bottom pane's picker (not the transport bar's toggle, whose
+    /// value is on or off).
+    fn picker(&mut self) -> Element {
+        self.elements()
+            .into_iter()
+            .find(|e| {
+                e.role == "button"
+                    && e.label == PANE
+                    && !matches!(e.value.as_deref(), Some("on" | "off"))
+            })
+            .expect("the bottom pane's picker")
+    }
+
+    fn click_picker(&mut self) {
+        let at = self.picker().bounds.center();
+        self.click_at(at);
+    }
+
     fn click(&mut self, role: &str, label: &str) {
         let e = self.roll_control(role, label);
         self.click_at(e.bounds.center());
@@ -292,7 +310,7 @@ fn editors_piano_roll_opens_the_roll(cx: &mut TestAppContext) {
     assert!(s.find("group", ROLL).is_some(), "the roll is drawn");
     assert!(s.find("group", KEYBOARD).is_some(), "with its keyboard");
     assert!(s.find("table", "Event List").is_none());
-    assert_eq!(s.element("button", PANE).value.as_deref(), Some(ROLL));
+    assert_eq!(s.picker().value.as_deref(), Some(ROLL));
 
     // The bar, left to right, in the pane (not the arrangement's).
     let pane = s.element("group", PANE);
@@ -331,7 +349,7 @@ fn editors_piano_roll_opens_the_roll(cx: &mut TestAppContext) {
 
     // The pane's picker lists the Piano Roll, then the List, then the
     // pane's other views (slice 6a).
-    s.click("button", PANE);
+    s.click_picker();
     let items: Vec<String> = s.menu_items().into_iter().map(|e| e.label).collect();
     assert_eq!(items, [ROLL, "List", "Audio Editor", "Mixer"]);
     assert!(s.element("menuitem", ROLL).selected);

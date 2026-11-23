@@ -1246,12 +1246,6 @@ fn transport_go_position_focuses_the_field(cx: &mut TestAppContext) {
         json!({"id": "ui.reset_transport_bar"}),
     ));
     assert_eq!(reset["status"], "transport bar: the default");
-    // Wide enough for the standard bar's Edit In (it folds at 1000 since
-    // the bar has its Main View and pane toggles).
-    let window = cx.update(|cx| AppState::global(cx).read(cx).windows()[0].handle);
-    gpui::VisualTestContext::from_window(window.into(), cx)
-        .simulate_resize(gpui::size(gpui::px(1240.), gpui::px(640.)));
-    cx.run_until_parked();
     ok(call(
         &s,
         cx,
