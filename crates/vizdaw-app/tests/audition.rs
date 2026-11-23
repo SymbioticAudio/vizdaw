@@ -4,10 +4,11 @@
 mod support;
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use support::{FakeSession, roll_fake};
 use vizdaw_app::DocumentModel;
-use vizdaw_app::audition::{AUDITION_HINT, AuditionNote, NOTE_OFF_RETRIES, STUCK_NOTE_HINT};
+use vizdaw_app::audition::{AUDITION_HINT, AuditionNote, NOTE_OFF_WINDOW, STUCK_NOTE_HINT};
 use vizdaw_app::editor::{DetailEditorKind, EditorTarget};
 use vizdaw_app::piano_roll::AuditionRequest;
 use vizdaw_app::store::DocumentStore;
@@ -41,7 +42,7 @@ fn with_roll(lane: u64) -> (Arc<FakeSession>, DocumentModel) {
 fn log(f: &FakeSession) -> Vec<String> {
     f.auditions()
         .iter()
-        .map(|(on, p, _)| format!("{on} {p}"))
+        .map(|(on, p, _, _)| format!("{on} {p}"))
         .collect()
 }
 
@@ -53,7 +54,13 @@ fn a_note_sounds_and_ends() {
     m.audition_off(C4);
     assert_eq!(log(&f), ["on 60", "off 60"], "a second off sends nothing");
     assert_eq!(m.status(), None);
-    assert_eq!(f.auditions()[0], ("on".to_string(), 60, 5));
+    assert_eq!(
+        f.auditions(),
+        [
+            ("on".to_string(), 60, 5, 0x8000),
+            ("off".to_string(), 60, 5, 0)
+        ]
+    );
 }
 
 #[test]
@@ -83,14 +90,21 @@ fn the_idle_poll_retries_note_offs() {
 }
 
 #[test]
-fn a_note_off_that_keeps_failing_is_dropped_after_the_retries() {
+fn a_note_off_that_keeps_failing_is_given_up_after_two_seconds() {
     let (f, mut m) = make();
-    m.audition_on(C4, 0x8000);
+    let t0 = Instant::now();
+    assert_eq!(NOTE_OFF_WINDOW, Duration::from_secs(2));
+    m.audition_on_at(C4, 0x8000, t0);
     f.set_call_error("audition", Some(busy()));
-    m.audition_off(C4);
-    for _ in 0..NOTE_OFF_RETRIES {
-        m.tick();
+    m.audition_off_at(C4, t0);
+    // However often the poll runs, only time counts.
+    for ms in (0..1900).step_by(10) {
+        m.tick_at(t0 + Duration::from_millis(ms));
     }
+    m.tick_at(t0 + Duration::from_millis(1900));
+    assert!(m.has_pending_note_offs(), "still pending at 1.9 s");
+    assert_eq!(m.status(), None);
+    m.tick_at(t0 + Duration::from_secs(2));
     assert!(!m.has_pending_note_offs());
     assert_eq!(log(&f), ["on 60"]);
     assert_eq!(m.status(), Some(STUCK_NOTE_HINT));
@@ -98,6 +112,43 @@ fn a_note_off_that_keeps_failing_is_dropped_after_the_retries() {
         STUCK_NOTE_HINT,
         "A note may still be sounding — press Stop."
     );
+}
+
+#[test]
+fn a_slow_poll_still_gives_up_on_time() {
+    let (f, mut m) = make();
+    let t0 = Instant::now();
+    m.audition_on_at(C4, 0x8000, t0);
+    f.set_call_error("audition", Some(busy()));
+    m.audition_off_at(C4, t0);
+    m.tick_at(t0 + Duration::from_millis(250));
+    assert_eq!(m.status(), None);
+    m.tick_at(t0 + Duration::from_millis(2100));
+    assert_eq!(m.status(), Some(STUCK_NOTE_HINT), "one slow tick is enough");
+}
+
+#[test]
+fn the_poll_runs_fast_while_a_note_off_waits() {
+    let (f, mut m) = make();
+    assert!(!m.wants_fast_poll());
+    m.audition_on(C4, 0x8000);
+    f.fail_next("audition", busy());
+    m.audition_off(C4);
+    assert!(m.wants_fast_poll(), "a note-off waits");
+    m.tick();
+    assert!(!m.wants_fast_poll());
+}
+
+#[test]
+fn the_poll_runs_fast_while_a_drag_final_waits() {
+    let (f, mut m) = with_roll(31);
+    assert!(m.begin_gesture("Move Notes", vec![(3, 31)]));
+    assert!(!m.wants_fast_poll(), "an open drag is not waiting");
+    f.fail_next("end_edit", busy());
+    m.end_gesture(None);
+    assert!(m.wants_fast_poll());
+    m.tick();
+    assert!(!m.wants_fast_poll());
 }
 
 #[test]
@@ -112,7 +163,7 @@ fn a_non_busy_note_off_error_is_reported_at_once() {
     );
     m.audition_off(C4);
     assert!(!m.has_pending_note_offs(), "not retried");
-    assert!(m.status().is_some());
+    assert_eq!(m.status(), Some("queue full"));
     assert_eq!(log(&f), ["on 60"]);
 }
 
@@ -237,12 +288,46 @@ fn the_canvas_requests_drive_the_roll_audition() {
 }
 
 #[test]
+fn a_key_click_auditions_through_the_edit_track() {
+    let (f, mut m) = with_roll(31);
+    m.roll_key_sound(60);
+    m.roll_key_release();
+    assert_eq!(
+        f.auditions(),
+        [
+            ("on".to_string(), 60, 5, 100 << 9),
+            ("off".to_string(), 60, 5, 0)
+        ],
+        "Chords' destination at the Pencil's velocity"
+    );
+    // Insert Into another track: its destination.
+    f.clear_calls();
+    m.roll_set_edit_lane(LaneRef { seq: 3, lane: 32 });
+    m.roll_toggle_shown(32);
+    m.roll_key_sound(40);
+    m.roll_key_release();
+    assert_eq!(f.auditions()[2], ("on".to_string(), 40, 6, 100 << 9));
+}
+
+#[test]
+fn a_key_is_silent_without_an_edit_track_destination() {
+    let (f, mut m) = with_roll(30);
+    m.roll_key_sound(60);
+    m.roll_key_release();
+    assert!(f.auditions().is_empty(), "Groove has no destination");
+    let (f, mut m) = make();
+    m.roll_key_sound(60);
+    assert!(f.auditions().is_empty(), "no roll, no edit track");
+    assert_eq!(m.status(), None);
+}
+
+#[test]
 fn dragging_across_keys_plays_each_in_turn() {
     let (f, mut m) = with_roll(31);
     for p in [60, 60, 62] {
-        m.roll_sound(p, 0x8000, Some(5));
+        m.roll_key_sound(p);
     }
-    m.roll_silence();
+    m.roll_key_release();
     assert_eq!(log(&f), ["on 60", "off 60", "on 62", "off 62"]);
 }
 

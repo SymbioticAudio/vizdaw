@@ -170,7 +170,12 @@ impl DocumentModel {
     /// Retries a note-off, a mouse-up or an Escape that met Busy (called
     /// every poll; calls no session when nothing waits).
     pub fn tick(&mut self) {
-        self.retry_note_offs();
+        self.tick_at(std::time::Instant::now());
+    }
+
+    /// [`tick`](Self::tick) as of `now` (the note-off deadlines).
+    pub fn tick_at(&mut self, now: std::time::Instant) {
+        self.retry_note_offs(now);
         let Some(g) = &self.editor.gesture else {
             return;
         };

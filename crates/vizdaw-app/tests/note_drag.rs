@@ -1,8 +1,7 @@
 //! Swift `PianoRollViewTests`' gesture cases, played against the model:
 //! the tool machine, the roll's hit test and its drags together. The
-//! audition requests are replayed through Swift's `sound`/`silence`
-//! rules (the audition itself comes with Task 3) so the logs read as
-//! Swift's.
+//! audition requests go through the model's `sound`/`silence` to the
+//! session, so the logs are the session's.
 
 mod support;
 
@@ -81,14 +80,14 @@ impl Roll {
         let o = self
             .m
             .roll_mouse_down(&mut self.pointer, &self.frame, at, 1, modifiers);
-        self.requests.extend(o.audition);
+        self.feed(o.audition);
     }
 
     fn drag(&mut self, to: Point, modifiers: Modifiers) -> Option<vizdaw_app::arrangement::Rect> {
         let o = self
             .m
             .roll_mouse_drag(&mut self.pointer, &self.frame, to, modifiers);
-        self.requests.extend(o.audition);
+        self.feed(o.audition);
         o.band
     }
 
@@ -97,7 +96,7 @@ impl Roll {
             .m
             .roll_mouse_up(&mut self.pointer, &self.frame, at, modifiers);
         assert_eq!(o.band, None);
-        self.requests.extend(o.audition);
+        self.feed(o.audition);
     }
 
     fn click(&mut self, at: Point, modifiers: Modifiers) {
@@ -107,7 +106,7 @@ impl Roll {
 
     fn cancel(&mut self) {
         let o = self.m.cancel_roll_drag(&mut self.pointer, &self.frame);
-        self.requests.extend(o.audition);
+        self.feed(o.audition);
     }
 
     fn note(&self, id: u64) -> EventRow {
@@ -140,34 +139,19 @@ impl Roll {
         self.frame.pitch.row_height()
     }
 
-    /// The requests replayed as Swift's audition log: a sound ends the
-    /// one before unless it is the same note; no destination is silence.
+    /// Records the canvas's requests and acts on them.
+    fn feed(&mut self, requests: Vec<AuditionRequest>) {
+        self.m.roll_audition(&requests);
+        self.requests.extend(requests);
+    }
+
+    /// What reached the session, as Swift's audition log.
     fn log(&self) -> Vec<String> {
-        let mut out = vec![];
-        let mut sounding: Option<(u64, u8)> = None;
-        for r in &self.requests {
-            match *r {
-                AuditionRequest::Sound { pitch, dest, .. } => {
-                    let next = dest.map(|d| (d, pitch));
-                    if next == sounding {
-                        continue;
-                    }
-                    if let Some((_, p)) = sounding.take() {
-                        out.push(format!("off {p}"));
-                    }
-                    if let Some((_, p)) = next {
-                        out.push(format!("on {p}"));
-                        sounding = next;
-                    }
-                }
-                AuditionRequest::Silence => {
-                    if let Some((_, p)) = sounding.take() {
-                        out.push(format!("off {p}"));
-                    }
-                }
-            }
-        }
-        out
+        self.f
+            .auditions()
+            .iter()
+            .map(|(on, p, _, _)| format!("{on} {p}"))
+            .collect()
     }
 
     fn begins(&self) -> Vec<String> {
@@ -791,7 +775,7 @@ fn leaving_the_window_cancels_the_drag_and_silences() {
     v.down(p, NONE);
     v.drag(up_by(p, 3., v.row()), NONE);
     let o = v.m.roll_detached(&mut v.pointer, &v.frame);
-    v.requests.extend(o.audition);
+    v.feed(o.audition);
     assert!(!v.m.gesture_open());
     assert_eq!(v.f.calls().last().unwrap(), "abort_edit");
     assert_eq!(v.log(), ["on 60", "off 60", "on 63", "off 63"]);
@@ -845,14 +829,14 @@ fn deactivating_drops_a_held_press_and_silences() {
     v.down(p, NONE);
     v.drag(up_by(p, 3., v.row()), NONE);
     let o = v.m.roll_deactivated(&mut v.pointer, &v.frame);
-    v.requests.extend(o.audition);
+    v.feed(o.audition);
     assert!(!v.m.gesture_open());
     assert_eq!(v.f.calls().last().unwrap(), "abort_edit");
     assert_eq!(v.log(), ["on 60", "off 60", "on 63", "off 63"]);
     // A press still inside the dead zone is forgotten: no click follows.
     v.down(p, NONE);
     let o = v.m.roll_deactivated(&mut v.pointer, &v.frame);
-    v.requests.extend(o.audition);
+    v.feed(o.audition);
     assert_eq!(v.log().last().unwrap(), "off 60");
     let selected = v.m.selection().events.clone();
     v.m.set_tool(Tool::Eraser);

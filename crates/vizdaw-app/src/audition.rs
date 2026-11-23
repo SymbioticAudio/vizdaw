@@ -3,6 +3,7 @@
 //! retried by every [`Audition::tick`] so no note sticks.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, Instant};
 
 use vizdaw_ffi::VizError;
 
@@ -10,10 +11,10 @@ use crate::DocumentModel;
 use crate::alerts::error_message;
 use crate::session::DocSession;
 
-/// Editor ticks a note-off is retried for. Swift's 60 Hz plugin timer made
-/// this about two seconds; here it is as many ticks of the editor's tick
-/// (`DocumentModel::idle`), so the time follows the poll interval.
-pub const NOTE_OFF_RETRIES: u32 = 120;
+/// How long a note-off that meets Busy is retried (Swift: 120 ticks of a
+/// 60 Hz timer). Time-based, since the poll's rate changes: a stopped
+/// document polls slowly.
+pub const NOTE_OFF_WINDOW: Duration = Duration::from_secs(2);
 
 /// The status when no audio engine takes the note.
 pub const AUDITION_HINT: &str = "Notes sound once the audio engine runs: press Play once.";
@@ -33,7 +34,8 @@ pub struct AuditionNote {
 #[derive(Debug, Clone, Default)]
 pub struct Audition {
     held: BTreeSet<AuditionNote>,
-    pending: BTreeMap<AuditionNote, u32>,
+    /// Each waiting note-off with the time it is given up at.
+    pending: BTreeMap<AuditionNote, Instant>,
     hint_shown: bool,
 }
 
@@ -53,8 +55,9 @@ impl Audition {
         session: &dyn DocSession,
         note: AuditionNote,
         velocity: u16,
+        now: Instant,
     ) -> Option<String> {
-        let mut status = self.tick(session);
+        let mut status = self.tick(session, now);
         if self.pending.contains_key(&note) {
             return status;
         }
@@ -75,18 +78,26 @@ impl Audition {
     }
 
     /// Ends `note` if it sounds; a failed note-off is retried by `tick`.
-    pub fn off(&mut self, session: &dyn DocSession, note: AuditionNote) -> Option<String> {
+    pub fn off(
+        &mut self,
+        session: &dyn DocSession,
+        note: AuditionNote,
+        now: Instant,
+    ) -> Option<String> {
         if !self.held.remove(&note) {
             return None;
         }
-        self.send_off(session, note, NOTE_OFF_RETRIES)
+        self.send_off(session, note, now + NOTE_OFF_WINDOW, now)
     }
 
     /// Ends every note this document sounds.
-    pub fn off_all(&mut self, session: &dyn DocSession) -> Option<String> {
+    pub fn off_all(&mut self, session: &dyn DocSession, now: Instant) -> Option<String> {
         let mut status = None;
         for note in std::mem::take(&mut self.held) {
-            merge(&mut status, self.send_off(session, note, NOTE_OFF_RETRIES));
+            merge(
+                &mut status,
+                self.send_off(session, note, now + NOTE_OFF_WINDOW, now),
+            );
         }
         status
     }
@@ -101,10 +112,10 @@ impl Audition {
     }
 
     /// One retry of every pending note-off.
-    pub fn tick(&mut self, session: &dyn DocSession) -> Option<String> {
+    pub fn tick(&mut self, session: &dyn DocSession, now: Instant) -> Option<String> {
         let mut status = None;
-        for (note, left) in std::mem::take(&mut self.pending) {
-            merge(&mut status, self.send_off(session, note, left - 1));
+        for (note, deadline) in std::mem::take(&mut self.pending) {
+            merge(&mut status, self.send_off(session, note, deadline, now));
         }
         status
     }
@@ -113,13 +124,14 @@ impl Audition {
         &mut self,
         session: &dyn DocSession,
         note: AuditionNote,
-        attempts_left: u32,
+        deadline: Instant,
+        now: Instant,
     ) -> Option<String> {
         match session.audition(note.dest, note.pitch, 0, false) {
             Ok(_) => None,
             Err(VizError::Busy { .. }) => {
-                if attempts_left > 0 {
-                    self.pending.insert(note, attempts_left);
+                if now < deadline {
+                    self.pending.insert(note, deadline);
                     None
                 } else {
                     Some(STUCK_NOTE_HINT.into())
@@ -133,23 +145,34 @@ impl Audition {
 impl DocumentModel {
     /// Sounds `note` (a refused or failed one may set the status).
     pub fn audition_on(&mut self, note: AuditionNote, velocity: u16) {
+        self.audition_on_at(note, velocity, Instant::now());
+    }
+
+    pub fn audition_on_at(&mut self, note: AuditionNote, velocity: u16, now: Instant) {
         let s = self
             .editor
             .audition
-            .on(self.session.as_ref(), note, velocity);
+            .on(self.session.as_ref(), note, velocity, now);
         self.audition_status(s);
     }
 
     /// Ends `note` if it sounds.
     pub fn audition_off(&mut self, note: AuditionNote) {
-        let s = self.editor.audition.off(self.session.as_ref(), note);
+        self.audition_off_at(note, Instant::now());
+    }
+
+    pub fn audition_off_at(&mut self, note: AuditionNote, now: Instant) {
+        let s = self.editor.audition.off(self.session.as_ref(), note, now);
         self.audition_status(s);
     }
 
     /// Ends every audition note, the roll's included.
     pub fn audition_off_all(&mut self) {
         self.editor.roll.sounding = None;
-        let s = self.editor.audition.off_all(self.session.as_ref());
+        let s = self
+            .editor
+            .audition
+            .off_all(self.session.as_ref(), Instant::now());
         self.audition_status(s);
     }
 
@@ -158,9 +181,16 @@ impl DocumentModel {
         self.editor.audition.has_pending_note_offs()
     }
 
-    /// One retry of every pending note-off (part of [`DocumentModel::tick`]).
-    pub(crate) fn retry_note_offs(&mut self) {
-        let s = self.editor.audition.tick(self.session.as_ref());
+    /// The poll should run fast (about 16 to 33 ms): a note-off or a
+    /// drag's mouse-up waits on Busy.
+    pub fn wants_fast_poll(&self) -> bool {
+        self.has_pending_note_offs() || self.gesture_pending()
+    }
+
+    /// One retry of every pending note-off, as of `now` (part of
+    /// [`DocumentModel::tick_at`]).
+    pub(crate) fn retry_note_offs(&mut self, now: Instant) {
+        let s = self.editor.audition.tick(self.session.as_ref(), now);
         self.audition_status(s);
     }
 

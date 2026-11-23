@@ -20,7 +20,7 @@ use crate::arrangement::bar_at;
 use crate::audition::AuditionNote;
 use crate::document::DocumentModel;
 use crate::editor::{DetailEditorKind, EditorTarget, Tool};
-use crate::piano_roll::AuditionRequest;
+use crate::piano_roll::{AuditionRequest, Pencil};
 
 /// A request that the roll showing `target` scroll to `tick`; a new
 /// `serial` is a new request, so asking again scrolls again.
@@ -344,6 +344,22 @@ impl DocumentModel {
         if let Some(s) = self.editor.roll.sounding.take() {
             self.audition_off(s);
         }
+    }
+
+    /// The keyboard strip: a press on `pitch`'s key sounds it at the
+    /// Pencil's velocity through the edit track's destination (silence
+    /// with no edit track or no destination).
+    pub fn roll_key_sound(&mut self, pitch: u8) {
+        let dest = self
+            .roll_edit_lane()
+            .and_then(|l| self.roll_row(l))
+            .and_then(|r| r.midi_dest);
+        self.roll_sound(pitch, Pencil::VELOCITY, dest);
+    }
+
+    /// The key is released (or the window left).
+    pub fn roll_key_release(&mut self) {
+        self.roll_silence();
     }
 
     /// Acts on what the canvas asked of the audition, in order.

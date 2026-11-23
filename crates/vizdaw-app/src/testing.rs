@@ -65,7 +65,7 @@ struct State {
     dests: Vec<DestRow>,
     lanes_reads: usize,
     event_reads: usize,
-    auditions: Vec<(String, u8, u64)>,
+    auditions: Vec<(String, u8, u64, u16)>,
     /// What `audition` answers when it is not refused: false is "this
     /// session does not hold the engine".
     audition_sent: bool,
@@ -449,8 +449,9 @@ impl FakeSession {
         self.st().event_reads
     }
 
-    /// Every audition note sent, in order: `("on" | "off", pitch, dest)`.
-    pub fn auditions(&self) -> Vec<(String, u8, u64)> {
+    /// Every audition note sent, in order: `("on" | "off", pitch, dest,
+    /// velocity)` (a note-off carries velocity 0).
+    pub fn auditions(&self) -> Vec<(String, u8, u64, u16)> {
         self.st().auditions.clone()
     }
 
@@ -902,14 +903,18 @@ impl DocSession for FakeSession {
         Self::scripted(&mut s, "ui_layout")?;
         Ok(s.layout.clone())
     }
-    fn audition(&self, dest: u64, pitch: u8, _velocity: u16, on: bool) -> Result<bool, VizError> {
+    fn audition(&self, dest: u64, pitch: u8, velocity: u16, on: bool) -> Result<bool, VizError> {
         let mut s = self.st();
         Self::scripted(&mut s, "audition")?;
         if !s.audition_sent {
             return Ok(false);
         }
-        s.auditions
-            .push(((if on { "on" } else { "off" }).into(), pitch, dest));
+        s.auditions.push((
+            (if on { "on" } else { "off" }).into(),
+            pitch,
+            dest,
+            velocity,
+        ));
         Ok(true)
     }
     fn set_ui_layout(&self, json: String) -> Result<(), VizError> {
