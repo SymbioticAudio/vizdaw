@@ -41,6 +41,10 @@ pub struct LaneNotes {
 impl LaneNotes {
     /// `notes` must be in time order (as the core gives them).
     pub fn new(lane: LaneRef, notes: Arc<[EventRow]>) -> Self {
+        debug_assert!(
+            notes.windows(2).all(|w| w[0].tick <= w[1].tick),
+            "a track's notes must be in time order"
+        );
         let longest = notes.iter().map(|n| n.duration.max(0)).max().unwrap_or(0);
         LaneNotes {
             lane,

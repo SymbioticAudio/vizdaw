@@ -644,7 +644,12 @@ fn a_zero_length_note_is_not_resized_without_horizontal_motion() {
         x: r.max_x() - 0.5,
         y: r.y + r.height / 2.,
     };
+    let RollHit::Note(h) = v.m.roll_hit(&v.frame, p) else {
+        panic!("the press must land on the zero-length note");
+    };
+    assert_eq!((h.row.id, h.zone), (1, NoteZone::End));
     v.down(p, NONE);
+    assert_eq!(v.log(), ["on 60"], "the press hit the note");
     v.drag(
         Point {
             x: p.x,
@@ -780,15 +785,80 @@ fn a_note_drag_ends_its_sound_even_when_the_final_edit_waits() {
 
 #[test]
 fn leaving_the_window_cancels_the_drag_and_silences() {
+    // The view removed from its window (pane or document closed).
     let mut v = Roll::chords();
     let p = v.point(1, NoteZone::Middle);
     v.down(p, NONE);
     v.drag(up_by(p, 3., v.row()), NONE);
-    let o = v.m.roll_window_lost(&mut v.pointer, &v.frame);
+    let o = v.m.roll_detached(&mut v.pointer, &v.frame);
     v.requests.extend(o.audition);
     assert!(!v.m.gesture_open());
     assert_eq!(v.f.calls().last().unwrap(), "abort_edit");
     assert_eq!(v.log(), ["on 60", "off 60", "on 63", "off 63"]);
+}
+
+/// A transpose released while the final edit waits on Busy.
+fn released_on_busy() -> Roll {
+    let mut v = Roll::chords();
+    let p = v.point(1, NoteZone::Middle);
+    v.down(p, NONE);
+    v.drag(up_by(p, 1., v.row()), NONE);
+    v.f.fail_next("edit_gesture", busy());
+    v.up(up_by(p, 2., v.row()), NONE);
+    assert!(v.m.gesture().unwrap().finishing);
+    v
+}
+
+#[test]
+fn detaching_aborts_a_final_edit_still_pending_on_busy() {
+    let mut v = released_on_busy();
+    let o = v.m.roll_detached(&mut v.pointer, &v.frame);
+    assert!(o.audition.contains(&AuditionRequest::Silence));
+    assert!(!v.m.gesture_open());
+    assert_eq!(v.f.calls().last().unwrap(), "abort_edit");
+    assert!(!v.f.calls().iter().any(|c| c == "end_edit"));
+    v.m.idle();
+    assert_eq!(v.m.snapshot().undo_label, None);
+}
+
+#[test]
+fn deactivating_leaves_a_released_drag_pending_on_busy_to_the_tick() {
+    let mut v = released_on_busy();
+    let calls = v.f.calls().len();
+    let o = v.m.roll_deactivated(&mut v.pointer, &v.frame);
+    assert_eq!(o, Default::default(), "nothing held: nothing to do");
+    assert_eq!(v.f.calls().len(), calls);
+    assert!(v.m.gesture().unwrap().finishing);
+    v.m.tick();
+    assert!(!v.m.gesture_open());
+    assert_eq!(v.f.calls().last().unwrap(), "end_edit");
+    assert_eq!(
+        v.m.snapshot().undo_label.as_deref(),
+        Some("Transpose Notes")
+    );
+}
+
+#[test]
+fn deactivating_drops_a_held_press_and_silences() {
+    let mut v = Roll::chords();
+    let p = v.point(1, NoteZone::Middle);
+    v.down(p, NONE);
+    v.drag(up_by(p, 3., v.row()), NONE);
+    let o = v.m.roll_deactivated(&mut v.pointer, &v.frame);
+    v.requests.extend(o.audition);
+    assert!(!v.m.gesture_open());
+    assert_eq!(v.f.calls().last().unwrap(), "abort_edit");
+    assert_eq!(v.log(), ["on 60", "off 60", "on 63", "off 63"]);
+    // A press still inside the dead zone is forgotten: no click follows.
+    v.down(p, NONE);
+    let o = v.m.roll_deactivated(&mut v.pointer, &v.frame);
+    v.requests.extend(o.audition);
+    assert_eq!(v.log().last().unwrap(), "off 60");
+    let selected = v.m.selection().events.clone();
+    v.m.set_tool(Tool::Eraser);
+    v.up(p, NONE);
+    assert!(v.f.edits().is_empty(), "the lost press is not a click");
+    assert_eq!(v.m.selection().events, selected);
 }
 
 #[test]

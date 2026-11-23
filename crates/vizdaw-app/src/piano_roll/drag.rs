@@ -12,7 +12,7 @@ use vizdaw_ffi::events::{EventKindRow, EventRow, MeterEntryRow};
 use super::LaneNotes;
 use super::geometry::{CursorKind, NoteZone, PitchAxis, RollGeometry, RollHit, band_rect};
 use crate::arrangement::{
-    MachineEvent, MeterBars, Modifiers, PPQ, Point, Rect, TimeAxis, ToolMachine, bar_at,
+    MachineEvent, MeterBars, Modifiers, PPQ, Phase, Point, Rect, TimeAxis, ToolMachine, bar_at,
 };
 use crate::document::DocumentModel;
 use crate::editor::{GESTURE_OPEN, Snap, Tool};
@@ -533,27 +533,45 @@ impl DocumentModel {
         pointer: &mut RollPointer,
         frame: &RollFrame,
     ) -> RollOutcome {
-        let mut out = self.roll_window_lost(pointer, frame);
+        let mut out = self.drop_roll_press(pointer, frame);
+        out.audition.push(AuditionRequest::Silence);
         if self.gesture_open() {
             self.cancel_gesture();
         }
-        out.band = None;
         out
     }
 
-    /// The canvas left its window mid-press (the release will not come):
-    /// the drag is dropped without an undo step and the sound stops. A
-    /// final edit already pending on Busy goes on.
-    pub fn roll_window_lost(
+    /// The canvas was removed from its window (its pane or document
+    /// closed; Swift `viewWillMove(toWindow: nil)` → `windowLost`): as
+    /// Escape, so a final edit pending on Busy is aborted too.
+    pub fn roll_detached(&mut self, pointer: &mut RollPointer, frame: &RollFrame) -> RollOutcome {
+        self.cancel_roll_drag(pointer, frame)
+    }
+
+    /// The window lost the keyboard: a press still held (its release
+    /// may go elsewhere) is dropped and its sound stops. A released drag
+    /// whose final edit waits on Busy is left to [`tick`](Self::tick)
+    /// (Swift does nothing on resign-key).
+    pub fn roll_deactivated(
         &mut self,
         pointer: &mut RollPointer,
         frame: &RollFrame,
     ) -> RollOutcome {
+        if matches!(pointer.machine.phase(), Phase::Idle) {
+            return RollOutcome::default();
+        }
+        let mut out = self.drop_roll_press(pointer, frame);
+        out.audition.push(AuditionRequest::Silence);
+        out
+    }
+
+    /// The machine's cancel runs and the drag is dropped (its gesture
+    /// without an undo step); a press inside the dead zone is forgotten.
+    fn drop_roll_press(&mut self, pointer: &mut RollPointer, frame: &RollFrame) -> RollOutcome {
         let events = pointer.machine.cancel();
         let mut out = self.roll_drag_events(frame, &mut pointer.drag, &events);
         self.abandon_roll_drag(&mut pointer.drag);
         out.band = None;
-        out.audition.push(AuditionRequest::Silence);
         out
     }
 

@@ -90,7 +90,7 @@ impl PitchAxis {
         (127 - self.row_at(y).clamp(0, 127)) as u8
     }
 
-    /// Whole rows from `a` to `b`, up positive, unclamped.
+    /// Whole rows from `from_y` to `to_y`, up positive, unclamped.
     pub fn semitones(&self, from_y: f32, to_y: f32) -> i64 {
         self.row_at(from_y) - self.row_at(to_y)
     }

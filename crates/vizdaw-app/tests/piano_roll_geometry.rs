@@ -474,6 +474,40 @@ fn hits_on_a_long_track_find_the_right_note() {
 }
 
 #[test]
+fn a_zero_length_note_is_hit_across_its_minimum_width() {
+    // Every note is zero-length: the search window must reach the
+    // 3-point minimum width, not only the longest duration.
+    let t = TimeAxis::new(96., 0);
+    let start = 10 * Q;
+    let lanes = [lane(
+        LANE_A,
+        vec![
+            note_len(1, 0, 60, 0),
+            note_len(2, start, 60, 0),
+            note_len(3, 20 * Q, 60, 0),
+        ],
+    )];
+    let at = pt(t.x(start) + 2.5, y(60));
+    let RollHit::Note(h) = RollGeometry::hit(at, &lanes, None, &t, &pitch()) else {
+        panic!("no hit");
+    };
+    assert_eq!((h.row.id, h.zone), (2, NoteZone::End));
+    let band = band_rect(at, pt(at.x + 0.1, at.y + 0.1));
+    assert_eq!(
+        RollGeometry::notes_in(&band, &lanes, &t, &pitch()),
+        [(LANE_A, 2)]
+    );
+    assert_eq!(Eraser::crossed(at, at, &lanes, &t, &pitch()), [2]);
+}
+
+#[test]
+#[should_panic(expected = "time order")]
+#[cfg(debug_assertions)]
+fn lane_notes_must_be_in_time_order() {
+    let _ = lane(LANE_A, vec![note(1, Q, 60), note(2, 0, 60)]);
+}
+
+#[test]
 fn hit_testing_a_long_track_is_quick() {
     let lanes = [long_lane()];
     let t = time();
