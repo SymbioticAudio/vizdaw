@@ -11,11 +11,14 @@
 //! | `vizdaw.test.crasher` | crashes (SIGSEGV) when activated |
 //! | `vizdaw.test.hanger` | never returns from activate |
 //! | `vizdaw.test.timer` | passes audio through; registers host timers and file descriptors (CLAP `timer-support`, `posix-fd-support`) on command: the unlisted `PARAM_TIMER_*`/`PARAM_FD_*` switches; it counts its callbacks, read back as parameter values. It has a headless embedded editor (CLAP `gui`, Cocoa or X11) that draws nothing and reports what the host told it (`PARAM_GUI_*`) |
+//! | `vizdaw.test.gui` | passes audio through; on Linux, a real embedded X11 editor (CLAP `gui`): in `gui.create` it connects to the X server and registers a host timer and its connection's descriptor; it draws a [`GUI_COLOR`] child window under the host's parent, and from its first timer callback after `show` asks the host to grow it by [`GUI_GROW`] points (`request_resize`). What it saw reads back as `PARAM_GUI_*` values. Elsewhere it has no editor |
 //!
 //! [`bundle`] builds the `.clap` bundle for tests.
 
 mod bundle;
 mod editor;
+#[cfg(target_os = "linux")]
+mod gui;
 mod plugin;
 mod timer;
 
@@ -46,11 +49,13 @@ pub enum Kind {
     Bank,
     /// Pass-through that registers host timers and file descriptors.
     Timer,
+    /// Pass-through with a real X11 editor (Linux).
+    Gui,
 }
 
 impl Kind {
     /// Every kind, in factory order.
-    pub const ALL: [Kind; 8] = [
+    pub const ALL: [Kind; 9] = [
         Kind::Gain,
         Kind::Ducker,
         Kind::Synth4,
@@ -59,6 +64,7 @@ impl Kind {
         Kind::Hanger,
         Kind::Bank,
         Kind::Timer,
+        Kind::Gui,
     ];
 
     /// The CLAP plugin id.
@@ -72,6 +78,7 @@ impl Kind {
             Kind::Hanger => "vizdaw.test.hanger",
             Kind::Bank => "vizdaw.test.bank",
             Kind::Timer => "vizdaw.test.timer",
+            Kind::Gui => "vizdaw.test.gui",
         }
     }
 
@@ -85,6 +92,7 @@ impl Kind {
             Kind::Hanger => "Test Hanger",
             Kind::Bank => "Test Bank",
             Kind::Timer => "Test Timer",
+            Kind::Gui => "Test GUI",
         }
     }
 
@@ -174,6 +182,33 @@ pub const PARAM_GUI_REFUSE_SET_SIZE: u32 = 224;
 /// Timer kind's editor: reads how many `set_size` calls it got (accepted
 /// or not).
 pub const PARAM_GUI_SET_SIZES: u32 = 235;
+/// GUI kind: the timer `gui.create` registered (its id), or −1 when the
+/// host refused it; −2 before any `create`.
+pub const PARAM_GUI_CREATE_TIMER: u32 = 240;
+/// GUI kind: 1 if the host accepted the X connection's descriptor in
+/// `gui.create`, 0 if not; −2 before any `create`.
+pub const PARAM_GUI_CREATE_FD: u32 = 241;
+/// GUI kind: its X11 window's id (0 while it has none).
+pub const PARAM_GUI_WINDOW: u32 = 242;
+/// GUI kind: the X11 parent window the host gave it (0 before any).
+pub const PARAM_GUI_PARENT: u32 = 243;
+/// GUI kind: how many times it filled its window with [`GUI_COLOR`].
+pub const PARAM_GUI_DRAWS: u32 = 244;
+/// GUI kind: how many callbacks its timer had.
+pub const PARAM_GUI_TIMER_CALLS: u32 = 245;
+/// GUI kind: how many callbacks its X connection's descriptor had.
+pub const PARAM_GUI_FD_CALLS: u32 = 246;
+/// GUI kind: its own resize request: −1 not asked yet, 1 accepted (it
+/// took the size), 0 refused.
+pub const PARAM_GUI_RESIZE_ASKED: u32 = 247;
+/// GUI kind: the colour it fills its window with (`0xRRGGBB`, a
+/// TrueColor pixel value).
+pub const GUI_COLOR: u32 = 0x33_66_CC;
+/// GUI kind: how much it asks to grow, in points (times the scale in
+/// pixels).
+pub const GUI_GROW: (u32, u32) = (40, 20);
+/// GUI kind: its timer's period (ms).
+pub const GUI_TIMER_MS: u32 = 30;
 /// Timer kind: reads how many times timer `id` fired, at `PARAM_TIMER_FIRES + id`.
 pub const PARAM_TIMER_FIRES: u32 = 1000;
 /// Timer kind: reads how many callbacks descriptor `fd` had, at `PARAM_FD_CALLS + fd`.
@@ -205,7 +240,7 @@ impl Entry for TestEntry {
 }
 
 struct TestFactory {
-    descriptors: [PluginDescriptor; 8],
+    descriptors: [PluginDescriptor; 9],
     /// Where the bundle was loaded from (the timer kind logs beside it).
     bundle: Option<std::path::PathBuf>,
 }

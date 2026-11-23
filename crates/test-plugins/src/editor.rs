@@ -6,6 +6,9 @@
 //! plug-in itself is destroyed. What happens during destroy is appended to
 //! `<bundle path>.log`, since nothing can be read back from a destroyed
 //! plug-in.
+//!
+//! The GUI kind's real X11 editor is in `gui.rs`; on Linux each callback
+//! below hands over to it by kind.
 
 use crate::plugin::MainThread;
 use crate::{
@@ -146,17 +149,26 @@ impl MainThread<'_> {
 
 impl PluginGuiImpl for MainThread<'_> {
     fn is_api_supported(&self, configuration: GuiConfiguration) -> bool {
+        #[cfg(target_os = "linux")]
+        if self.kind() == crate::Kind::Gui {
+            return self.gui_supported(&configuration);
+        }
         supported(&configuration)
     }
 
     fn get_preferred_api(&self) -> Option<GuiConfiguration<'_>> {
         Some(GuiConfiguration {
+            // X11 on Linux, so the GUI kind's choice is right too.
             api_type: GuiApiType::default_for_current_platform()?,
             is_floating: false,
         })
     }
 
     fn create(&self, configuration: GuiConfiguration) -> Result<(), PluginError> {
+        #[cfg(target_os = "linux")]
+        if self.kind() == crate::Kind::Gui {
+            return self.gui_create(&configuration);
+        }
         if !supported(&configuration) {
             return Err(PluginError::Message("unsupported window API"));
         }
@@ -167,6 +179,10 @@ impl PluginGuiImpl for MainThread<'_> {
     }
 
     fn destroy(&self) {
+        #[cfg(target_os = "linux")]
+        if self.kind() == crate::Kind::Gui {
+            return self.gui_destroy();
+        }
         let id = {
             let mut e = self.editor.borrow_mut();
             e.created = false;
@@ -182,6 +198,10 @@ impl PluginGuiImpl for MainThread<'_> {
     }
 
     fn set_scale(&self, scale: f64) -> Result<(), PluginError> {
+        #[cfg(target_os = "linux")]
+        if self.kind() == crate::Kind::Gui {
+            return self.gui_set_scale(scale);
+        }
         if !scale.is_finite() || scale <= 0.0 {
             return Err(PluginError::Message("bad scale"));
         }
@@ -198,14 +218,26 @@ impl PluginGuiImpl for MainThread<'_> {
     }
 
     fn get_size(&self) -> Option<GuiSize> {
+        #[cfg(target_os = "linux")]
+        if self.kind() == crate::Kind::Gui {
+            return self.gui_get_size();
+        }
         Some(self.editor.borrow().size)
     }
 
     fn can_resize(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if self.kind() == crate::Kind::Gui {
+            return false;
+        }
         self.editor.borrow().resizable
     }
 
     fn adjust_size(&self, size: GuiSize) -> Option<GuiSize> {
+        #[cfg(target_os = "linux")]
+        if self.kind() == crate::Kind::Gui {
+            return None;
+        }
         if !self.editor.borrow().resizable {
             return None;
         }
@@ -216,6 +248,10 @@ impl PluginGuiImpl for MainThread<'_> {
     }
 
     fn set_size(&self, size: GuiSize) -> Result<(), PluginError> {
+        #[cfg(target_os = "linux")]
+        if self.kind() == crate::Kind::Gui {
+            return Err(PluginError::Message("fixed size"));
+        }
         let mut e = self.editor.borrow_mut();
         e.set_sizes += 1;
         if std::mem::take(&mut e.refuse_set_size) {
@@ -229,6 +265,10 @@ impl PluginGuiImpl for MainThread<'_> {
     }
 
     fn set_parent(&self, _window: Window) -> Result<(), PluginError> {
+        #[cfg(target_os = "linux")]
+        if self.kind() == crate::Kind::Gui {
+            return self.gui_set_parent(_window);
+        }
         // Headless: the handle is never used.
         let mut e = self.editor.borrow_mut();
         e.scaled_first = f64::from(u8::from(e.scaled));
@@ -240,10 +280,18 @@ impl PluginGuiImpl for MainThread<'_> {
     }
 
     fn show(&self) -> Result<(), PluginError> {
+        #[cfg(target_os = "linux")]
+        if self.kind() == crate::Kind::Gui {
+            return self.gui_show(true);
+        }
         Ok(())
     }
 
     fn hide(&self) -> Result<(), PluginError> {
+        #[cfg(target_os = "linux")]
+        if self.kind() == crate::Kind::Gui {
+            return self.gui_show(false);
+        }
         Ok(())
     }
 }

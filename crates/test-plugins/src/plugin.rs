@@ -66,6 +66,14 @@ impl Plugin for TestPlugin {
             #[cfg(unix)]
             builder.register::<clack_extensions::posix_fd::PluginPosixFd>();
         }
+        if kind == Some(Kind::Gui) {
+            builder.register::<PluginParams>().register::<PluginTimer>();
+            #[cfg(unix)]
+            builder.register::<clack_extensions::posix_fd::PluginPosixFd>();
+            // An X11 editor only: elsewhere it has none.
+            #[cfg(target_os = "linux")]
+            builder.register::<clack_extensions::gui::PluginGui>();
+        }
     }
 }
 
@@ -204,6 +212,9 @@ pub struct MainThread<'a> {
     pub(crate) clock: std::cell::RefCell<crate::timer::Clock>,
     /// The timer kind's headless editor (see `editor.rs`).
     pub(crate) editor: std::cell::RefCell<crate::editor::Editor>,
+    /// The GUI kind's X11 editor (see `gui.rs`).
+    #[cfg(target_os = "linux")]
+    pub(crate) gui: std::cell::RefCell<crate::gui::Gui>,
 }
 
 impl<'a> MainThread<'a> {
@@ -213,7 +224,15 @@ impl<'a> MainThread<'a> {
             host,
             clock: Default::default(),
             editor: Default::default(),
+            #[cfg(target_os = "linux")]
+            gui: Default::default(),
         }
+    }
+
+    /// Which kind it is.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn kind(&self) -> Kind {
+        self.shared.kind
     }
 
     /// The bundle it was loaded from, when the host said.
@@ -293,7 +312,7 @@ impl PluginMainThreadParams for MainThread<'_> {
     fn count(&self) -> u32 {
         match self.shared.kind {
             Kind::Bank => BANK_PARAMS,
-            Kind::Timer => 0,
+            Kind::Timer | Kind::Gui => 0,
             _ => 3,
         }
     }
@@ -348,6 +367,12 @@ impl PluginMainThreadParams for MainThread<'_> {
         if self.shared.kind == Kind::Timer {
             return self.readout(id.get());
         }
+        if self.shared.kind == Kind::Gui {
+            #[cfg(target_os = "linux")]
+            return self.gui_readout(id.get());
+            #[cfg(not(target_os = "linux"))]
+            return None;
+        }
         self.shared.param_value(id.get())
     }
 
@@ -373,6 +398,9 @@ impl PluginMainThreadParams for MainThread<'_> {
                     }
                 }
             }
+            return;
+        }
+        if self.shared.kind == Kind::Gui {
             return;
         }
         self.shared.read_params(input, false);

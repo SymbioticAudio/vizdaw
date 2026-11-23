@@ -35,7 +35,7 @@ fn ok(r: bool) -> f64 {
 }
 
 impl MainThread<'_> {
-    fn register_timer(&self, period_ms: u32) -> Option<u32> {
+    pub(crate) fn register_timer(&self, period_ms: u32) -> Option<u32> {
         let timer: HostTimer = self.host.get_extension()?;
         timer
             .register_timer(&self.host, period_ms)
@@ -123,6 +123,11 @@ impl MainThread<'_> {
 impl PluginTimerImpl for MainThread<'_> {
     fn on_timer(&self, timer_id: TimerId) {
         let id = timer_id.0;
+        #[cfg(target_os = "linux")]
+        if self.kind() == crate::Kind::Gui {
+            self.gui_on_timer(id);
+            return;
+        }
         let (unregister, spawn) = {
             let mut c = self.clock.borrow_mut();
             *c.fires.entry(id).or_default() += 1;
@@ -141,6 +146,11 @@ impl PluginTimerImpl for MainThread<'_> {
 #[cfg(unix)]
 impl PluginPosixFdImpl for MainThread<'_> {
     fn on_fd(&self, fd: i32, flags: FdFlags) {
+        #[cfg(target_os = "linux")]
+        if self.kind() == crate::Kind::Gui {
+            self.gui_on_fd(fd);
+            return;
+        }
         let unregister = {
             let mut c = self.clock.borrow_mut();
             let e = c.fd_calls.entry(fd).or_default();

@@ -18,3 +18,8 @@ thiserror = "2"
 [dev-dependencies]
 core-engine = { path = "../core-engine", features = ["fixtures"] }
 test-plugins = { path = "../test-plugins" }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# `tests/clap_gui_linux.rs`: the X window tree and the app's poll.
+x11rb = "0.13"
+libc = "0.2"

@@ -121,7 +121,7 @@ pub use edit::{
     AudioEdit, CrossfadeLengthRow, EditCommand, EventEdit, GeneratorRow, LaneEdit, LaneInputRow,
     LaneRef, MonitorModeRow, QuantizeRow, ReferenceEdit, SequenceEdit, ViewFilterRow,
 };
-pub use editor::EditorSize;
+pub use editor::{EditorResize, EditorSize};
 pub use error::VizError;
 pub use events::{
     AutomationRow, AutomationTargetRow, EventKindRow, EventRow, FadeRow, FadeShapeRow,

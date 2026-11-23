@@ -285,6 +285,7 @@ fn the_list_offers_only_usable_plugins() {
             "clap:vizdaw.test.crasher",
             "clap:vizdaw.test.ducker",
             "clap:vizdaw.test.gain",
+            "clap:vizdaw.test.gui",
             "clap:vizdaw.test.hanger",
             "clap:vizdaw.test.nan",
             "clap:vizdaw.test.timer",

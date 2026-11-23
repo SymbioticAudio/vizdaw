@@ -37,8 +37,22 @@ uniffi = { version = "=0.32.2", default-features = false }
 [target.'cfg(target_os = "macos")'.dependencies]
 platform-macos = { path = "../platform-macos" }
 
+[target.'cfg(unix)'.dependencies]
+# The main-thread check on Linux and the plug-ins' run-loop poll.
+libc = "0.2"
+
 [dev-dependencies]
 proptest = "1"
 core-ffi = { path = ".", features = ["test-hooks"] }
 tempfile = "3"
 test-plugins = { path = "../test-plugins" }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# `tests/editors_main.rs`: a parent window for the GUI test plug-in.
+x11rb = "0.13"
+
+# Opens editors on the process's main thread, which a test harness thread
+# is not.
+[[test]]
+name = "editors_main"
+harness = false
