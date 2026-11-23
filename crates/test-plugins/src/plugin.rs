@@ -59,7 +59,10 @@ impl Plugin for TestPlugin {
             builder.register::<PluginParams>();
         }
         if kind == Some(Kind::Timer) {
-            builder.register::<PluginParams>().register::<PluginTimer>();
+            builder
+                .register::<PluginParams>()
+                .register::<PluginTimer>()
+                .register::<clack_extensions::gui::PluginGui>();
             #[cfg(unix)]
             builder.register::<clack_extensions::posix_fd::PluginPosixFd>();
         }
@@ -69,6 +72,8 @@ impl Plugin for TestPlugin {
 /// State every thread may touch.
 pub struct Shared<'a> {
     kind: Kind,
+    /// The bundle it was loaded from, when the host said.
+    bundle: Option<&'a std::path::Path>,
     host: HostSharedHandle<'a>,
     gain: AtomicU64,
     /// Latency asked for by the latency parameter.
@@ -94,9 +99,14 @@ fn bank_index(id: u32) -> Option<usize> {
 }
 
 impl<'a> Shared<'a> {
-    pub fn new(kind: Kind, host: HostSharedHandle<'a>) -> Shared<'a> {
+    pub fn new(
+        kind: Kind,
+        host: HostSharedHandle<'a>,
+        bundle: Option<&'a std::path::Path>,
+    ) -> Shared<'a> {
         Shared {
             kind,
+            bundle,
             host,
             gain: AtomicU64::new(1.0f64.to_bits()),
             want_latency: AtomicU32::new(0),
@@ -192,6 +202,8 @@ pub struct MainThread<'a> {
     pub(crate) host: HostMainThreadHandle<'a>,
     /// The timer kind's state (see `timer.rs`).
     pub(crate) clock: std::cell::RefCell<crate::timer::Clock>,
+    /// The timer kind's headless editor (see `editor.rs`).
+    pub(crate) editor: std::cell::RefCell<crate::editor::Editor>,
 }
 
 impl<'a> MainThread<'a> {
@@ -200,7 +212,20 @@ impl<'a> MainThread<'a> {
             shared,
             host,
             clock: Default::default(),
+            editor: Default::default(),
         }
+    }
+
+    /// The bundle it was loaded from, when the host said.
+    pub(crate) fn bundle(&self) -> Option<&std::path::Path> {
+        self.shared.bundle
+    }
+}
+
+impl Drop for MainThread<'_> {
+    fn drop(&mut self) {
+        // The plug-in is being destroyed (CLAP `destroy`).
+        self.editor_destroying();
     }
 }
 

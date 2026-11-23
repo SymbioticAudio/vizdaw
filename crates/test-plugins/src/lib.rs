@@ -10,15 +10,17 @@
 //! | `vizdaw.test.bank` | passes audio through; 24 automatable parameters (ids 100–123) that only store their values |
 //! | `vizdaw.test.crasher` | crashes (SIGSEGV) when activated |
 //! | `vizdaw.test.hanger` | never returns from activate |
-//! | `vizdaw.test.timer` | passes audio through; registers host timers and file descriptors (CLAP `timer-support`, `posix-fd-support`) on command: the unlisted `PARAM_TIMER_*`/`PARAM_FD_*` switches; it counts its callbacks, read back as parameter values |
+//! | `vizdaw.test.timer` | passes audio through; registers host timers and file descriptors (CLAP `timer-support`, `posix-fd-support`) on command: the unlisted `PARAM_TIMER_*`/`PARAM_FD_*` switches; it counts its callbacks, read back as parameter values. It has a headless embedded editor (CLAP `gui`, Cocoa or X11) that draws nothing and reports what the host told it (`PARAM_GUI_*`) |
 //!
 //! [`bundle`] builds the `.clap` bundle for tests.
 
 mod bundle;
+mod editor;
 mod plugin;
 mod timer;
 
 pub use bundle::{bundle, copy_bundle, scanner};
+pub use editor::{BASE_SIZE, MAX_SIZE, MIN_SIZE};
 
 use clack_plugin::entry::prelude::*;
 use clack_plugin::prelude::*;
@@ -139,6 +141,32 @@ pub const PARAM_FD_UNREGISTER: u32 = 206;
 pub const PARAM_FD_SELF_UNREGISTER: u32 = 207;
 /// Timer kind: the result of the last register or unregister switch.
 pub const PARAM_LAST_RESULT: u32 = 210;
+/// Timer kind's editor: 1 makes it resizable (`can_resize`, `adjust_size`
+/// clamping to [`MIN_SIZE`]–[`MAX_SIZE`], `set_size`), 0 fixed (the
+/// default).
+pub const PARAM_GUI_RESIZABLE: u32 = 220;
+/// Timer kind's editor: asks the host to resize it to `value >> 16` by
+/// `value & 0xFFFF` (the API's units, CLAP `request_resize`);
+/// [`PARAM_LAST_RESULT`] reads 1 when the host accepted, else 0.
+pub const PARAM_GUI_REQUEST_RESIZE: u32 = 221;
+/// Timer kind: unregisters timer `value` inside the next `gui.destroy`
+/// and appends `gui.destroy unregister <id>: <1|0>` to `<bundle>.log`.
+pub const PARAM_GUI_DESTROY_UNREGISTER: u32 = 222;
+/// Timer kind: unregisters timer `value` while the plug-in is destroyed
+/// and appends `destroy unregister <id>: <1|0>` to `<bundle>.log`.
+pub const PARAM_DESTROY_UNREGISTER: u32 = 223;
+/// Timer kind's editor: reads the last `set_scale` (0 when none came).
+pub const PARAM_GUI_SCALE: u32 = 230;
+/// Timer kind's editor: reads 1 if `set_scale` came before the last
+/// `set_parent` (since its `create`), 0 if not, −1 before any `set_parent`.
+pub const PARAM_GUI_SCALED_FIRST: u32 = 231;
+/// Timer kind's editor: reads its width in the API's units (physical
+/// pixels on X11, points on Cocoa); [`BASE_SIZE`] times the scale at first.
+pub const PARAM_GUI_WIDTH: u32 = 232;
+/// Timer kind's editor: reads its height, as [`PARAM_GUI_WIDTH`].
+pub const PARAM_GUI_HEIGHT: u32 = 233;
+/// Timer kind's editor: reads 1 while created, else 0.
+pub const PARAM_GUI_OPEN: u32 = 234;
 /// Timer kind: reads how many times timer `id` fired, at `PARAM_TIMER_FIRES + id`.
 pub const PARAM_TIMER_FIRES: u32 = 1000;
 /// Timer kind: reads how many callbacks descriptor `fd` had, at `PARAM_FD_CALLS + fd`.
@@ -153,10 +181,13 @@ pub struct TestEntry {
 }
 
 impl Entry for TestEntry {
-    fn new(_bundle_path: Option<&CStr>) -> Result<Self, EntryLoadError> {
+    fn new(bundle_path: Option<&CStr>) -> Result<Self, EntryLoadError> {
         Ok(TestEntry {
             factory: PluginFactoryWrapper::new(TestFactory {
                 descriptors: Kind::ALL.map(Kind::descriptor),
+                bundle: bundle_path
+                    .and_then(|p| p.to_str().ok())
+                    .map(std::path::PathBuf::from),
             }),
         })
     }
@@ -168,6 +199,8 @@ impl Entry for TestEntry {
 
 struct TestFactory {
     descriptors: [PluginDescriptor; 8],
+    /// Where the bundle was loaded from (the timer kind logs beside it).
+    bundle: Option<std::path::PathBuf>,
 }
 
 impl PluginFactoryImpl for TestFactory {
@@ -192,7 +225,7 @@ impl PluginFactoryImpl for TestFactory {
         Some(PluginInstance::new::<TestPlugin>(
             host_info,
             desc,
-            move |host| Ok(plugin::Shared::new(kind, host)),
+            move |host| Ok(plugin::Shared::new(kind, host, self.bundle.as_deref())),
             |host, shared| Ok(plugin::MainThread::new(host, shared)),
         ))
     }

@@ -63,6 +63,10 @@ pub struct IdleReport {
     pub params_changed: Vec<PluginInstanceId>,
     /// Instances whose state changed in a way worth saving (autosave).
     pub state_dirty: Vec<PluginInstanceId>,
+    /// Open editors that resized themselves, with their new size in
+    /// logical points ([`crate::InstanceEvents::editor_resize`]): their
+    /// windows should follow.
+    pub editor_resize: Vec<(PluginInstanceId, (u32, u32))>,
     /// The engine owes a load (processors were shelved, an edit waited
     /// for a load, a load failed, a restart is due). From
     /// [`PluginHost::idle`]: the caller loads the engine once `sync`
@@ -84,6 +88,7 @@ impl IdleReport {
         self.rejected_state.extend(o.rejected_state);
         self.params_changed.extend(o.params_changed);
         self.state_dirty.extend(o.state_dirty);
+        self.editor_resize.extend(o.editor_resize);
         self.reload |= o.reload;
         if o.compiled.is_some() {
             self.compiled = o.compiled;
@@ -1203,6 +1208,9 @@ impl PluginHost {
         }
         if ev.state_dirty {
             r.state_dirty.push(id);
+        }
+        if let Some(size) = ev.editor_resize {
+            r.editor_resize.push((id, size));
         }
         if ev.restart || ev.latency_changed {
             self.shelf.set_reason(id, "restarting");

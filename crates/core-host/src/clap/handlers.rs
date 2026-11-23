@@ -28,7 +28,7 @@ use std::cell::{Cell, RefCell};
 #[cfg(unix)]
 use std::os::unix::io::RawFd;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread::ThreadId;
 
@@ -61,11 +61,27 @@ pub(crate) struct Flags {
     pub state_dirty: AtomicBool,
     pub ports: AtomicBool,
     pub gui_closed: AtomicBool,
+    /// The editor is open and said it can resize: `request_resize` is
+    /// accepted (and checked again on the main thread).
+    pub gui_resizable: AtomicBool,
+    /// Its resize hints changed: `can_resize` is read again.
+    pub gui_hints: AtomicBool,
+    /// The last accepted `request_resize`, in the API's units
+    /// ([`GuiSize::pack_to_u64`]; 0: none).
+    pub gui_resize: AtomicU64,
 }
 
 impl Flags {
     pub(crate) fn take(flag: &AtomicBool) -> bool {
         flag.swap(false, Ordering::AcqRel)
+    }
+
+    /// Takes the pending resize request, if any.
+    pub(crate) fn take_resize(&self) -> Option<GuiSize> {
+        match self.gui_resize.swap(0, Ordering::AcqRel) {
+            0 => None,
+            v => Some(GuiSize::unpack_from_u64(v)),
+        }
     }
 }
 
@@ -161,10 +177,26 @@ impl HostParamsImplShared for Shared {
 }
 
 impl HostGuiImpl for Shared {
-    fn resize_hints_changed(&self) {}
+    fn resize_hints_changed(&self) {
+        self.flags.gui_hints.store(true, Ordering::Release);
+    }
 
-    fn request_resize(&self, _size: GuiSize) -> Result<(), HostError> {
-        Err(HostError::Message("the host window decides its size"))
+    /// Accepted only while a resizable editor is open; the main thread
+    /// clamps it through `adjust_size`, sets it and reports it at the next
+    /// idle (`InstanceEvents::editor_resize`). The last request wins.
+    fn request_resize(&self, size: GuiSize) -> Result<(), HostError> {
+        if size.width == 0 || size.height == 0 {
+            return Err(HostError::Message("an empty size"));
+        }
+        if !self.flags.gui_resizable.load(Ordering::Acquire) {
+            return Err(HostError::Message(
+                "the editor is not open or not resizable",
+            ));
+        }
+        self.flags
+            .gui_resize
+            .store(size.pack_to_u64(), Ordering::Release);
+        Ok(())
     }
 
     fn request_show(&self) -> Result<(), HostError> {

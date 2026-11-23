@@ -35,6 +35,10 @@ pub struct InstanceEvents {
     /// Its state changed in a way the host should save (CLAP
     /// `state.mark_dirty`).
     pub state_dirty: bool,
+    /// Its open editor resized itself (CLAP `gui.request_resize`, accepted
+    /// and clamped by its `adjust_size`) to this size in logical points:
+    /// the window should follow. A refused request reports nothing.
+    pub editor_resize: Option<(u32, u32)>,
 }
 
 /// A plug-in's own presets (plan 5f-4 Ruling 7).
@@ -89,12 +93,27 @@ impl ParentView {
 }
 
 /// A plugin's own editor. Main thread only.
+///
+/// Every size here is in logical points, on every platform: a format whose
+/// window API counts physical pixels (CLAP on X11) converts with the scale
+/// given to [`PluginEditor::set_scale`].
 pub trait PluginEditor {
-    /// Attaches the editor to `parent` and shows it; returns its size: in
-    /// points on macOS, in physical pixels for CLAP editors on Linux (X11;
-    /// the host does not call CLAP `set_scale` yet).
+    /// The backing scale (physical pixels per point) of the window the
+    /// editor will open in; non-finite or non-positive values count as 1.
+    /// Call it before [`PluginEditor::open`]: it applies at the next open
+    /// (for CLAP, between `create` and `set_parent`, in the order the gui
+    /// extension asks; a window API that already works in points, Cocoa,
+    /// gets no `set_scale`). To follow a window to a screen with another
+    /// scale, set it and open again. The default ignores it (AU editors
+    /// are sized in points by AppKit).
+    fn set_scale(&mut self, scale: f64) {
+        let _ = scale;
+    }
+    /// Attaches the editor to `parent` and shows it; returns its size in
+    /// points.
     fn open(&mut self, parent: ParentView) -> Result<(u32, u32), HostError>;
-    /// Asks for a new size; returns the size the plugin accepted.
+    /// Asks for a new size in points; returns the size in points the
+    /// plugin accepted.
     fn resize(&mut self, width: u32, height: u32) -> Result<(u32, u32), HostError>;
     /// Whether the user may resize it.
     fn can_resize(&mut self) -> bool;

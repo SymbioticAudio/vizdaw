@@ -28,6 +28,7 @@ use std::os::unix::io::RawFd;
 use std::path::Path;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 type Inst = clack_host::plugin::PluginInstance<VizHost>;
 
@@ -37,15 +38,26 @@ pub struct ClapInstance {
     /// and descriptor callbacks between the host's own calls. Methods here
     /// `borrow_mut` it for one call; that cannot re-enter (see
     /// `RunLoopTarget::with`).
+    ///
+    /// Declared before `_member`, so it drops first: the plug-in is
+    /// destroyed while it is still in the run loop, and its own
+    /// unregister calls from `gui.destroy` and `destroy` are accepted.
     inst: Rc<RefCell<Inst>>,
-    /// The instance's place in the run loop; left first on drop.
-    member: Option<Member>,
+    /// The instance's place in the run loop, left (and its leftover
+    /// registrations dropped) after the plug-in is destroyed.
+    _member: Member,
     /// The extensions it declared (read once, while it initialized).
     exts: PluginExts,
     flags: Arc<Flags>,
     info: PluginInfo,
     clap_notes: bool,
     gui_open: bool,
+    /// The window scale for the next editor open (physical pixels per
+    /// point, [`PluginEditor::set_scale`]).
+    scale: f64,
+    /// Physical pixels per point of the open editor's sizes: its scale on
+    /// a physical-pixel window API (X11), 1 on a logical one (Cocoa).
+    gui_scale: f64,
     /// The parameters set a step away and back before a second activation
     /// (plan 6g Task 5): the bundled Multi-Q's continuous, writable ones;
     /// empty for every other plug-in.
@@ -106,7 +118,7 @@ impl ClapInstance {
         let member = run_loop::join(table, target);
         let mut me = ClapInstance {
             inst,
-            member: Some(member),
+            _member: member,
             exts,
             flags,
             info: PluginInfo {
@@ -121,6 +133,8 @@ impl ClapInstance {
             },
             clap_notes: false,
             gui_open: false,
+            scale: 1.0,
+            gui_scale: 1.0,
             refresh: Vec::new(),
         };
         me.read_info();
@@ -403,12 +417,15 @@ impl PluginInstance for ClapInstance {
         }
         if Flags::take(&self.flags.gui_closed) {
             self.gui_open = false;
+            self.flags.gui_resizable.store(false, Ordering::Release);
         }
+        let editor_resize = self.editor_resize_request();
         InstanceEvents {
             restart: Flags::take(&self.flags.restart),
             latency_changed: Flags::take(&self.flags.latency),
             params_changed: Flags::take(&self.flags.params) || ports,
             state_dirty: Flags::take(&self.flags.state_dirty),
+            editor_resize,
         }
     }
 
@@ -448,7 +465,68 @@ pub fn editor_api() -> Option<GuiApiType<'static>> {
     }
 }
 
+/// A window scale, or 1 when it is not a usable one.
+fn usable_scale(scale: f64) -> f64 {
+    if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    }
+}
+
+/// An editor size in the API's units as logical points, rounded up so the
+/// window never clips it.
+fn to_points(size: GuiSize, scale: f64) -> (u32, u32) {
+    let f = |v: u32| ((f64::from(v) / scale).ceil() as u32).max(1);
+    (f(size.width), f(size.height))
+}
+
+/// Logical points as a size in the API's units.
+fn from_points(width: u32, height: u32, scale: f64) -> GuiSize {
+    let f = |v: u32| ((f64::from(v) * scale).round() as u32).max(1);
+    GuiSize {
+        width: f(width),
+        height: f(height),
+    }
+}
+
+impl ClapInstance {
+    /// Applies the editor's last `request_resize` (main thread, from
+    /// `idle`): only while it is open and can resize, clamped through its
+    /// `adjust_size`, then set; returns the size it took in points. A
+    /// refused request changes nothing.
+    fn editor_resize_request(&mut self) -> Option<(u32, u32)> {
+        let hints = Flags::take(&self.flags.gui_hints);
+        let want = self.flags.take_resize();
+        if !self.gui_open || (want.is_none() && !hints) {
+            return None;
+        }
+        let gui = self.exts().gui?;
+        let mut inst = self.inst.borrow_mut();
+        let h = inst.plugin_handle();
+        let resizable = gui.can_resize(&h);
+        self.flags.gui_resizable.store(resizable, Ordering::Release);
+        let want = want.filter(|_| resizable)?;
+        let size = gui.adjust_size(&h, want).unwrap_or(want);
+        gui.set_size(&h, size).ok()?;
+        Some(to_points(size, self.gui_scale))
+    }
+
+    /// Hides and destroys the open editor.
+    fn destroy_gui(&mut self, gui: &clack_extensions::gui::PluginGui, h: &PluginMainThreadHandle) {
+        gui.hide(h).ok();
+        gui.destroy(h);
+        self.gui_open = false;
+        self.flags.gui_resizable.store(false, Ordering::Release);
+        self.flags.gui_resize.store(0, Ordering::Release);
+    }
+}
+
 impl PluginEditor for ClapInstance {
+    fn set_scale(&mut self, scale: f64) {
+        self.scale = usable_scale(scale);
+    }
+
     fn open(&mut self, parent: ParentView) -> Result<(u32, u32), HostError> {
         let gui = self
             .exts()
@@ -456,13 +534,15 @@ impl PluginEditor for ClapInstance {
             .ok_or_else(|| HostError::EditorUnavailable("no GUI".into()))?;
         let api = editor_api()
             .ok_or_else(|| HostError::EditorUnavailable("no embedding API here".into()))?;
-        let mut inst = self.inst.borrow_mut();
+        let inst = Rc::clone(&self.inst);
+        let mut inst = inst.borrow_mut();
         let h = inst.plugin_handle();
         if self.gui_open {
-            gui.hide(&h).ok();
-            gui.destroy(&h);
-            self.gui_open = false;
+            self.destroy_gui(&gui, &h);
         }
+        // Nothing from an earlier editor carries over.
+        self.flags.gui_resize.store(0, Ordering::Release);
+        self.flags.gui_hints.store(false, Ordering::Release);
         gui.create(
             &h,
             GuiConfiguration {
@@ -472,21 +552,31 @@ impl PluginEditor for ClapInstance {
         )
         .map_err(|e| HostError::EditorUnavailable(format!("{e:?}")))?;
         self.gui_open = true;
+        // CLAP gui order: create, set_scale, can_resize, size, set_parent,
+        // show. A window API in points (Cocoa) gets no scale; a plug-in
+        // that measures the screen itself may decline it, and its pixels
+        // are still the window's physical pixels.
+        self.gui_scale = if api.uses_logical_size() {
+            1.0
+        } else {
+            let _ = gui.set_scale(&h, self.scale);
+            self.scale
+        };
+        self.flags
+            .gui_resizable
+            .store(gui.can_resize(&h), Ordering::Release);
         if let Err(e) = ffi::set_native_parent(&gui, &h, parent.0) {
-            gui.destroy(&h);
-            self.gui_open = false;
+            self.destroy_gui(&gui, &h);
             return Err(e);
         }
         if let Err(e) = gui.show(&h) {
-            gui.destroy(&h);
-            self.gui_open = false;
+            self.destroy_gui(&gui, &h);
             return Err(HostError::EditorUnavailable(format!("{e:?}")));
         }
-        let size = gui.get_size(&h).unwrap_or(GuiSize {
-            width: 400,
-            height: 300,
-        });
-        Ok((size.width, size.height))
+        let size = gui
+            .get_size(&h)
+            .map_or((400, 300), |s| to_points(s, self.gui_scale));
+        Ok(size)
     }
 
     fn resize(&mut self, width: u32, height: u32) -> Result<(u32, u32), HostError> {
@@ -496,12 +586,11 @@ impl PluginEditor for ClapInstance {
             .ok_or_else(|| HostError::EditorUnavailable("no GUI".into()))?;
         let mut inst = self.inst.borrow_mut();
         let h = inst.plugin_handle();
-        let want = gui
-            .adjust_size(&h, GuiSize { width, height })
-            .unwrap_or(GuiSize { width, height });
+        let asked = from_points(width, height, self.gui_scale);
+        let want = gui.adjust_size(&h, asked).unwrap_or(asked);
         gui.set_size(&h, want)
             .map_err(|e| HostError::EditorUnavailable(format!("{e:?}")))?;
-        Ok((want.width, want.height))
+        Ok(to_points(want, self.gui_scale))
     }
 
     fn can_resize(&mut self) -> bool {
@@ -515,21 +604,51 @@ impl PluginEditor for ClapInstance {
         if !self.gui_open {
             return;
         }
-        if let Some(gui) = self.exts().gui {
-            let mut inst = self.inst.borrow_mut();
-            let h = inst.plugin_handle();
-            gui.hide(&h).ok();
-            gui.destroy(&h);
+        match self.exts().gui {
+            Some(gui) => {
+                let inst = Rc::clone(&self.inst);
+                let mut inst = inst.borrow_mut();
+                self.destroy_gui(&gui, &inst.plugin_handle());
+            }
+            None => self.gui_open = false,
         }
-        self.gui_open = false;
     }
 }
 
 impl Drop for ClapInstance {
     fn drop(&mut self) {
-        // No callback reaches it from here on, and its registrations go.
-        drop(self.member.take());
+        // Editor closed and plug-in deactivated while it is still in the
+        // run loop; then the fields drop: `inst` (the plug-in's destroy,
+        // whose unregister calls are still accepted) before `_member`
+        // (leaving the loop, which drops any registrations it kept).
         PluginEditor::close(self);
         let _ = self.inst.borrow_mut().try_deactivate();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_convert_between_physical_pixels_and_points() {
+        let px = |width, height| GuiSize { width, height };
+        assert_eq!(to_points(px(600, 400), 2.0), (300, 200));
+        assert_eq!(to_points(px(601, 401), 2.0), (301, 201), "rounded up");
+        assert_eq!(to_points(px(450, 300), 1.5), (300, 200));
+        assert_eq!(to_points(px(1, 1), 4.0), (1, 1), "never empty");
+        assert_eq!(to_points(px(640, 480), 1.0), (640, 480));
+        assert_eq!(from_points(300, 200, 2.0), px(600, 400));
+        assert_eq!(from_points(301, 201, 1.25), px(376, 251));
+        assert_eq!(from_points(0, 0, 2.0), px(1, 1));
+    }
+
+    #[test]
+    fn unusable_scales_count_as_one() {
+        assert_eq!(usable_scale(2.0), 2.0);
+        assert_eq!(usable_scale(1.25), 1.25);
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(usable_scale(bad), 1.0, "{bad}");
+        }
     }
 }

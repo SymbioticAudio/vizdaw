@@ -43,7 +43,7 @@ impl MainThread<'_> {
             .map(|t| t.0)
     }
 
-    fn unregister_timer(&self, id: u32) -> bool {
+    pub(crate) fn unregister_timer(&self, id: u32) -> bool {
         self.host
             .get_extension::<HostTimer>()
             .is_some_and(|t| t.unregister_timer(&self.host, TimerId(id)).is_ok())
@@ -87,7 +87,10 @@ impl MainThread<'_> {
                 self.clock.borrow_mut().fd_self_unregister.insert(v as i32);
                 return;
             }
-            _ => return,
+            _ => match self.editor_command(id, v) {
+                Some(r) => r,
+                None => return,
+            },
         };
         self.clock.borrow_mut().last = last;
     }
@@ -97,6 +100,9 @@ impl MainThread<'_> {
         let c = self.clock.borrow();
         if id == PARAM_LAST_RESULT {
             return Some(c.last);
+        }
+        if let Some(v) = self.editor_readout(id) {
+            return Some(v);
         }
         if id >= PARAM_FD_FLAGS {
             let fd = (id - PARAM_FD_FLAGS) as i32;
