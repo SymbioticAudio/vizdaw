@@ -270,7 +270,7 @@ impl DocumentModel {
                 .collect(),
         };
         let range = match t {
-            EditorTarget::Block { start, end, .. } => Some(start..end.max(start + 1)),
+            EditorTarget::Block { start, end, .. } => Some(start..end.max(start.saturating_add(1))),
             _ => None,
         };
         let info = self.sequence_info(seq).cloned();
@@ -473,7 +473,7 @@ impl DocumentModel {
             return 0;
         };
         let range = match t {
-            EditorTarget::Block { start, end, .. } => Some(start..end.max(start + 1)),
+            EditorTarget::Block { start, end, .. } => Some(start..end.max(start.saturating_add(1))),
             _ => None,
         };
         let transport = self.last_transport();

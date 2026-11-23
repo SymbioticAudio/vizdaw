@@ -972,8 +972,12 @@ impl Render for DocumentWindow {
         if let Some(after) = list_after {
             self.list_after(after, window, cx);
         }
-        self.sync_list_focus(listed.is_some(), window, cx);
         let bottom_height = bottom.and_then(|b| detail_pane::bottom_height(self.regions.get(), &b));
+        // A hidden pane's table keeps no keyboard.
+        if bottom_height.is_none() {
+            self.list_hidden(window, cx);
+        }
+        self.sync_list_focus(listed.is_some() && bottom_height.is_some(), window, cx);
         if bottom_height.is_none() {
             self.detail_menu_open = false;
         }

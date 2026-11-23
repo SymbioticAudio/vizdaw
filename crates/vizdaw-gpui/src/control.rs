@@ -937,8 +937,9 @@ fn click_at(
 /// locked or the window is hidden. The draw marks the frame for the next
 /// real frame to present. The pump calls this from its own top-level
 /// update (a timer), never from inside a draw. Always drawn: the calls
-/// that need it (`ui.tree`, `ui.click`, `ui.key` with `element`,
-/// `ui.screenshot`) are rare next to frames.
+/// that need it (`ui.tree`, `ui.click`, `ui.screenshot`, and `ui.key`
+/// before every stroke, so the document's keyboard focus is this
+/// moment's when the stroke is routed) are rare next to frames.
 fn fresh_frame(entry: &WindowEntry, cx: &mut App) -> Result<(), ControlError> {
     let any: AnyWindowHandle = entry.handle.into();
     any.update(cx, |_, window, cx| {

@@ -27,7 +27,7 @@ use gpui::{
 };
 use vizdaw_app::DocumentModel;
 use vizdaw_app::editor::EditorTarget;
-use vizdaw_app::list::{ListColumn, ListColumns, ListKind, ListText, Smpte};
+use vizdaw_app::list::{ListColumn, ListColumns, ListKind, ListSource, ListText, Smpte};
 
 use crate::detail_pane;
 use crate::registry::RegistryScope;
@@ -160,6 +160,9 @@ struct CellEdit {
     /// The list's target when the edit began: row IDs are the target's.
     target: EditorTarget,
     row: String,
+    /// What the row showed when the edit began: an undo can move the map
+    /// rows under their IDs (`t1` then names another change).
+    source: ListSource,
     column: ListColumn,
     original: String,
     input: Entity<TextInput>,
@@ -323,6 +326,15 @@ impl ListEditor {
         let max = (d.list_rows().len() as f32 * ROW_HEIGHT - h).max(0.);
         self.scroll = self.scroll.clamp(0., max);
         ListAfter::default()
+    }
+}
+
+/// Whether `now` is still the row `began` was: the same event, or the
+/// same map entry (kind, place and value).
+fn same_row(now: &ListSource, began: &ListSource) -> bool {
+    match (now, began) {
+        (ListSource::Event { row: a, .. }, ListSource::Event { row: b, .. }) => a.id == b.id,
+        _ => now == began,
     }
 }
 
@@ -907,6 +919,21 @@ impl DocumentWindow {
         self.set_list_focused(on, cx);
     }
 
+    /// The bottom pane is not shown: the list gives up the keyboard (a
+    /// cell edit ends, committed), so no key acts on rows out of sight.
+    pub(crate) fn list_hidden(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.list_editor.editing.is_none() && !self.list_editor.focus.is_focused(window) {
+            return;
+        }
+        cx.defer_in(window, |this, window, cx| {
+            this.end_list_cell(true, Movement::Other, window, cx);
+            if this.list_editor.focus.is_focused(window) {
+                window.focus(&this.focus_handle(cx), cx);
+            }
+            this.set_list_focused(false, cx);
+        });
+    }
+
     /// After a draw: an edit begun on another target, or on a list now
     /// closed, ends unsaved; a closed list's table gives the window the
     /// keyboard.
@@ -1101,10 +1128,18 @@ impl DocumentWindow {
                 (d.list_open()
                     && d.list_columns().contains(&column)
                     && ListText::editable(&r, column))
-                .then(|| (ListText::cell(&r, column, &d.list_context()), target))
+                .then(|| {
+                    (
+                        ListText::cell(&r, column, &d.list_context()),
+                        target,
+                        r.source.clone(),
+                    )
+                })
             })
         };
-        let Some((text, target)) = text else { return };
+        let Some((text, target, source)) = text else {
+            return;
+        };
         self.end_list_cell(true, Movement::Other, window, cx);
         self.list_editor.menu = None;
         let input = cx.new(|cx| TextInput::new("", cx).cell().with_text(&text));
@@ -1134,6 +1169,7 @@ impl DocumentWindow {
         self.list_editor.editing = Some(CellEdit {
             target,
             row: id.to_owned(),
+            source,
             column,
             original: text,
             input,
@@ -1162,7 +1198,13 @@ impl DocumentWindow {
         let (row, column) = (e.row.clone(), e.column);
         self.with_model(cx, |d| {
             d.end_text_editing(&owner(column));
-            if changed {
+            // The row must still be the one the edit began on (an event by
+            // its ID; a map row by its kind, tick and value): else the
+            // edit ends unsaved.
+            let same = d
+                .list_row(&row)
+                .is_some_and(|r| same_row(&r.source, &e.source));
+            if changed && same {
                 d.list_commit(&text, &row, column);
             }
         });

@@ -198,6 +198,13 @@ impl Setup {
         self.click_with(&e, Modifiers::none(), 1);
     }
 
+    /// Clicks the first row, if any is in the tree (none in a hidden pane).
+    fn click_row_if_any(&mut self) {
+        if let Some(r) = self.rows().into_iter().next() {
+            self.click_with(&r, Modifiers::none(), 1);
+        }
+    }
+
     fn selected(&mut self) -> Vec<String> {
         self.window
             .read_with(&self.cx, |v, _| v.list_editor().selected())
@@ -597,4 +604,121 @@ fn a_retarget_cancels_an_open_cell_edit(cx: &mut TestAppContext) {
     assert!(s.transport_keys());
     s.keys("enter");
     assert!(s.fake.edits().is_empty(), "{:?}", s.fake.edits());
+}
+
+/// Song (3) with a second tempo change at bar 2 (`t1`), and an undo step
+/// to undo.
+fn two_tempos() -> FakeSession {
+    use vizdaw_ffi::events::TempoPointRow;
+    let f = roll_fake();
+    let mut info = vizdaw_app::testing::four_four(3);
+    info.tempo.push(TempoPointRow {
+        tick: BAR,
+        bpm: 100.,
+        ramp: false,
+    });
+    f.set_info(3, info);
+    f
+}
+
+/// Undo moves the tempo map under the edited `t1`: it now names another
+/// change (at bar 3).
+fn undo_shifts_t1(f: &FakeSession) {
+    use vizdaw_ffi::events::TempoPointRow;
+    let mut info = vizdaw_app::testing::four_four(3);
+    info.tempo.push(TempoPointRow {
+        tick: 2 * BAR,
+        bpm: 90.,
+        ramp: false,
+    });
+    f.set_info(3, info);
+}
+
+fn tempo_list(cx: &mut TestAppContext) -> Setup {
+    let f = two_tempos();
+    let mut s = setup(cx, f);
+    let mut undoable = s.fake.snap();
+    undoable.version += 1;
+    undoable.undo_label = Some("Insert Tempo".into());
+    s.fake.set_idle(Some(undoable));
+    s.update_model(|d| {
+        d.idle();
+        d.open_detail(
+            EditorTarget::Sequence { seq: 3 },
+            Some(DetailEditorKind::List),
+        )
+    });
+    s
+}
+
+/// ⌘Z while a map row's cell is edited: the row the edit began on is no
+/// longer `t1`'s, so Return writes nothing.
+#[gpui::test]
+fn undo_under_a_cell_edit_by_key_writes_nothing_elsewhere(cx: &mut TestAppContext) {
+    let mut s = tempo_list(cx);
+    s.begin("t1", ListColumn::Position);
+    assert_eq!(s.editing(), Some(("t1".into(), ListColumn::Position)));
+    s.type_text("4");
+    undo_shifts_t1(&s.fake);
+    s.keys(&secondary("z"));
+    assert!(
+        s.fake.calls().iter().any(|c| c == "undo"),
+        "{:?}",
+        s.fake.calls()
+    );
+    s.keys("enter");
+    assert!(s.fake.edits().is_empty(), "{:?}", s.fake.edits());
+    assert!(s.transport_keys());
+}
+
+/// The same with `edit.undo` run as the channel runs it.
+#[gpui::test]
+fn undo_under_a_cell_edit_by_channel_writes_nothing_elsewhere(cx: &mut TestAppContext) {
+    let mut s = tempo_list(cx);
+    s.begin("t1", ListColumn::Position);
+    s.type_text("4");
+    undo_shifts_t1(&s.fake);
+    s.update_model(|d| {
+        vizdaw_app::commands::run("edit.undo", &[], d).expect("undo runs");
+    });
+    s.keys("enter");
+    assert!(s.fake.edits().is_empty(), "{:?}", s.fake.edits());
+    // An unchanged row still commits.
+    s.begin("t1", ListColumn::Position);
+    s.type_text("5");
+    s.keys("enter");
+    assert_eq!(s.fake.edits().len(), 1, "{:?}", s.fake.edits());
+}
+
+/// A hidden bottom pane gives up the keyboard: Delete deletes nothing
+/// out of sight, and an open cell edit ends (committed).
+#[gpui::test]
+fn a_hidden_pane_keeps_no_keyboard(cx: &mut TestAppContext) {
+    let mut s = list_view(cx);
+    s.click_row(FIRST);
+    let second = s.element("row", SECOND);
+    s.click_with(&second, Modifiers::shift(), 1);
+    assert!(s.model(|d| d.list_focused()));
+    s.keys(if cfg!(target_os = "macos") {
+        "ctrl-cmd-down"
+    } else {
+        "ctrl-down"
+    });
+    assert!(s.model(|d| !d.list_focused() && d.return_key_enabled()));
+    s.keys("backspace");
+    s.keys("delete");
+    assert!(s.fake.edits().is_empty(), "{:?}", s.fake.edits());
+
+    // Shown again; a cell edit, then a window too short for the pane.
+    s.update_model(|d| d.update_layout(|l| l.views.arrange.bottom.shown = true));
+    s.begin("e1", ListColumn::Position);
+    s.type_text("2");
+    s.cx.simulate_resize(gpui::size(px(1000.), px(300.)));
+    s.cx.run_until_parked();
+    assert_eq!(s.editing(), None, "the edit ended");
+    assert_eq!(s.fake.edits().last(), Some(&moved(1, BAR)), "committed");
+    assert!(s.model(|d| !d.list_focused() && d.transport_keys_enabled()));
+    s.click_row_if_any();
+    s.keys("backspace");
+    assert_eq!(s.fake.edits().len(), 1, "{:?}", s.fake.edits());
 }

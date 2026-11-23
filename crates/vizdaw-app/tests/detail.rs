@@ -263,3 +263,29 @@ fn another_target_drops_the_piano_roll_lanes_but_keeps_the_rest() {
     assert!(v.get("lanes").is_none());
     assert_eq!(v["stripRows"], serde_json::json!([1]));
 }
+
+/// A hostile `ui.json` block target at the ends of the tick range opens
+/// without overflowing (debug builds panic on overflow).
+#[test]
+fn a_block_target_at_the_tick_limits_does_not_overflow() {
+    for (start, end) in [(i64::MAX, i64::MIN), (0, i64::MIN), (i64::MAX, i64::MAX)] {
+        let f = Arc::new(editor_fake());
+        f.set_layout(Some(&format!(
+            r#"{{"detail":{{"kind":"list","target":{{"block":{{"seq":3,"lane":31,"start":{start},"end":{end}}}}}}}}}"#
+        )));
+        let mut m = model(&f);
+        assert_eq!(
+            m.layout().detail.as_ref().map(|d| d.target),
+            Some(vizdaw_app::editor::EditorTarget::Block {
+                seq: 3,
+                lane: 31,
+                start,
+                end
+            }),
+            "the hostile target was read"
+        );
+        let _ = m.detail_title();
+        let _ = m.list_rows();
+        m.list_insert(None);
+    }
+}

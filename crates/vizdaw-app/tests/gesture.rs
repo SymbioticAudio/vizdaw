@@ -349,3 +349,43 @@ fn the_gesture_watches_the_lanes_it_is_given() {
     let lanes: BTreeSet<_> = [CHORDS, (3, 30)].into();
     assert_eq!(m.gesture().unwrap().lanes, lanes);
 }
+
+/// The snapshot of a move drops the drag's track and the abort meets
+/// Busy: the drag stays reverting (a later mouse-up never commits it).
+#[test]
+fn a_busy_abort_as_a_move_drops_the_track_is_never_committed() {
+    let (f, mut m) = open();
+    remove_chords(&f);
+    f.fail_next("abort_edit", busy());
+    m.update_gesture(Some(move1()));
+    m.end_gesture(Some(move1()));
+    assert!(
+        !f.calls().iter().any(|c| c == "end_edit"),
+        "{:?}",
+        f.calls()
+    );
+    m.tick();
+    assert_eq!(f.calls().last().unwrap(), "abort_edit");
+    assert!(m.gesture().is_none());
+    assert!(!f.calls().iter().any(|c| c == "end_edit"));
+    assert_ne!(m.snapshot().undo_label.as_deref(), Some("Move Block"));
+}
+
+/// The same when the final edit's snapshot drops the track.
+#[test]
+fn a_busy_abort_as_the_final_edit_drops_the_track_is_never_committed() {
+    let (f, mut m) = open();
+    m.update_gesture(Some(move1()));
+    remove_chords(&f);
+    f.fail_next("abort_edit", busy());
+    m.end_gesture(Some(move2()));
+    assert!(
+        !f.calls().iter().any(|c| c == "end_edit"),
+        "{:?}",
+        f.calls()
+    );
+    m.tick();
+    assert_eq!(f.calls().last().unwrap(), "abort_edit");
+    assert!(m.gesture().is_none());
+    assert!(!f.calls().iter().any(|c| c == "end_edit"));
+}

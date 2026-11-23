@@ -207,8 +207,11 @@ impl DocumentModel {
     }
 
     /// Stores `g` back, unless applying a snapshot cancelled the gesture.
-    fn keep(&mut self, g: Gesture) {
-        if self.editor.gesture.is_some() {
+    /// A cancel that met Busy while applying marked the stored gesture
+    /// reverting: `g`, cloned before, keeps that mark.
+    fn keep(&mut self, mut g: Gesture) {
+        if let Some(stored) = &self.editor.gesture {
+            g.reverting |= stored.reverting;
             self.editor.gesture = Some(g);
         }
     }
@@ -253,8 +256,13 @@ impl DocumentModel {
                     self.apply(s);
                     g.applied = Some(cmd);
                     g.uncertain = false;
-                    if self.editor.gesture.is_none() {
-                        return;
+                    // Applying cancelled the gesture (its track vanished),
+                    // or is still cancelling it (the abort met Busy): it
+                    // never commits.
+                    match &self.editor.gesture {
+                        None => return,
+                        Some(stored) if stored.reverting => return,
+                        Some(_) => {}
                     }
                     self.editor.gesture = Some(g);
                 }

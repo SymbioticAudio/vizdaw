@@ -241,7 +241,7 @@ impl DocumentModel {
             .map(|i| i.meter.clone())
             .unwrap_or_default();
         let first = bar_at(start, &meter).number;
-        let last = bar_at((end - 1).max(start), &meter).number;
+        let last = bar_at(end.saturating_sub(1).max(start), &meter).number;
         let bars = if first == last {
             format!("bar {first}")
         } else {
