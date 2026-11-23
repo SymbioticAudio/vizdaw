@@ -224,7 +224,7 @@ fn the_notes_are_the_lanes_notes_only() {
     let lanes = m.roll_lane_notes();
     assert_eq!(lanes.len(), 1);
     assert_eq!(lanes[0].lane, key(31));
-    assert_eq!(lanes[0].notes.len(), 2);
+    assert_eq!(lanes[0].notes().len(), 2);
 }
 
 #[test]
@@ -393,17 +393,17 @@ fn busy() -> vizdaw_ffi::VizError {
 #[test]
 fn a_build_from_a_busy_read_is_not_kept_for_the_version() {
     let (f, mut m) = make(lane_target(31), None);
-    assert_eq!(m.roll_lane_notes()[0].notes.len(), 2);
+    assert_eq!(m.roll_lane_notes()[0].notes().len(), 2);
     f.set_events(3, 31, vec![note_row(1, 0, 60)]);
     f.fail_next("lane_events", busy());
     m.rename_track(31, "Kit");
     assert_eq!(
-        m.roll_lane_notes()[0].notes.len(),
+        m.roll_lane_notes()[0].notes().len(),
         2,
         "while busy: the last notes"
     );
     assert_eq!(
-        m.roll_lane_notes()[0].notes.len(),
+        m.roll_lane_notes()[0].notes().len(),
         1,
         "once the core answers: the new ones"
     );

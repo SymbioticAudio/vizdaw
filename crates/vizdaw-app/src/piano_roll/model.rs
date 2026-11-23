@@ -29,11 +29,34 @@ pub struct PianoRollReveal {
     pub serial: u64,
 }
 
-/// One shown track and its notes, in time order.
+/// One shown track and its notes, in time order, with the longest
+/// note's duration (the hit tests' search bound).
 #[derive(Debug, Clone, PartialEq)]
 pub struct LaneNotes {
     pub lane: LaneRef,
-    pub notes: Arc<[EventRow]>,
+    notes: Arc<[EventRow]>,
+    longest: i64,
+}
+
+impl LaneNotes {
+    /// `notes` must be in time order (as the core gives them).
+    pub fn new(lane: LaneRef, notes: Arc<[EventRow]>) -> Self {
+        let longest = notes.iter().map(|n| n.duration.max(0)).max().unwrap_or(0);
+        LaneNotes {
+            lane,
+            notes,
+            longest,
+        }
+    }
+
+    pub fn notes(&self) -> &Arc<[EventRow]> {
+        &self.notes
+    }
+
+    /// The longest note's duration in ticks (0 for none).
+    pub fn longest(&self) -> i64 {
+        self.longest
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -175,10 +198,7 @@ impl DocumentModel {
             .map(|r| {
                 let events = self.lane_events_read(seq, r.id);
                 fresh &= events.fresh;
-                LaneNotes {
-                    lane: LaneRef { seq, lane: r.id },
-                    notes: notes_of(&events.rows),
-                }
+                LaneNotes::new(LaneRef { seq, lane: r.id }, notes_of(&events.rows))
             })
             .collect();
         (built, fresh)
