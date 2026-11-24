@@ -62,8 +62,7 @@ use gpui::{
     MouseUpEvent, PlatformInput, WindowHandle,
 };
 use serde_json::{Value, json};
-use vizdaw_app::commands::{self, APP_COMMANDS, FieldFocus, TRANSPORT_COMMANDS};
-use vizdaw_app::transport_fields::TransportField;
+use vizdaw_app::commands::{self, APP_COMMANDS, TRANSPORT_COMMANDS};
 use vizdaw_app::{DocId, SaveAction};
 use vizdaw_ffi::control::{
     AlertRow, ControlResult, DetailRow, EditorStateRow, TransportMarksRow, result_json,
@@ -684,7 +683,7 @@ fn run_command(
                 }) {
                     SaveAction::Saved => Ok(()),
                     SaveAction::NeedsSaveAs => return Err(ControlError::dialog("Save", &["path"])),
-                    SaveAction::Failed(m) => Err(m),
+                    SaveAction::Failed(m) | SaveAction::Refused(m) => Err(m),
                 },
                 _ => return Err(ControlError::dialog("Save", &["path"])),
             };
@@ -753,10 +752,7 @@ fn run_transport(
         .update(cx, |v, window, cx| v.after_transport(window, cx))
         .map_err(|_| gone())?;
     if let Some(focus) = ran.focus {
-        let field = match focus {
-            FieldFocus::Position => TransportField::Position,
-            FieldFocus::EditIn => TransportField::EditIn,
-        };
+        let field = focus.field();
         let shown = entry
             .handle
             .update(cx, |v, window, cx| {

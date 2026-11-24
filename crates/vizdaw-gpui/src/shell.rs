@@ -31,12 +31,12 @@ use gpui::{
     Window, WindowBounds, WindowHandle, WindowOptions, canvas, div, px, rgb, size,
 };
 use vizdaw_app::alerts::{AlertItem, error_message};
-use vizdaw_app::commands::{self, FieldFocus};
+use vizdaw_app::commands;
 use vizdaw_app::editor::{MainView, PaneSide, PaneView, ViewLayouts};
 use vizdaw_app::mixer::MixerPlacement;
 use vizdaw_app::transport::Shuttle;
 use vizdaw_app::transport_fields::{self as fields_model, TransportField};
-use vizdaw_app::{DocId, DocumentModel, SaveAction, WindowToken};
+use vizdaw_app::{DocId, DocumentModel, SaveAction, SaveChoice, WindowToken};
 use vizdaw_ffi::snapshot::LaneRow;
 
 use crate::app_state::{AppState, WindowKind};
@@ -565,14 +565,8 @@ impl DocumentWindow {
                         let _ = DocumentWindow::open_mixer(&app, doc, cx);
                     });
                 }
-                match ran.focus {
-                    Some(FieldFocus::Position) => {
-                        self.focus_field(TransportField::Position, window, cx)
-                    }
-                    Some(FieldFocus::EditIn) => {
-                        self.focus_field(TransportField::EditIn, window, cx)
-                    }
-                    None => {}
+                if let Some(focus) = ran.focus {
+                    self.focus_field(focus.field(), window, cx);
                 }
             }
             _ => {}
@@ -1090,12 +1084,28 @@ impl DocumentWindow {
 
     fn save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
         self.commit_rename(window, cx);
-        self.save_then_close(false, window, cx);
+        match self.save_choice(false, cx) {
+            SaveChoice::Save => self.save_then_close(false, window, cx),
+            SaveChoice::Panel => self.prompt_save_as(false, window, cx),
+            SaveChoice::Refused(_) => {}
+        }
     }
 
     fn save_as(&mut self, _: &SaveAs, window: &mut Window, cx: &mut Context<Self>) {
         self.commit_rename(window, cx);
-        self.prompt_save_as(false, window, cx);
+        if self.save_choice(true, cx) == SaveChoice::Panel {
+            self.prompt_save_as(false, window, cx);
+        }
+    }
+
+    /// What Save (or Save As) does now; a refusal (recording, a held
+    /// merge) shows in the status line and nothing opens.
+    fn save_choice(&mut self, force_as: bool, cx: &mut Context<Self>) -> SaveChoice {
+        let doc = self.doc;
+        self.app.update(cx, |s, cx| {
+            cx.notify();
+            s.save_choice(doc, force_as)
+        })
     }
 
     fn close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
@@ -1180,11 +1190,13 @@ impl DocumentWindow {
             return true;
         }
         let doc = self.doc;
-        let (dirty, title) = {
+        let (dirty, title, pending) = {
             let s = self.app.read(cx);
+            let d = s.store.document(doc);
             (
                 s.has_unsaved_changes(doc),
-                s.store.document(doc).map(|d| d.snapshot().title.clone()),
+                d.map(|d| d.snapshot().title.clone()),
+                d.is_some_and(DocumentModel::save_after_pass_pending),
             )
         };
         if !dirty {
@@ -1194,17 +1206,17 @@ impl DocumentWindow {
             return false;
         }
         self.prompting = true;
-        let message = format!(
-            "Save changes to \u{201c}{}\u{201d}?",
-            title.unwrap_or_default()
-        );
+        // A Save made while recording is owed: no Don't Save (it would
+        // drop the save the user asked for).
+        let prompt = vizdaw_app::close_prompts::close_prompt(&title.unwrap_or_default(), pending);
+        let buttons = prompt.buttons.clone();
         let answer = crate::alerts::ask(
             window.window_handle(),
             crate::sheet_host::Ask::with_labels(
                 PromptLevel::Warning,
-                &message,
-                Some("Your changes are lost if you don't save them."),
-                &["Save", "Don't Save", "Cancel"],
+                &prompt.message,
+                Some(prompt.detail),
+                &prompt.buttons,
             ),
             cx,
         );
@@ -1212,9 +1224,15 @@ impl DocumentWindow {
             let answer = answer.await;
             this.update_in(cx, |this, window, cx| {
                 this.prompting = false;
-                match answer {
-                    Ok(0) => this.save_then_close(true, window, cx),
-                    Ok(1) => window.remove_window(),
+                use vizdaw_app::close_prompts::{DONT_SAVE, SAVE};
+                match answer.ok().and_then(|i| buttons.get(i).copied()) {
+                    Some(SAVE) => this.save_then_close(true, window, cx),
+                    Some(DONT_SAVE) => {
+                        // A close never saves a pass nobody asked to save.
+                        let doc = this.doc;
+                        this.app.update(cx, |s, _| s.cancel_save_after_pass(doc));
+                        window.remove_window();
+                    }
                     _ => {}
                 }
             })

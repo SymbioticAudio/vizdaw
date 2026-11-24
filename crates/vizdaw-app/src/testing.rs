@@ -14,8 +14,8 @@ use vizdaw_ffi::automation::{
     AutomationModeRow, AutomationStateRow, GestureHolderRow, GesturePhaseRow, StripModeRow,
 };
 use vizdaw_ffi::blocks::{BlockKind, BlockRow, BlockRule};
-use vizdaw_ffi::control::ControlArg;
-use vizdaw_ffi::edit::{EditCommand, LaneEdit, LaneRef, MonitorModeRow};
+use vizdaw_ffi::control::{ControlArg, ControlValue};
+use vizdaw_ffi::edit::{EditCommand, LaneEdit, LaneInputRow, LaneRef, MonitorModeRow};
 use vizdaw_ffi::events::AutomationTargetRow;
 use vizdaw_ffi::events::{
     EventKindRow, EventRow, LaneEvents, MarkerRow, MeterEntryRow, SequenceInfo, TempoPointRow,
@@ -24,14 +24,16 @@ use vizdaw_ffi::mixer::{
     BusRow, DestRow, GroupRow, MidiMixRow, MixerLevels, MixerSnapshot, StripColourRow,
     StripKindRow, StripRow, SwatchRow, VcaRow,
 };
-use vizdaw_ffi::record::RecoveredFileRow;
+use vizdaw_ffi::record::{RecordLaneRow, RecordSpecRow, RecordStateRow, RecoveredFileRow};
 use vizdaw_ffi::revs::LaneRev;
 use vizdaw_ffi::selection::{SelectionRow, TickRange};
 use vizdaw_ffi::session::CopiesSizeRow;
+use vizdaw_ffi::session::click::ClickModeRow;
 use vizdaw_ffi::snapshot::{
     DocSnapshot, LaneRow, PluginFormatTag, PluginRefRow, SeqRow, SlotRow, SlotStatus,
     TransportState,
 };
+use vizdaw_ffi::step::{StepInputRow, StepKindRow, StepRecordRow, StepResultRow, StepStateRow};
 use vizdaw_ffi::tracks::TrackKindRow;
 use vizdaw_ffi::{
     AafExportRequestRow, AafImportRequestRow, AafInfoRow, BitDepthRow, BounceCheckRow,
@@ -42,6 +44,7 @@ use vizdaw_ffi::{
     OpenOptions, ProjectFormatRow, ProjectInfoRow, RecoveryInfo, ReportRow, SmfExportRequestRow,
     SnapshotRow, SongInfoRow,
 };
+use vizdaw_ffi::{ClickRow, InputInfoRow, OverviewRows, OverviewStateRow};
 
 struct State {
     snap: DocSnapshot,
@@ -125,6 +128,37 @@ struct State {
     midi_mixes: Vec<(u64, MidiMixRow)>,
     /// Files and jobs (slice 7a).
     files: Files,
+    /// Recording, step entry, the click and the input (slice 8a).
+    rec: Rec,
+}
+
+/// The fake's recording side: a pass while `pass` is some, its fates,
+/// the owed save, the click and the input.
+#[derive(Default)]
+struct Rec {
+    /// The pass recording now.
+    pass: Option<RecordStateRow>,
+    /// The completed passes' fates: none undecided, some(true) kept.
+    fates: Vec<Option<bool>>,
+    save_after_pass: bool,
+    save_as_refusal: Option<String>,
+    /// The metronome (none: the core's default).
+    click: Option<ClickRow>,
+    /// Every `run_click(id, args)`.
+    clicks_run: Vec<(String, Vec<ControlArg>)>,
+    input: Option<InputInfoRow>,
+    /// The peaks the next `input_levels` answers.
+    levels: Vec<f32>,
+    waveform: Option<OverviewRows>,
+    /// What the next `step_entry` calls answer, in turn.
+    steps: VecDeque<StepResultRow>,
+    step_inputs: Vec<(u64, u64, StepInputRow)>,
+    chores: Vec<(String, Vec<ControlArg>)>,
+    injected: Vec<(String, Vec<u8>)>,
+    /// What `inject_midi` answers: false is "nothing took them".
+    inject_taken: bool,
+    /// The free space `record_state` reports (none: no reading).
+    free_bytes: Option<u64>,
 }
 
 /// How a scripted job ends.
@@ -464,6 +498,7 @@ impl FakeSession {
                 next_job: 1,
                 ..Files::default()
             },
+            rec: Rec::default(),
         }))
     }
 
@@ -1293,6 +1328,203 @@ impl FakeSession {
     }
 }
 
+/// Recording, step entry, the click and the input (slice 8a).
+impl FakeSession {
+    /// The loop wraps: the next pass plays (the one playing completes).
+    pub fn next_pass(&self) {
+        if let Some(r) = self.st().rec.pass.as_mut() {
+            r.pass += 1;
+        }
+    }
+
+    /// The count-in is over: the transport rolls and pass 1 plays.
+    pub fn count_in_done(&self) {
+        let mut s = self.st();
+        if let Some(r) = s.rec.pass.as_mut() {
+            r.pass = r.pass.max(1);
+            r.pass_start_tick = Some(r.range_start_tick);
+        }
+        s.transport.counting_in = false;
+        s.transport.playing = true;
+    }
+
+    /// The pass ends by itself (the punch out passed, the input went
+    /// away): it lands as Stop lands it, with no Stop called.
+    pub fn end_pass_by_itself(&self) {
+        let mut s = self.st();
+        Self::land_pass(&mut s);
+    }
+
+    /// A pass lands: the take is one undo step "Record", the transport
+    /// stops, and a Save made meanwhile saves now.
+    fn land_pass(s: &mut State) {
+        if s.rec.pass.take().is_none() {
+            return;
+        }
+        s.rec.fates.clear();
+        s.transport.playing = false;
+        s.transport.counting_in = false;
+        Self::command_result(s);
+        s.snap.undo_label = Some("Record".into());
+        if std::mem::take(&mut s.rec.save_after_pass) {
+            s.calls.push("save".into());
+            s.snap.dirty = false;
+        }
+    }
+
+    /// `Busy` "Stop recording first." while a pass records.
+    fn not_recording(s: &State) -> Result<(), VizError> {
+        match s.rec.pass {
+            Some(_) => Err(VizError::Busy {
+                message: "Stop recording first.".into(),
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// What `save_as_refusal` answers (default none).
+    pub fn set_save_as_refusal(&self, text: Option<&str>) {
+        self.st().rec.save_as_refusal = text.map(str::to_owned);
+    }
+
+    /// The metronome `click` answers.
+    pub fn set_click_row(&self, click: ClickRow) {
+        self.st().rec.click = Some(click);
+    }
+
+    /// Every `run_click(id, args)`, in order.
+    pub fn clicks_run(&self) -> Vec<(String, Vec<ControlArg>)> {
+        self.st().rec.clicks_run.clone()
+    }
+
+    /// What `input_info` answers (default: no input).
+    pub fn set_input(&self, info: InputInfoRow) {
+        self.st().rec.input = Some(info);
+    }
+
+    /// The peaks the next `input_levels` answers (then silence).
+    pub fn set_input_levels(&self, levels: Vec<f32>) {
+        self.st().rec.levels = levels;
+    }
+
+    /// What `recording_waveform` answers for a recording audio track
+    /// (default: silent columns).
+    pub fn set_recording_waveform(&self, rows: OverviewRows) {
+        self.st().rec.waveform = Some(rows);
+    }
+
+    /// What the next `step_entry` answers (queued).
+    pub fn script_step(&self, result: StepResultRow) {
+        self.st().rec.steps.push_back(result);
+    }
+
+    /// Every `step_entry(seq, lane, _, input)`, in order.
+    pub fn step_inputs(&self) -> Vec<(u64, u64, StepInputRow)> {
+        self.st().rec.step_inputs.clone()
+    }
+
+    /// Every `run_chore(id, args)`, in order.
+    pub fn chores_run(&self) -> Vec<(String, Vec<ControlArg>)> {
+        self.st().rec.chores.clone()
+    }
+
+    /// Every `inject_midi(port, bytes)`, in order.
+    pub fn injected(&self) -> Vec<(String, Vec<u8>)> {
+        self.st().rec.injected.clone()
+    }
+
+    /// What `inject_midi` answers (default false: nothing took them).
+    pub fn set_inject_taken(&self, taken: bool) {
+        self.st().rec.inject_taken = taken;
+    }
+
+    /// The free space on the project's volume that `record_state`
+    /// reports, idle or recording (default none: no reading).
+    pub fn set_free_bytes(&self, bytes: Option<u64>) {
+        self.st().rec.free_bytes = bytes;
+    }
+
+    /// The record state while idle, as the core answers it.
+    fn idle_record() -> RecordStateRow {
+        RecordStateRow {
+            recording: false,
+            seq: None,
+            spec: None,
+            pass: 0,
+            kept: 0,
+            discarded: 0,
+            lanes: vec![],
+            frames: 0,
+            overflows: 0,
+            gap_frames: 0,
+            free_bytes: None,
+            underruns: 0,
+            late_starts: 0,
+            recovered: vec![],
+            recovered_files: vec![],
+            pass_start_tick: None,
+            pass_start_file_frame: 0,
+            range_start_tick: 0,
+        }
+    }
+
+    /// `keep_pass` / `discard_pass`: decides the completed loop passes
+    /// still undecided (the one playing is not touched).
+    fn press_pass(&self, call: &str, keep: bool) -> Result<(), VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, call)?;
+        let bad = |m: &str| VizError::Model { message: m.into() };
+        let Some(r) = s.rec.pass.as_ref() else {
+            return Err(bad("nothing is recording"));
+        };
+        if !r.spec.as_ref().is_some_and(|p| p.looped) {
+            return Err(bad(
+                "keep and discard act on loop passes; this recording does not loop",
+            ));
+        }
+        let completed = r.pass.saturating_sub(1) as usize;
+        s.calls.push(call.to_owned());
+        let fates = &mut s.rec.fates;
+        if fates.len() < completed {
+            fates.resize(completed, None);
+        }
+        for f in fates.iter_mut().take(completed) {
+            f.get_or_insert(keep);
+        }
+        Ok(())
+    }
+
+    /// A step's length now, as the core's.
+    fn step_len(st: &StepStateRow) -> i64 {
+        vizdaw_ffi::step_length(st.value, st.dotted, st.triplet)
+    }
+}
+
+fn core_click() -> ClickRow {
+    ClickRow {
+        on: false,
+        level_db: -6.0,
+        mode: ClickModeRow::PlayAndRecord,
+    }
+}
+
+fn no_input() -> InputInfoRow {
+    InputInfoRow {
+        device: String::new(),
+        channels: 0,
+        names: vec![],
+        input_latency_frames: 0,
+        output_latency_frames: 0,
+        buffer_frames: 0,
+        round_trip_frames: 0,
+        opening: false,
+        sample_rate: 0.0,
+        midi_fx_dropped: 0,
+        per_note_dropped: 0,
+        mpe_stolen: 0,
+    }
+}
+
 fn default_project_info() -> ProjectInfoRow {
     ProjectInfoRow {
         format: ProjectFormatRow {
@@ -1328,6 +1560,10 @@ impl DocSession for FakeSession {
             });
         }
         s.snap.dirty = false;
+        // The take lands at Stop: it is saved then too, as the core's.
+        if s.rec.pass.is_some() {
+            s.rec.save_after_pass = true;
+        }
         Ok(())
     }
     fn save_as(&self, path: String) -> Result<(), VizError> {
@@ -1370,6 +1606,7 @@ impl DocSession for FakeSession {
     }
     fn play(&self, seq: u64) -> Result<(), VizError> {
         let mut s = self.st();
+        Self::not_recording(&s)?;
         if let Some(e) = s.play_error.clone() {
             return Err(e);
         }
@@ -1380,6 +1617,7 @@ impl DocSession for FakeSession {
     }
     fn play_from(&self, seq: u64, from: i64, to: Option<i64>) -> Result<(), VizError> {
         let mut s = self.st();
+        Self::not_recording(&s)?;
         if let Some(e) = s.play_error.clone() {
             return Err(e);
         }
@@ -1393,11 +1631,15 @@ impl DocSession for FakeSession {
     fn stop(&self) -> Result<(), VizError> {
         let mut s = self.st();
         s.calls.push("stop".into());
+        // Stop while recording finishes the pass, as the core's.
+        Self::land_pass(&mut s);
         s.transport.playing = false;
+        s.transport.counting_in = false;
         Ok(())
     }
     fn locate(&self, tick: i64) -> Result<(), VizError> {
         let mut s = self.st();
+        Self::not_recording(&s)?;
         if let Some(e) = s.locate_error.clone() {
             return Err(e);
         }
@@ -1552,6 +1794,7 @@ impl DocSession for FakeSession {
     }
     fn set_loop(&self, on: bool) -> Result<(), VizError> {
         let mut s = self.st();
+        Self::not_recording(&s)?;
         if let Some(e) = s.loop_error.clone() {
             return Err(e);
         }
@@ -2408,6 +2651,330 @@ impl DocSession for FakeSession {
         let mut s = self.st();
         Self::read(&mut s, "has_snapshot")?;
         Ok(s.files.snapshot_ids.contains(&export_id))
+    }
+    fn record(&self, seq: u64, spec: RecordSpecRow) -> Result<(), VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "record")?;
+        if s.rec.pass.is_some() {
+            return Err(VizError::Busy {
+                message: "A recording is already running.".into(),
+            });
+        }
+        if s.open_edit.is_some() {
+            return Err(VizError::Busy {
+                message: "Finish the open edit first.".into(),
+            });
+        }
+        let lanes: Vec<RecordLaneRow> = s
+            .lanes
+            .get(&seq)
+            .into_iter()
+            .flatten()
+            .filter(|l| l.arm)
+            .filter_map(|l| {
+                let audio = matches!(l.input.as_ref()?, LaneInputRow::Audio { .. });
+                Some(RecordLaneRow {
+                    lane: l.id,
+                    audio,
+                    path: audio.then(|| format!("Media/Recorded/Take {}.caf", l.id)),
+                    clipped: 0,
+                    peak: 0.0,
+                    return_frames: 0,
+                })
+            })
+            .collect();
+        if lanes.is_empty() {
+            return Err(VizError::Model {
+                message: "arm a track that has an input to record".into(),
+            });
+        }
+        s.calls.push(format!("record({seq})"));
+        let counting = spec.count_in_bars > 0;
+        let at = s.transport.tick;
+        s.rec.fates.clear();
+        s.rec.pass = Some(RecordStateRow {
+            recording: true,
+            seq: Some(seq),
+            spec: Some(spec),
+            pass: u32::from(!counting),
+            lanes,
+            pass_start_tick: (!counting).then_some(at),
+            range_start_tick: at,
+            ..Self::idle_record()
+        });
+        s.transport.seq = Some(seq);
+        s.transport.counting_in = counting;
+        s.transport.playing = !counting;
+        Ok(())
+    }
+    fn keep_pass(&self) -> Result<(), VizError> {
+        self.press_pass("keep_pass", true)
+    }
+    fn discard_pass(&self) -> Result<(), VizError> {
+        self.press_pass("discard_pass", false)
+    }
+    fn record_state(&self) -> Result<RecordStateRow, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, "record_state")?;
+        let mut row = match &s.rec.pass {
+            Some(r) => {
+                let mut r = r.clone();
+                let count = |v: bool| s.rec.fates.iter().filter(|f| **f == Some(v)).count();
+                r.kept = u32::try_from(count(true)).unwrap_or(u32::MAX);
+                r.discarded = u32::try_from(count(false)).unwrap_or(u32::MAX);
+                r
+            }
+            None => Self::idle_record(),
+        };
+        row.free_bytes = s.rec.free_bytes;
+        row.recovered_files = s.files.recovered.clone();
+        row.recovered = row.recovered_files.iter().map(|r| r.path.clone()).collect();
+        Ok(row)
+    }
+    fn recording_waveform(
+        &self,
+        lane: u64,
+        from: u64,
+        to: u64,
+        columns: u32,
+    ) -> Result<OverviewRows, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, "recording_waveform")?;
+        let bad = |m: String| VizError::Model { message: m };
+        vizdaw_ffi::overviews::check_columns(columns)?;
+        if from >= to {
+            return Err(bad("from_file_frame must be before to_file_frame".into()));
+        }
+        let r = s
+            .rec
+            .pass
+            .as_ref()
+            .ok_or_else(|| bad("nothing is recording".into()))?;
+        if !r.lanes.iter().any(|l| l.lane == lane && l.audio) {
+            return Err(bad(format!("track {lane} records no audio in this pass")));
+        }
+        Ok(s.rec.waveform.clone().unwrap_or_else(|| OverviewRows {
+            state: OverviewStateRow::Ready,
+            channels: 1,
+            columns,
+            min: vec![0.0; columns as usize],
+            max: vec![0.0; columns as usize],
+        }))
+    }
+    fn recovered_recordings(&self) -> Result<Vec<String>, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, "recovered_recordings")?;
+        Ok(s.files.recovered.iter().map(|r| r.path.clone()).collect())
+    }
+    fn move_record_arm(&self, seq: u64, forward: bool) -> Result<DocSnapshot, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "move_record_arm")?;
+        let rows = s.lanes.get(&seq).cloned().unwrap_or_default();
+        let n = rows.len();
+        let end = |forward: bool| VizError::Model {
+            message: if forward {
+                "there is no track after the armed one"
+            } else {
+                "there is no track before the armed one"
+            }
+            .into(),
+        };
+        let arm = if forward {
+            match rows.iter().rposition(|l| l.arm) {
+                Some(l) if l + 1 < n => l + 1,
+                None if n > 0 => 0,
+                _ => return Err(end(true)),
+            }
+        } else {
+            match rows.iter().position(|l| l.arm) {
+                Some(f) if f > 0 => f - 1,
+                None if n > 0 => n - 1,
+                _ => return Err(end(false)),
+            }
+        };
+        // As the core's: the ends first, then the arm edit waits for Stop.
+        if s.rec.pass.is_some() {
+            return Err(VizError::Busy {
+                message: vizdaw_ffi::session::RECORDING_LANES.into(),
+            });
+        }
+        s.calls.push(format!("move_record_arm({seq},{forward})"));
+        if let Some(rows) = s.lanes.get_mut(&seq) {
+            for (i, l) in rows.iter_mut().enumerate() {
+                l.arm = i == arm;
+            }
+        }
+        Self::command_result(&mut s);
+        s.snap.undo_label = Some("Move Record Arm".into());
+        Ok(s.snap.clone())
+    }
+    fn click(&self) -> Result<ClickRow, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, "click")?;
+        Ok(s.rec.click.unwrap_or_else(core_click))
+    }
+    fn run_click(&self, id: String, args: Vec<ControlArg>) -> Result<DocSnapshot, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "run_click")?;
+        let bad = |m: String| VizError::Model { message: m };
+        let text = |name: &str| {
+            args.iter()
+                .find(|a| a.name == name)
+                .and_then(|a| match &a.value {
+                    ControlValue::Text { value } => Some(value.clone()),
+                    _ => None,
+                })
+        };
+        let mut click = s.rec.click.unwrap_or_else(core_click);
+        match id.as_str() {
+            "transport.click" => {
+                click.on = match args.iter().find(|a| a.name == "on").map(|a| &a.value) {
+                    Some(ControlValue::Flag { value }) => *value,
+                    _ => !click.on,
+                };
+            }
+            "transport.set_click_level" => {
+                click.level_db = text("level_db")
+                    .and_then(|t| t.parse::<f64>().ok())
+                    .filter(|v| (-60.0..=0.0).contains(v))
+                    .ok_or_else(|| bad("`level_db` must be a decimal from -60 to 0".into()))?;
+            }
+            "transport.set_click_mode" => {
+                click.mode = match text("mode").as_deref() {
+                    Some("play_and_record") => ClickModeRow::PlayAndRecord,
+                    Some("record_only") => ClickModeRow::RecordOnly,
+                    _ => return Err(bad("`mode` is play_and_record or record_only".into())),
+                };
+            }
+            _ => {
+                let shown: String = id.chars().take(64).collect();
+                return Err(bad(format!("{shown:?} is not a click command.")));
+            }
+        }
+        s.calls.push(format!("run_click({id})"));
+        s.rec.clicks_run.push((id, args));
+        s.rec.click = Some(click);
+        // As the core's: the transport read carries the click.
+        s.transport.click = Some(click);
+        Ok(Self::command_result(&mut s))
+    }
+    fn step_entry(
+        &self,
+        seq: u64,
+        lane: u64,
+        state: StepStateRow,
+        input: StepInputRow,
+    ) -> Result<StepResultRow, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "step_entry")?;
+        if s.open_edit.is_some() {
+            return Err(VizError::Busy {
+                message: "Finish the open edit first.".into(),
+            });
+        }
+        s.calls.push(format!("step_entry({seq},{lane})"));
+        s.rec.step_inputs.push((seq, lane, input.clone()));
+        if let Some(r) = s.rec.steps.pop_front() {
+            return Ok(r);
+        }
+        let mut next = state;
+        let mut snapshot = None;
+        let mut moved = false;
+        let len = Self::step_len(&next);
+        match input {
+            StepInputRow::Value { value } => next.value = value,
+            StepInputRow::Dot => next.dotted = !next.dotted,
+            StepInputRow::Triplet => next.triplet = !next.triplet,
+            StepInputRow::Rest | StepInputRow::Notes { .. } => {
+                let notes = matches!(input, StepInputRow::Notes { .. });
+                next.history.push(StepRecordRow {
+                    tick: next.tick,
+                    length: len,
+                    kind: if notes {
+                        StepKindRow::Notes { events: vec![] }
+                    } else {
+                        StepKindRow::Rest
+                    },
+                });
+                next.tick += len;
+                moved = true;
+                if notes {
+                    Self::command_result(&mut s);
+                    s.snap.undo_label = Some("Step Entry".into());
+                    snapshot = Some(s.snap.clone());
+                }
+            }
+            StepInputRow::DeleteLast => {
+                if let Some(last) = next.history.pop() {
+                    next.tick = last.tick;
+                    moved = true;
+                    if !matches!(last.kind, StepKindRow::Rest) {
+                        Self::command_result(&mut s);
+                        s.snap.undo_label = Some("Delete Last Step".into());
+                        snapshot = Some(s.snap.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(StepResultRow {
+            state: next,
+            snapshot,
+            moved,
+        })
+    }
+    fn run_chore(&self, id: String, args: Vec<ControlArg>) -> Result<DocSnapshot, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "run_chore")?;
+        s.calls.push(format!("run_chore({id})"));
+        // The core names a marker chore's undo step (`FFI/session.rs`).
+        let label = match id.as_str() {
+            "marker.add" => Some("Add Marker"),
+            "marker.rename" => Some("Rename Marker"),
+            "marker.remove" => Some("Remove Marker"),
+            _ => None,
+        };
+        s.rec.chores.push((id, args));
+        Self::command_result(&mut s);
+        if let Some(label) = label {
+            s.snap.undo_label = Some(label.into());
+        }
+        Ok(s.snap.clone())
+    }
+    fn input_info(&self) -> Result<InputInfoRow, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, "input_info")?;
+        Ok(s.rec.input.clone().unwrap_or_else(no_input))
+    }
+    fn input_levels(&self) -> Result<Vec<f32>, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, "input_levels")?;
+        let silent = vec![0.0; s.rec.levels.len()];
+        Ok(std::mem::replace(&mut s.rec.levels, silent))
+    }
+    fn inject_midi(&self, port: String, bytes: Vec<u8>) -> Result<bool, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "inject_midi")?;
+        s.calls.push(format!("inject_midi({port})"));
+        s.rec.injected.push((port, bytes));
+        Ok(s.rec.inject_taken)
+    }
+    fn saves_after_pass(&self) -> Result<bool, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, "saves_after_pass")?;
+        Ok(s.rec.save_after_pass)
+    }
+    fn cancel_save_after_pass(&self) -> Result<(), VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "cancel_save_after_pass")?;
+        s.calls.push("cancel_save_after_pass".into());
+        s.rec.save_after_pass = false;
+        Ok(())
+    }
+    fn save_as_refusal(&self) -> Result<Option<String>, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, "save_as_refusal")?;
+        Ok(s.rec.save_as_refusal.clone())
     }
 }
 

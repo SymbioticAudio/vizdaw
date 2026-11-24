@@ -11,7 +11,7 @@ use gpui::{App, AppContext, Entity, Global, WindowHandle};
 use vizdaw_app::alerts::AlertItem;
 use vizdaw_app::transport::{PollResult, TransportModel, TransportReadout};
 use vizdaw_app::transport_bar::TransportLayout;
-use vizdaw_app::{DocId, DocumentModel, DocumentStore, Prefs, SaveAction, WindowToken};
+use vizdaw_app::{DocId, DocumentModel, DocumentStore, Prefs, SaveAction, SaveChoice, WindowToken};
 
 use crate::shell::DocumentWindow;
 
@@ -275,9 +275,9 @@ impl AppState {
             (t.readout(None), s.tick, s.seq, store.alert().map(|a| a.id))
         };
         let before = seen(t, &self.store);
-        let result = t.poll(&mut self.store);
+        let (result, recorded) = t.poll_document(&mut self.store, doc);
         let after = seen(t, &self.store);
-        idled || result == PollResult::Failed || before != after
+        idled || recorded || result == PollResult::Failed || before != after
     }
 
     /// The session's idle tick, at most every 50 ms; true when a new
@@ -311,8 +311,9 @@ impl AppState {
             .store
             .document(doc)
             .is_some_and(DocumentModel::wants_fast_poll);
+        let d = self.store.document(doc);
         self.transports.get(&doc).map(|t| {
-            let every = t.poll_interval();
+            let every = d.map_or_else(|| t.poll_interval(), |d| t.poll_interval_for(d));
             if fast { every.min(FAST_POLL) } else { every }
         })
     }
@@ -358,6 +359,27 @@ impl AppState {
         self.store
             .with_document(doc, |d, _| d.save())
             .unwrap_or_else(|| SaveAction::Failed("the document is closed".into()))
+    }
+
+    /// What File › Save (or Save As, `force_as`) does now; a refusal
+    /// (recording, a held merge) is put in the status line.
+    pub fn save_choice(&mut self, doc: DocId, force_as: bool) -> SaveChoice {
+        self.store
+            .with_document(doc, |d, _| {
+                let c = d.save_choice(force_as);
+                if let SaveChoice::Refused(why) = &c {
+                    d.set_status(Some(why.clone()));
+                }
+                c
+            })
+            .unwrap_or_else(|| SaveChoice::Refused("the document is closed".into()))
+    }
+
+    /// Don't Save: the save owed at the end of a recording pass is dropped.
+    pub fn cancel_save_after_pass(&mut self, doc: DocId) {
+        if let Some(d) = self.store.document(doc) {
+            d.cancel_save_after_pass();
+        }
     }
 
     /// File › Save As to `path`, with the `.vizdaw` extension added when it

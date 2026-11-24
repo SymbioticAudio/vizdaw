@@ -11,20 +11,22 @@ use vizdaw_ffi::control::ControlArg;
 use vizdaw_ffi::edit::EditCommand;
 use vizdaw_ffi::events::{AutomationTargetRow, LaneEvents, MarkerRow, SequenceInfo};
 use vizdaw_ffi::mixer::{DestRow, MidiMixRow, MixerLevels, MixerSnapshot, SendRow, SwatchRow};
-use vizdaw_ffi::record::RecoveredFileRow;
+use vizdaw_ffi::record::{RecordSpecRow, RecordStateRow, RecoveredFileRow};
 use vizdaw_ffi::selection::{SelectionRow, TickRange};
 use vizdaw_ffi::session::CopiesSizeRow;
 use vizdaw_ffi::session::Session;
 use vizdaw_ffi::snapshot::{DocSnapshot, LaneRow, PluginRefRow, TransportState};
+use vizdaw_ffi::step::{StepInputRow, StepResultRow, StepStateRow};
 use vizdaw_ffi::tracks::TrackKindRow;
 use vizdaw_ffi::{
-    AafExportRequestRow, AafImportRequestRow, AafInfoRow, BounceCheckRow, BounceRequestRow,
-    BounceResultRow, BounceSettingsRow, ClipExportRequestRow, ClipNamesRow,
+    AafExportRequestRow, AafImportRequestRow, AafInfoRow, AudioSettingsRow, BounceCheckRow,
+    BounceRequestRow, BounceResultRow, BounceSettingsRow, ClipExportRequestRow, ClipNamesRow,
     DawprojectExportRequestRow, DawprojectImportRequestRow, DawprojectInfoRow,
     DawprojectMergeRequestRow, ForDawCheckRow, ForDawRequestRow, ImportTargetRow, JobRow, MediaRow,
     MidiFileInfoRow, MidiImportRequestRow, OpenOptions, ProjectFormatRow, ProjectInfoRow,
     RecoveryInfo, ReportRow, SmfExportRequestRow, SnapshotRow, SongInfoRow,
 };
+use vizdaw_ffi::{ClickRow, InputInfoRow, OverviewRows};
 
 /// What a plugin timer tick brought (the core's `IdleUpdate`, the parts
 /// the app reads).
@@ -296,6 +298,62 @@ pub trait DocSession: Send + Sync {
     /// Whether the project keeps the snapshot of export `export_id` (one
     /// lstat).
     fn has_snapshot(&self, export_id: String) -> Result<bool, VizError>;
+
+    // Recording, step entry and the click (slice 8a).
+
+    /// Starts a record pass on `seq` (`Model` when nothing armed has an
+    /// input; `Busy` while recording, an edit is open, a format change is
+    /// waiting or the disk is almost full).
+    fn record(&self, seq: u64, spec: RecordSpecRow) -> Result<(), VizError>;
+    /// `record.keep_pass`: keeps the loop passes completed so far.
+    fn keep_pass(&self) -> Result<(), VizError>;
+    /// `record.discard_pass`: drops the loop passes since the last keep.
+    fn discard_pass(&self) -> Result<(), VizError>;
+    /// What recording is doing (`state.get record`).
+    fn record_state(&self) -> Result<RecordStateRow, VizError>;
+    /// `columns` columns of the take `lane` is recording, over file frames
+    /// `[from, to)`.
+    fn recording_waveform(
+        &self,
+        lane: u64,
+        from: u64,
+        to: u64,
+        columns: u32,
+    ) -> Result<OverviewRows, VizError>;
+    /// The recordings offered for recovery (package-relative paths).
+    fn recovered_recordings(&self) -> Result<Vec<String>, VizError>;
+    /// Moves record arm to the next or previous track, one undo step
+    /// "Move Record Arm" (`Model` at either end).
+    fn move_record_arm(&self, seq: u64, forward: bool) -> Result<DocSnapshot, VizError>;
+    /// The project's metronome settings.
+    fn click(&self) -> Result<ClickRow, VizError>;
+    /// Runs `transport.click`, `transport.set_click_level` or
+    /// `transport.set_click_mode` with the channel's arguments.
+    fn run_click(&self, id: String, args: Vec<ControlArg>) -> Result<DocSnapshot, VizError>;
+    /// One step entry `input` on `lane` of `seq` from `state`.
+    fn step_entry(
+        &self,
+        seq: u64,
+        lane: u64,
+        state: StepStateRow,
+        input: StepInputRow,
+    ) -> Result<StepResultRow, VizError>;
+    /// Runs a note or marker chore (`marker.add`, …) as one undo step.
+    fn run_chore(&self, id: String, args: Vec<ControlArg>) -> Result<DocSnapshot, VizError>;
+    /// What the audio input offers while this document holds the engine.
+    fn input_info(&self) -> Result<InputInfoRow, VizError>;
+    /// Each input channel's peak since the last call, linear.
+    fn input_levels(&self) -> Result<Vec<f32>, VizError>;
+    /// Feeds MIDI `bytes` as if source `port` sent them now
+    /// (`midi.inject`): true when something took them.
+    fn inject_midi(&self, port: String, bytes: Vec<u8>) -> Result<bool, VizError>;
+    /// Whether a Save made while recording saves again once the pass
+    /// lands.
+    fn saves_after_pass(&self) -> Result<bool, VizError>;
+    /// Don't Save on a recording song: the owed save is dropped.
+    fn cancel_save_after_pass(&self) -> Result<(), VizError>;
+    /// Why Save As would be refused before its panel opens, if it would.
+    fn save_as_refusal(&self) -> Result<Option<String>, VizError>;
 }
 
 impl DocSession for Session {
@@ -676,6 +734,69 @@ impl DocSession for Session {
     fn has_snapshot(&self, export_id: String) -> Result<bool, VizError> {
         Session::has_snapshot(self, export_id)
     }
+    fn record(&self, seq: u64, spec: RecordSpecRow) -> Result<(), VizError> {
+        Session::record(self, seq, spec)
+    }
+    fn keep_pass(&self) -> Result<(), VizError> {
+        Session::keep_pass(self)
+    }
+    fn discard_pass(&self) -> Result<(), VizError> {
+        Session::discard_pass(self)
+    }
+    fn record_state(&self) -> Result<RecordStateRow, VizError> {
+        Session::record_state(self)
+    }
+    fn recording_waveform(
+        &self,
+        lane: u64,
+        from: u64,
+        to: u64,
+        columns: u32,
+    ) -> Result<OverviewRows, VizError> {
+        Session::recording_waveform(self, lane, from, to, columns)
+    }
+    fn recovered_recordings(&self) -> Result<Vec<String>, VizError> {
+        Session::recovered_recordings(self)
+    }
+    fn move_record_arm(&self, seq: u64, forward: bool) -> Result<DocSnapshot, VizError> {
+        Session::move_record_arm(self, seq, forward)
+    }
+    fn click(&self) -> Result<ClickRow, VizError> {
+        Session::click(self)
+    }
+    fn run_click(&self, id: String, args: Vec<ControlArg>) -> Result<DocSnapshot, VizError> {
+        Session::run_click(self, id, args)
+    }
+    fn step_entry(
+        &self,
+        seq: u64,
+        lane: u64,
+        state: StepStateRow,
+        input: StepInputRow,
+    ) -> Result<StepResultRow, VizError> {
+        Session::step_entry(self, seq, lane, state, input)
+    }
+    fn run_chore(&self, id: String, args: Vec<ControlArg>) -> Result<DocSnapshot, VizError> {
+        Session::run_chore(self, id, args)
+    }
+    fn input_info(&self) -> Result<InputInfoRow, VizError> {
+        Session::input_info(self)
+    }
+    fn input_levels(&self) -> Result<Vec<f32>, VizError> {
+        Session::input_levels(self)
+    }
+    fn inject_midi(&self, port: String, bytes: Vec<u8>) -> Result<bool, VizError> {
+        Session::inject_midi(self, port, bytes)
+    }
+    fn saves_after_pass(&self) -> Result<bool, VizError> {
+        Session::saves_after_pass(self)
+    }
+    fn cancel_save_after_pass(&self) -> Result<(), VizError> {
+        Session::cancel_save_after_pass(self)
+    }
+    fn save_as_refusal(&self) -> Result<Option<String>, VizError> {
+        Session::save_as_refusal(self)
+    }
 }
 
 /// The core's constructors and free functions the app uses (open, new,
@@ -708,6 +829,20 @@ pub trait CoreCalls: Send + Sync {
     fn format_label(&self, format: ProjectFormatRow) -> String;
     /// The bounce settings (the tail cap).
     fn bounce_settings(&self) -> BounceSettingsRow;
+    /// Step entry starting at `tick` with quarter notes (the core's pure
+    /// function, the same for every table).
+    fn step_state_new(&self, tick: i64) -> StepStateRow {
+        vizdaw_ffi::step_state_new(tick)
+    }
+    /// Typed pitches (`60 64 67`, `C4 E4 G4`; the core's pure function).
+    fn step_parse_pitches(&self, text: String) -> Result<Vec<u8>, VizError> {
+        vizdaw_ffi::step_parse_pitches(text)
+    }
+    /// The audio settings now (record defaults, software monitoring; the
+    /// process's, read from the core).
+    fn audio_settings(&self) -> AudioSettingsRow {
+        vizdaw_ffi::audio::audio_settings()
+    }
     /// Turns `plugins` off in the app's plug-in settings (the Plugin
     /// Manager's catalog, saved), the crash question's "Disable <names>".
     /// Without a catalog: refused.

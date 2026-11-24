@@ -423,15 +423,12 @@ fn saving_keeps_ui_json_keys_this_app_does_not_know() {
     m.save_as(std::path::Path::new("/tmp/x/a.vizdaw")).unwrap();
     let text = f.layout().unwrap();
     let written: serde_json::Value = serde_json::from_str(&text).unwrap();
-    for key in [
-        "version",
-        "windows",
-        "controllers",
-        "sequenceOrder",
-        "transport",
-    ] {
+    for key in ["version", "windows", "controllers", "sequenceOrder"] {
         assert_eq!(written[key], original[key], "{key}");
     }
+    // The transport marks are modelled now: the saved punch is kept.
+    assert_eq!(written["transport"]["punch"], true);
+    assert_eq!(written["transport"]["overdub"], true);
     // The piano roll's settings are modelled now: its unknown keys stay.
     assert_eq!(written["pianoRoll"]["velocityLane"], true);
     assert_eq!(written["pianoRoll"]["keyWidth"], 40);
@@ -612,4 +609,112 @@ fn saving_keeps_nested_keys_this_app_does_not_know() {
         "a modelled optional that went is gone"
     );
     assert_eq!(w["blockRule"], serde_json::json!({"fixedBars": {"_0": 2}}));
+}
+
+#[test]
+fn the_transport_marks_default_and_round_trip() {
+    use vizdaw_app::editor::TransportMarks;
+    let d = TransportMarks::default();
+    assert_eq!(d.locators, [None; 10]);
+    assert_eq!((d.punch_in, d.punch_out), (0, 4 * 61_440));
+    assert!(!d.punch && d.overdub, "new documents overdub");
+    assert_eq!(EditorLayout::default().transport, d);
+    let mut l = EditorLayout::default();
+    assert!(l.transport.set_locator(3, Some(12_345)));
+    assert!(l.transport.set_locator(0, Some(-7)));
+    assert!(l.transport.set_punch(61_440, 2 * 61_440));
+    l.transport.punch = true;
+    l.transport.overdub = false;
+    let json = l.encoded();
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        v["transport"],
+        serde_json::json!({
+            "locators": [-7, null, null, 12_345, null, null, null, null, null, null],
+            "punchIn": 61_440, "punchOut": 122_880, "punch": true, "overdub": false,
+        })
+    );
+    assert_eq!(EditorLayout::decode(Some(&json)), l);
+    // Keys this app does not know inside `transport` survive a save.
+    let merged = l.merge_into(Some(r#"{"transport":{"future":1,"punch":false}}"#));
+    let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+    assert_eq!(v["transport"]["future"], 1);
+    assert_eq!(v["transport"]["punch"], true);
+}
+
+#[test]
+fn the_transport_marks_decode_tolerantly() {
+    use vizdaw_app::editor::TransportMarks;
+    let marks = |json: &str| EditorLayout::decode(Some(json)).transport;
+    let d = TransportMarks::default();
+    assert_eq!(marks(r#"{"transport":"x"}"#), d);
+    assert_eq!(marks(r#"{"transport":{}}"#), d);
+    let limit: i64 = 1 << 40;
+    let m = marks(&format!(
+        r#"{{"transport":{{"locators":[1,null,{},{},5,6,7,8,9,10,11,12],"punch":"yes","overdub":false}}}}"#,
+        limit,
+        limit + 1
+    ));
+    assert_eq!(
+        m.locators,
+        [
+            Some(1),
+            None,
+            Some(limit),
+            None,
+            Some(5),
+            Some(6),
+            Some(7),
+            Some(8),
+            Some(9),
+            Some(10)
+        ],
+        "ten kept, past the limit dropped"
+    );
+    assert!(!m.punch, "a malformed punch keeps the default");
+    assert!(!m.overdub);
+    assert_eq!(
+        marks(r#"{"transport":{"locators":[1,"a"]}}"#).locators,
+        [None; 10]
+    );
+    assert_eq!(
+        marks(r#"{"transport":{"locators":[4]}}"#).locator(0),
+        Some(4)
+    );
+    // The punch range is kept only when out is after in, both in the limit.
+    let p = |a: &str, b: &str| {
+        let m = marks(&format!(
+            r#"{{"transport":{{"punchIn":{a},"punchOut":{b}}}}}"#
+        ));
+        (m.punch_in, m.punch_out)
+    };
+    assert_eq!(p("100", "200"), (100, 200));
+    assert_eq!(p("200", "100"), (0, 4 * 61_440));
+    assert_eq!(p("100", "100"), (0, 4 * 61_440));
+    assert_eq!(p("-5", &(limit + 1).to_string()), (0, 4 * 61_440));
+    assert_eq!(p("\"a\"", "100"), (0, 100), "a malformed in keeps 0");
+    // The setters refuse what the decode would drop.
+    let mut t = TransportMarks::default();
+    assert!(!t.set_locator(10, Some(1)));
+    assert!(!t.set_locator(2, Some(limit + 1)));
+    assert!(t.set_locator(2, Some(-limit)));
+    assert!(t.set_locator(2, None));
+    assert!(!t.set_punch(5, 5));
+    assert!(!t.set_punch(0, limit + 1));
+    assert_eq!((t.punch_in, t.punch_out), (0, 4 * 61_440));
+    assert_eq!(t.locator(10), None);
+}
+
+#[test]
+fn the_transport_marks_are_saved_in_the_layout() {
+    let f = Arc::new(editor_fake());
+    let mut m = model(&f);
+    m.update_layout(|l| {
+        l.transport.set_locator(5, Some(999));
+        l.transport.punch = true;
+    });
+    m.save_as(std::path::Path::new("/tmp/x/a.vizdaw")).unwrap();
+    let reopened = model(&f);
+    assert_eq!(reopened.layout().transport.locator(5), Some(999));
+    assert!(reopened.layout().transport.punch);
 }

@@ -17,7 +17,12 @@ use crate::alerts::AlertItem;
 use crate::commands::{self, TEXT_FIELD_HAS_KEYBOARD, from_viz};
 use crate::document::DocumentModel;
 use crate::session::DocSession;
-use crate::store::DocumentStore;
+use crate::store::{DocId, DocumentStore};
+
+/// The poll's period while playing, recording or counting in.
+const FAST: Duration = Duration::from_millis(33);
+/// The poll's period otherwise.
+const SLOW: Duration = Duration::from_millis(250);
 
 /// How a poll ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,12 +118,23 @@ impl TransportModel {
         self.selected_seq(doc).is_some() || self.is_playing()
     }
 
-    /// How often the caller polls: fast while playing, slow otherwise.
+    /// How often the caller polls: fast while playing or counting in
+    /// (which reads `playing: false`), slow otherwise.
     pub fn poll_interval(&self) -> Duration {
-        if self.is_playing() {
-            Duration::from_millis(33)
+        if self.is_playing() || self.state.counting_in {
+            FAST
         } else {
-            Duration::from_millis(250)
+            SLOW
+        }
+    }
+
+    /// [`Self::poll_interval`] for `doc`: fast too while it records (the
+    /// pass's state and the take follow it).
+    pub fn poll_interval_for(&self, doc: &DocumentModel) -> Duration {
+        if doc.record_polls_fast() {
+            FAST
+        } else {
+            self.poll_interval()
         }
     }
 
@@ -178,6 +194,19 @@ impl TransportModel {
                 PollResult::Failed
             }
         }
+    }
+
+    /// [`Self::poll`] for document `doc` of `store`: after a good read,
+    /// the document's record state (while playing, recording or counting
+    /// in) and a held recovery offer. True when what its windows show
+    /// changed beyond the transport (see [`DocumentModel::poll_record`]).
+    pub fn poll_document(&mut self, store: &mut DocumentStore, doc: DocId) -> (PollResult, bool) {
+        let result = self.poll(store);
+        let changed = result == PollResult::Updated
+            && store
+                .with_document(doc, |d, _| d.poll_record())
+                .unwrap_or(false);
+        (result, changed)
     }
 
     /// The readouts of `doc`'s transport: tempo and meter come from the

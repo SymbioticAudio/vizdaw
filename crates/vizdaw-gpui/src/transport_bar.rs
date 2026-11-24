@@ -195,6 +195,9 @@ fn label_width(f: TransportField) -> f32 {
     match f {
         TransportField::Position | TransportField::EditOut => 52.,
         TransportField::EditIn => 44.,
+        // The Punch In and Out item is drawn from slice 8b.
+        TransportField::PunchIn => 56.,
+        TransportField::PunchOut => 64.,
     }
 }
 

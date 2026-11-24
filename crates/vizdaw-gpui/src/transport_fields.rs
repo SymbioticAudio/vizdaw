@@ -186,21 +186,15 @@ impl DocumentWindow {
             TextInputEvent::Confirm => self.end_field(f, true, window, cx),
             TextInputEvent::Cancel => self.end_field(f, false, window, cx),
             TextInputEvent::Tab | TextInputEvent::BackTab => {
-                let shown = self.transport_fields.shown().to_vec();
+                let next = transport_fields::tab_target(
+                    self.transport_fields.shown(),
+                    f,
+                    event == TextInputEvent::BackTab,
+                );
                 self.end_field(f, true, window, cx);
-                let Some(i) = shown.iter().position(|g| *g == f) else {
-                    return;
-                };
-                if shown.len() < 2 {
-                    return;
+                if let Some(next) = next {
+                    self.begin_field(next, window, cx);
                 }
-                let n = shown.len();
-                let next = if event == TextInputEvent::Tab {
-                    shown[(i + 1) % n]
-                } else {
-                    shown[(i + n - 1) % n]
-                };
-                self.begin_field(next, window, cx);
             }
         }
     }

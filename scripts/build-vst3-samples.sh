@@ -15,7 +15,9 @@
 # .github/workflows/ci.yml): libx11-dev libx11-xcb-dev libxcb-util-dev
 # libxcb-cursor-dev libxcb-keysyms1-dev libxcb-xkb-dev libxkbcommon-dev
 # libxkbcommon-x11-dev libfontconfig1-dev libcairo2-dev libfreetype6-dev
-# libpango1.0-dev libwayland-dev wayland-protocols, plus ninja-build.
+# libpango1.0-dev libwayland-dev wayland-protocols, plus ninja-build and
+# libgtkmm-3.0-dev (the SDK always configures VSTGUI's standalone library,
+# which looks for gtkmm on Linux).
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -77,12 +79,7 @@ configure=(cmake -G Ninja -S "$src" -B "$build"
     -DSMTG_CREATE_PLUGIN_LINK=OFF
     -DSMTG_RUN_VST_VALIDATOR=OFF
     -DSMTG_BUILD_UNIVERSAL_BINARY=OFF
-    -DSMTG_ENABLE_AUV2_BUILDS=OFF
-    # The samples need only the VSTGUI library, not its standalone apps and
-    # tools (those need gtkmm on Linux).
-    -DVSTGUI_STANDALONE=OFF
-    -DVSTGUI_STANDALONE_EXAMPLES=OFF
-    -DVSTGUI_TOOLS=OFF)
+    -DSMTG_ENABLE_AUV2_BUILDS=OFF)
 # VSTGUI builds with -Werror, and newer standard libraries deprecate what
 # it uses (std::wstring_convert): keep those warnings, not as errors.
 lenient="-Wno-error=deprecated-declarations"

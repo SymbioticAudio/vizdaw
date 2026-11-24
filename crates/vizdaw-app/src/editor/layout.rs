@@ -389,6 +389,95 @@ pub fn off_list(view: &str, side: PaneSide, main: MainView) -> String {
     )
 }
 
+/// The transport's marks and record modes, saved with the project under
+/// `transport` (Swift `TransportMarks`): ten numbered locators, the punch
+/// range and the punch and overdub switches. Changing them is no undo
+/// step. Decoding is tolerant: a missing or malformed field keeps its
+/// default; ticks are kept within ±2^40; the punch range is kept only
+/// when out is after in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransportMarks {
+    /// Locator `n`'s tick, or `None` when it is not set.
+    pub locators: [Option<i64>; TransportMarks::LOCATOR_COUNT],
+    pub punch_in: i64,
+    /// After `punch_in`.
+    pub punch_out: i64,
+    pub punch: bool,
+    /// New documents start in Overdub; a saved `overdub` keeps its mode.
+    pub overdub: bool,
+}
+
+impl Default for TransportMarks {
+    fn default() -> Self {
+        TransportMarks {
+            locators: [None; TransportMarks::LOCATOR_COUNT],
+            punch_in: 0,
+            punch_out: 4 * 61_440,
+            punch: false,
+            overdub: true,
+        }
+    }
+}
+
+impl TransportMarks {
+    /// How many locators (keys 0–9).
+    pub const LOCATOR_COUNT: usize = 10;
+    /// The model's time limit, either side of 0.
+    pub const TICK_LIMIT: i64 = 1 << 40;
+
+    /// `t` when it is within the model's limit.
+    fn sane(t: i64) -> Option<i64> {
+        (-Self::TICK_LIMIT..=Self::TICK_LIMIT)
+            .contains(&t)
+            .then_some(t)
+    }
+
+    /// Locator `n` (0–9), if set.
+    pub fn locator(&self, n: usize) -> Option<i64> {
+        self.locators.get(n).copied().flatten()
+    }
+
+    /// Sets (a tick) or clears (`None`) locator `n`; false for a number
+    /// outside 0–9 or a tick past the limit.
+    pub fn set_locator(&mut self, n: usize, tick: Option<i64>) -> bool {
+        if n >= Self::LOCATOR_COUNT || tick.is_some_and(|t| Self::sane(t).is_none()) {
+            return false;
+        }
+        self.locators[n] = tick;
+        true
+    }
+
+    /// Sets the punch range; false (nothing changed) unless `out > in`
+    /// and both are within the limit.
+    pub fn set_punch(&mut self, a: i64, b: i64) -> bool {
+        if Self::sane(a).is_none() || Self::sane(b).is_none() || b <= a {
+            return false;
+        }
+        self.punch_in = a;
+        self.punch_out = b;
+        true
+    }
+
+    /// Tolerant, as Swift's `init(from:)`.
+    fn decode(v: &Value) -> TransportMarks {
+        let mut out = TransportMarks::default();
+        let Some(obj) = v.as_object() else {
+            return out;
+        };
+        let raw: Vec<Option<i64>> = field(obj, "locators", Vec::new());
+        for (slot, t) in out.locators.iter_mut().zip(raw) {
+            *slot = t.and_then(Self::sane);
+        }
+        let a = field(obj, "punchIn", out.punch_in);
+        let b = field(obj, "punchOut", out.punch_out);
+        out.set_punch(a, b);
+        out.punch = field(obj, "punch", out.punch);
+        out.overdub = field(obj, "overdub", out.overdub);
+        out
+    }
+}
+
 /// The editor state saved with the project, under Swift's keys.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditorLayout {
@@ -407,6 +496,8 @@ pub struct EditorLayout {
     pub views: ViewLayouts,
     /// The piano roll's view settings (`pianoRoll`).
     pub piano_roll: PianoRollSettings,
+    /// The locators, punch range and record modes (`transport`).
+    pub transport: TransportMarks,
 }
 
 impl Default for EditorLayout {
@@ -422,6 +513,7 @@ impl Default for EditorLayout {
             follow: true,
             views: ViewLayouts::default(),
             piano_roll: PianoRollSettings::default(),
+            transport: TransportMarks::default(),
         }
     }
 }
@@ -498,6 +590,9 @@ impl EditorLayout {
             piano_roll: obj
                 .get("pianoRoll")
                 .map_or_else(PianoRollSettings::default, PianoRollSettings::decode),
+            transport: obj
+                .get("transport")
+                .map_or_else(TransportMarks::default, TransportMarks::decode),
         }
     }
 
@@ -515,6 +610,7 @@ impl EditorLayout {
             ("follow", Some(Value::Bool(self.follow))),
             ("views", Some(to_value(&self.views))),
             ("pianoRoll", Some(to_value(&self.piano_roll))),
+            ("transport", Some(to_value(&self.transport))),
         ]
     }
 
@@ -553,7 +649,7 @@ impl EditorLayout {
 /// unmodelled fields ride in `DetailState::extra`) are replaced whole.
 fn merge_key(key: &str, old: Option<&Value>, new: Value) -> Value {
     match key {
-        "snap" | "pianoRoll" => merge_struct(old, new, &[]),
+        "snap" | "pianoRoll" | "transport" => merge_struct(old, new, &[]),
         "views" => {
             let mut views = merge_struct(old, new, &["frame"]);
             for main in ["arrange", "mix"] {

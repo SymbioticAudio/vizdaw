@@ -377,3 +377,135 @@ fn a_busy_or_failed_answer_holds_the_offer_until_the_next_poll() {
     m.idle();
     assert!(m.recovery_offer().is_some());
 }
+
+// ---- Save while recording (Swift `RecordOptionsTests`) ----
+
+/// Song (3) with an armed stereo audio track, recording-ready.
+fn recording_ready() -> (Arc<support::FakeSession>, DocumentModel) {
+    use vizdaw_ffi::edit::LaneInputRow;
+    let f = Arc::new(demo_fake());
+    let mut l = support::lane_row(30, "Vocal", false);
+    l.arm = true;
+    l.input = Some(LaneInputRow::Audio {
+        first: 0,
+        stereo: true,
+        return_of: None,
+    });
+    f.set_lanes(3, vec![l]);
+    let mut m = model(&f);
+    m.select(Some(3));
+    (f, m)
+}
+
+#[test]
+fn save_while_recording_says_when_the_take_is_saved() {
+    use vizdaw_app::SaveChoice;
+    use vizdaw_app::record::{
+        SAVE_AS_WHILE_RECORDING, SAVE_UNTITLED_WHILE_RECORDING, SAVED_DURING_PASS,
+    };
+    let (f, mut m) = recording_ready();
+    f.set_path(Some("/tmp/P.vizdaw"));
+    m.toggle_record().unwrap();
+    assert_eq!(m.save_choice(false), SaveChoice::Save);
+    assert_eq!(m.save(), SaveAction::Saved);
+    assert_eq!(m.status(), Some(SAVED_DURING_PASS));
+    assert!(m.alert.is_none());
+    // Save As cannot move a recording project: it waits for Stop.
+    m.set_status(None);
+    assert_eq!(
+        m.save_choice(true),
+        SaveChoice::Refused(SAVE_AS_WHILE_RECORDING.into())
+    );
+    assert_eq!(m.status(), None, "no side effect");
+    // Untitled: its own words.
+    f.set_path(None);
+    assert_eq!(
+        m.save_choice(false),
+        SaveChoice::Refused(SAVE_UNTITLED_WHILE_RECORDING.into())
+    );
+    assert_eq!(
+        m.save(),
+        SaveAction::Refused(SAVE_UNTITLED_WHILE_RECORDING.into())
+    );
+    assert_eq!(m.status(), Some(SAVE_UNTITLED_WHILE_RECORDING));
+    m.toggle_record().unwrap();
+    assert_eq!(m.save_choice(false), SaveChoice::Panel);
+    f.set_path(Some("/tmp/P.vizdaw"));
+    assert_eq!(m.save_choice(true), SaveChoice::Panel);
+    assert_eq!(m.save_choice(false), SaveChoice::Save);
+}
+
+/// Next small fixes Task 6: Don't Save drops the save owed at Stop.
+#[test]
+fn cancel_save_after_pass_drops_the_owed_save() {
+    let (f, mut m) = recording_ready();
+    f.set_path(Some("/tmp/P.vizdaw"));
+    m.toggle_record().unwrap();
+    m.save();
+    assert!(m.save_after_pass_pending());
+    m.cancel_save_after_pass();
+    assert_eq!(f.count("cancel_save_after_pass"), 1);
+    assert!(!m.save_after_pass_pending());
+}
+
+/// 5d-2 T2 M2: a pass that ended by itself since the last poll does not
+/// refuse a Save As.
+#[test]
+fn the_save_choice_reads_the_recording_now() {
+    use vizdaw_app::SaveChoice;
+    let (f, mut m) = recording_ready();
+    f.set_path(Some("/tmp/P.vizdaw"));
+    m.toggle_record().unwrap();
+    f.end_pass_by_itself();
+    assert_eq!(m.save_choice(true), SaveChoice::Panel);
+}
+
+/// 5d-2 T2 M3: a titled Save while recording reaches the session.
+#[test]
+fn save_while_recording_reaches_the_session() {
+    let (f, mut m) = recording_ready();
+    f.set_path(Some("/tmp/P.vizdaw"));
+    f.set_dirty(true);
+    m.toggle_record().unwrap();
+    m.save();
+    assert!(!f.snap().dirty, "the session saved");
+    assert_eq!(f.count("save"), 1);
+}
+
+/// Plan 6e Task 8 review I1: the core's Save As refusal (a held merge)
+/// is the choice's, for Save As and an untitled Save; a titled Save saves.
+#[test]
+fn the_cores_save_as_refusal_refuses_the_panel() {
+    use vizdaw_app::SaveChoice;
+    let (f, mut m) = recording_ready();
+    f.set_save_as_refusal(Some("Finish or cancel the merge first."));
+    assert_eq!(
+        m.save_choice(false),
+        SaveChoice::Refused("Finish or cancel the merge first.".into())
+    );
+    assert_eq!(
+        m.save_choice(true),
+        SaveChoice::Refused("Finish or cancel the merge first.".into())
+    );
+    f.set_path(Some("/tmp/P.vizdaw"));
+    assert_eq!(m.save_choice(false), SaveChoice::Save);
+}
+
+/// The poll offers a held Recovered Recordings offer again.
+#[test]
+fn the_record_poll_reoffers_a_held_recovery() {
+    let f = Arc::new(demo_fake());
+    f.set_recovered_files(vec![recovered("Media/Recorded/Take 1.caf", false)]);
+    let mut m = model(&f);
+    m.offer_recovery();
+    f.fail_next(
+        "recover_recordings",
+        VizError::Busy {
+            message: "busy".into(),
+        },
+    );
+    m.answer_recovery(Some(true));
+    assert_eq!(m.recovery_offer(), None, "held");
+    assert!(m.poll_record());
+    assert!(m.recovery_offer().is_some(), "offered again");
+}

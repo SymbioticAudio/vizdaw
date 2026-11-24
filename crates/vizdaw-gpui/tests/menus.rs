@@ -328,20 +328,7 @@ fn the_transport_menu_lists_every_transport_command() {
         assert_eq!(id, c.id);
         let want = c.shortcut.map(|s| Chord::parse(s).unwrap().text());
         assert_eq!(keys.map(String::from), want, "{id}");
-        // Recording, the click, overdub, punch and arming come later.
-        let later = matches!(
-            id,
-            "transport.record"
-                | "transport.overdub"
-                | "transport.punch"
-                | "transport.click"
-                | "transport.go_punch"
-                | "transport.arm_previous"
-                | "transport.arm_next"
-        );
-        if later {
-            assert!(!enabled, "{id} is disabled");
-        }
+        assert_eq!(enabled, commands::enabled(id, &doc), "{id}");
     }
     // Stopped, with a sequence: these run.
     for t in [
@@ -352,6 +339,13 @@ fn the_transport_menu_lists_every_transport_command() {
         "Loop",
         "Go to Position Field",
         "Go to Edit-In Field",
+        "Overdub",
+        "Punch",
+        "Go to Punch Fields",
+        "Record",
+        "Click",
+        "Arm Previous Track",
+        "Arm Next Track",
     ] {
         assert!(item(&m, "Transport", t).3, "{t}");
     }
