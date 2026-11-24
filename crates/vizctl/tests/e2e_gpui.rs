@@ -693,8 +693,7 @@ fn gpui_loop_wraps_at_the_end() {
 }
 
 /// Ported from `transport_jumps_readouts_and_fields_over_the_channel`,
-/// steps 0-6. Step 7 (a typed Punch In refuses Record) is left out: Punch
-/// and Record are a later slice.
+/// steps 0-7 (step 7, a typed Punch In refuses Record, from slice 8b).
 #[test]
 #[ignore = "needs a window server and VIZDAW_E2E_APP"]
 fn gpui_transport_jumps_readouts_and_fields_over_the_channel() {
@@ -822,6 +821,63 @@ fn gpui_transport_jumps_readouts_and_fields_over_the_channel() {
     select_field(&mut app, "Position");
     app.call("ui.key", json!({"window": w, "text": "5\n"}));
     wait_for_tick(&mut app, &w, 4 * BAR);
+
+    // 7. A typed bar Punch In refuses Record: a real click on the bar's
+    // Record keeps the draft and the keyboard, and Return then sets the
+    // punch. The bar's Punch In shares its label with the record
+    // popover's, so it is looked up outside the "Record Options" group.
+    const DRAFT: &str = "Press Return to set the punch, or Esc to discard it.";
+    let recording = |app: &mut App| {
+        app.call("state.get", json!({"target": "record", "window": w}))["recording"].clone()
+    };
+    let punch_in = |e: &Value| e["transport"]["punch_in"].clone();
+    let bar_punch_in = |app: &mut App| {
+        wait_in_tree(app, &w, "the bar's Punch In", |n| {
+            find_node_outside(n, "Punch In", "Record Options")
+        })
+    };
+    // The default bar has no Punch fields: a short bar with them, so they
+    // show in this window before anything folds.
+    app.call(
+        "command.run",
+        json!({"id": "ui.set_transport_bar",
+            "params": {"items": "cluster,edit_fields,punch_fields"}}),
+    );
+    let before = punch_in(&app.call("state.get", json!({"target": "editor", "window": w})));
+    let n = bar_punch_in(&mut app);
+    app.call("ui.click", json!({"window": w, "element": n["id"]}));
+    app.call("ui.key", json!({"window": w, "text": "3"}));
+    click(&mut app, "Record", json!([]));
+    wait_for_editor(&mut app, &w, "Record refused", |e| e["status"] == DRAFT);
+    assert_eq!(recording(&mut app), false, "nothing records");
+    let e = app.call("state.get", json!({"target": "editor", "window": w}));
+    assert_eq!(punch_in(&e), before, "the punch is not set yet: {e}");
+    let n = bar_punch_in(&mut app);
+    assert_eq!(n["focused"], true, "Punch In keeps the keyboard: {n}");
+    app.call("ui.key", json!({"window": w, "key": "return"}));
+    wait_for_editor(&mut app, &w, "the punch set", |e| {
+        e["transport"]["punch_in"] == 2 * BAR
+    });
+    // The channel's (and a surface's) transport.record refuses the same way.
+    let n = bar_punch_in(&mut app);
+    app.call("ui.click", json!({"window": w, "element": n["id"]}));
+    app.call("ui.key", json!({"window": w, "text": "4"}));
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "transport.record", "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::Failed, "{e}");
+    assert_eq!(e.message, DRAFT, "{e}");
+    assert_eq!(recording(&mut app), false, "nothing records");
+    app.call("ui.key", json!({"window": w, "key": "escape"}));
+    let n = bar_punch_in(&mut app);
+    let e = app.call("state.get", json!({"target": "editor", "window": w}));
+    assert_eq!(
+        e["transport"]["punch_in"],
+        2 * BAR,
+        "Esc sets nothing: {e} {n}"
+    );
+    assert_eq!(tick(&mut app), 4 * BAR);
     no_alert(&mut app);
     app.quit();
 }

@@ -2,17 +2,18 @@
 //! `TransportRowView`, `TransportItemViews`, `TransportReadoutsView`,
 //! `TransportFieldsView`): the cluster (Return to Start, Rewind, Fast
 //! Forward, Play/Stop), Loop, the four readouts, the Position and Edit
-//! In/Out fields, flexible space, the Main View picker and the pane
-//! toggles, Faults with its popover (document window only), and the
-//! record items: Record in the cluster, Replace/Overdub, Count-in, Record
-//! Options with its popover ([`crate::record_popover`]) and the Step Entry
-//! summary; what does not fit folds, last first, into the » menu.
+//! In/Out and Punch In/Out fields, flexible space, the Main View picker
+//! and the pane toggles, Faults with its popover (document window only),
+//! and the record items: Record in the cluster, Replace/Overdub,
+//! Count-in, Record Options with its popover ([`crate::record_popover`])
+//! and the Step Entry summary; what does not fit folds, last first, into
+//! the » menu, where a folded field item is a popover of its live fields.
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Context, Div, ElementId, Focusable, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, ParentElement, Rgba, Stateful, StatefulInteractiveElement, Styled, Window,
-    anchored, canvas, deferred, div, point, px, rgb,
+    MouseDownEvent, ParentElement, Rgba, Stateful, StatefulInteractiveElement, Styled, TextRun,
+    Window, anchored, canvas, deferred, div, point, px, rgb,
 };
 use vizdaw_app::DocumentModel;
 use vizdaw_app::editor::{MainView, PaneSide};
@@ -126,6 +127,7 @@ impl BarState {
             faults: self.faults.is_some(),
             summary: self.summary.is_some(),
             cluster_readouts: self.record.readouts_width(),
+            labels: LabelWidths::default(),
         }
     }
 
@@ -217,6 +219,7 @@ pub enum Piece {
     Readout(ReadoutBox),
     Position,
     EditFields,
+    PunchFields,
     Space,
     MainView,
     Panes,
@@ -239,6 +242,52 @@ pub struct Shows {
     /// The width the cluster's readouts after Record take (count-in, the
     /// pass, the time left), gaps included.
     pub cluster_readouts: f32,
+    /// The fields' label widths.
+    pub labels: LabelWidths,
+}
+
+/// The fields' label widths, measured from their titles at the caption
+/// size (`text_xs`) so none clips; the default is a guess for a bar
+/// planned without a window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LabelWidths([f32; 5]);
+
+impl Default for LabelWidths {
+    fn default() -> Self {
+        LabelWidths([52., 44., 52., 56., 64.])
+    }
+}
+
+impl LabelWidths {
+    /// The labels' widths in `window`'s font.
+    pub fn measure(window: &Window) -> LabelWidths {
+        let font = window.text_style().font();
+        let size = window.rem_size() * 0.75;
+        LabelWidths(TransportField::ALL.map(|f| {
+            let title = f.title();
+            let run = TextRun {
+                len: title.len(),
+                font: font.clone(),
+                color: gpui::black(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let line = window
+                .text_system()
+                .shape_line(title.into(), size, &[run], None);
+            f32::from(line.width).ceil()
+        }))
+    }
+
+    /// `f`'s label width.
+    pub fn of(&self, f: TransportField) -> f32 {
+        let i = TransportField::ALL
+            .iter()
+            .position(|g| *g == f)
+            .expect("every field");
+        self.0[i]
+    }
 }
 
 /// The Record button's help (Swift `V/RecordControls.swift:27`).
@@ -266,6 +315,7 @@ impl Piece {
             TransportItem::Signature => Piece::Readout(ReadoutBox::Signature),
             TransportItem::PositionField => Piece::Position,
             TransportItem::EditFields => Piece::EditFields,
+            TransportItem::PunchFields => Piece::PunchFields,
             TransportItem::Space => Piece::Space,
             TransportItem::MainView => Piece::MainView,
             TransportItem::Panes => Piece::Panes,
@@ -279,21 +329,23 @@ impl Piece {
         })
     }
 
-    /// The width it takes. Fixed, so the readouts fit their widest texts
-    /// ("9999.4.960", "999:59.999", "999.99", "255/128") and the bar
-    /// folds the same way whatever is playing.
-    pub fn width(self) -> f32 {
+    /// The width it takes, with the fields' labels `labels` wide. Fixed,
+    /// so the readouts fit their widest texts ("9999.4.960",
+    /// "999:59.999", "999.99", "255/128") and the bar folds the same way
+    /// whatever is playing.
+    pub fn width(self, labels: &LabelWidths) -> f32 {
         match self {
             // Return to Start, Rewind, Fast Forward, Play/Stop and Record.
             Piece::Cluster => 5. * CLUSTER_BUTTON + 4. * CLUSTER_GAP,
             Piece::Loop => LOOP,
             Piece::Readout(b) => readout_width(b),
-            Piece::Position => label_width(TransportField::Position) + LABEL_GAP + FIELD,
-            Piece::EditFields => {
-                label_width(TransportField::EditIn)
-                    + label_width(TransportField::EditOut)
-                    + 2. * (LABEL_GAP + FIELD)
-                    + GAP
+            Piece::Position | Piece::EditFields | Piece::PunchFields => {
+                let fields = self.fields();
+                fields
+                    .iter()
+                    .map(|f| labels.of(*f) + LABEL_GAP + FIELD)
+                    .sum::<f32>()
+                    + GAP * (fields.len() - 1) as f32
             }
             Piece::Space => 0.,
             Piece::MainView => 2. * SEGMENT + 1.,
@@ -318,6 +370,7 @@ impl Piece {
             Piece::Readout(ReadoutBox::Signature) => "Time Signature",
             Piece::Position => "Position Field",
             Piece::EditFields => "Edit In and Out",
+            Piece::PunchFields => "Punch In and Out",
             Piece::Space => "Flexible Space",
             Piece::MainView => MAIN_VIEW,
             Piece::Panes => "Pane Toggles",
@@ -330,11 +383,22 @@ impl Piece {
         }
     }
 
-    fn fields(self) -> &'static [TransportField] {
+    /// The fields it shows, in bar order.
+    pub fn fields(self) -> &'static [TransportField] {
         match self {
             Piece::Position => &[TransportField::Position],
             Piece::EditFields => &[TransportField::EditIn, TransportField::EditOut],
+            Piece::PunchFields => &[TransportField::PunchIn, TransportField::PunchOut],
             _ => &[],
+        }
+    }
+
+    /// The bar item that holds field `f`.
+    pub fn holding(f: TransportField) -> Piece {
+        match f {
+            TransportField::Position => Piece::Position,
+            TransportField::EditIn | TransportField::EditOut => Piece::EditFields,
+            TransportField::PunchIn | TransportField::PunchOut => Piece::PunchFields,
         }
     }
 }
@@ -347,20 +411,13 @@ fn readout_width(b: ReadoutBox) -> f32 {
     }
 }
 
-fn label_width(f: TransportField) -> f32 {
-    match f {
-        TransportField::Position | TransportField::EditOut => 52.,
-        TransportField::EditIn => 44.,
-        // The Punch In and Out item is drawn from slice 8b.
-        TransportField::PunchIn => 56.,
-        TransportField::PunchOut => 64.,
-    }
-}
-
 /// Which pieces a bar of `width` shows and which fold into ».
 pub struct Plan {
     pieces: Vec<Piece>,
+    /// The item each piece draws.
+    items: Vec<TransportItem>,
     fit: Fit,
+    labels: LabelWidths,
 }
 
 impl Plan {
@@ -378,16 +435,16 @@ impl Plan {
         document_window: bool,
         shows: Shows,
     ) -> Plan {
-        let pieces: Vec<Piece> = layout
+        let (pieces, items): (Vec<Piece>, Vec<TransportItem>) = layout
             .items_for(document_window)
             .into_iter()
-            .filter_map(Piece::of)
-            .filter(|p| match p {
+            .filter_map(|i| Piece::of(i).map(|p| (p, i.clone())))
+            .filter(|(p, _)| match p {
                 Piece::Faults => shows.faults,
                 Piece::Summary => shows.summary,
                 _ => true,
             })
-            .collect();
+            .unzip();
         let widths: Vec<(f32, bool, ItemKind)> = pieces
             .iter()
             .map(|p| {
@@ -397,14 +454,33 @@ impl Plan {
                     _ => ItemKind::Content,
                 };
                 let width = match p {
-                    Piece::Cluster => p.width() + shows.cluster_readouts,
-                    _ => p.width(),
+                    Piece::Cluster => p.width(&shows.labels) + shows.cluster_readouts,
+                    _ => p.width(&shows.labels),
                 };
                 (width, *p == Piece::Cluster, kind)
             })
             .collect();
         let fit = fit(&widths, width - 2. * PADDING, GAP, CHEVRON);
-        Plan { pieces, fit }
+        Plan {
+            pieces,
+            items,
+            fit,
+            labels: shows.labels,
+        }
+    }
+
+    /// The bar's items, shown and folded, in bar order.
+    pub fn items(&self) -> &[TransportItem] {
+        &self.items
+    }
+
+    /// The items folded into ».
+    pub fn folded_items(&self) -> Vec<TransportItem> {
+        self.fit
+            .folded
+            .iter()
+            .map(|&i| self.items[i].clone())
+            .collect()
     }
 
     pub fn shown(&self) -> Vec<Piece> {
@@ -827,6 +903,7 @@ fn field(
     f: TransportField,
     state: &BarState,
     fields: &TransportFields,
+    labels: &LabelWidths,
     scope: &mut RegistryScope,
     window: &Window,
     cx: &mut Context<DocumentWindow>,
@@ -886,7 +963,7 @@ fn field(
         .gap(px(LABEL_GAP))
         .child(
             div()
-                .w(px(label_width(f)))
+                .w(px(labels.of(f)))
                 .flex_none()
                 .text_xs()
                 .text_color(rgb(colors::DIM))
@@ -894,6 +971,70 @@ fn field(
                 .child(f.title()),
         )
         .child(boxed)
+        .into_any_element()
+}
+
+/// A field item's fields, side by side.
+fn field_group(
+    piece: Piece,
+    state: &BarState,
+    fields: &TransportFields,
+    labels: &LabelWidths,
+    scope: &mut RegistryScope,
+    window: &Window,
+    cx: &mut Context<DocumentWindow>,
+) -> AnyElement {
+    let mut group = div().flex().flex_row().flex_none().gap(px(GAP));
+    for f in piece.fields() {
+        group = group.child(field(*f, state, fields, labels, scope, window, cx));
+    }
+    group.into_any_element()
+}
+
+/// A folded field item's popover under » (Swift's `.popover` entry): its
+/// live fields, edited as on the bar. A press outside it closes it
+/// (cancelling an edit), apart from one on » (its opener toggles it) and
+/// one on Record with a punch draft open.
+fn field_popover(
+    piece: Piece,
+    state: &BarState,
+    fields: &TransportFields,
+    labels: &LabelWidths,
+    scope: &mut RegistryScope,
+    window: &Window,
+    cx: &mut Context<DocumentWindow>,
+) -> AnyElement {
+    let mut scope = scope.container();
+    let panel = div()
+        .id("field-popover")
+        .occlude()
+        .relative()
+        .p_3()
+        .bg(rgb(colors::LIST))
+        .border_1()
+        .border_color(rgb(colors::BORDER))
+        .rounded_md()
+        .shadow_md()
+        .text_color(rgb(colors::TEXT))
+        .child(scope.this("group", piece.title(), true))
+        .child(field_group(
+            piece, state, fields, labels, &mut scope, window, cx,
+        ))
+        .on_mouse_down_out(cx.listener(|this, e: &MouseDownEvent, window, cx| {
+            this.press_outside_field_popover(e.position, window, cx)
+        }));
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .child(
+            div()
+                .absolute()
+                .top_full()
+                .right_0()
+                .child(deferred(anchored().snap_to_window().child(panel)).with_priority(2)),
+        )
         .into_any_element()
 }
 
@@ -969,14 +1110,28 @@ fn more_button(
     open: bool,
     folded: &[Piece],
     state: &BarState,
+    fields: &TransportFields,
     scope: &mut RegistryScope,
     window: &Window,
     cx: &mut Context<DocumentWindow>,
 ) -> AnyElement {
+    let bounds = fields.more_button.clone();
     let mut chevron = face("more", "\u{bb}", true, colors::BUTTON)
         .w(px(CHEVRON))
         .child(scope.control("button", MORE, true))
-        .on_click(cx.listener(|this, _, _, cx| {
+        // Where it is, so a field popover knows a press on its opener.
+        .child(
+            canvas(move |b, _, _| bounds.set(Some(b)), |_, _, _, _| {})
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+        )
+        .on_click(cx.listener(|this, _, window, cx| {
+            // Its opener closes a field popover.
+            if this.close_field_popover(window, cx) {
+                return;
+            }
             if control::is_channel_click() {
                 // The menu would track modally: name the command instead.
                 this.set_status(MORE_ON_CHANNEL, cx);
@@ -1075,7 +1230,7 @@ fn more_menu(
         let detail = match piece {
             Piece::Loop => if state.looping { "On" } else { "Off" }.to_owned(),
             Piece::Readout(b) => state.readout.texts.text(b).to_owned(),
-            Piece::Position | Piece::EditFields => piece
+            Piece::Position | Piece::EditFields | Piece::PunchFields => piece
                 .fields()
                 .iter()
                 .map(|f| state.field_text(*f))
@@ -1097,7 +1252,11 @@ fn more_menu(
         // Replace/Overdub and Count-in are disabled while recording.
         // Record Options is a popover entry: it opens the popover at ».
         let acts = match piece {
-            Piece::Loop | Piece::RecordOptions => true,
+            Piece::Loop
+            | Piece::RecordOptions
+            | Piece::Position
+            | Piece::EditFields
+            | Piece::PunchFields => true,
             Piece::Faults => state.faults.is_some(),
             Piece::ReplaceOverdub | Piece::CountIn => !r.recording,
             _ => false,
@@ -1152,6 +1311,9 @@ fn more_menu(
                     match piece {
                         Piece::Faults => this.toggle_faults(cx),
                         Piece::RecordOptions => this.toggle_record_popover(window, cx),
+                        Piece::Position | Piece::EditFields | Piece::PunchFields => {
+                            this.open_field_popover(piece, window, cx)
+                        }
                         Piece::ReplaceOverdub => this.press_record_mode(cx),
                         Piece::CountIn => this.toggle_count_in(cx),
                         _ => this.toggle_loop(cx),
@@ -1186,8 +1348,9 @@ pub fn render(
         popover,
         more_open,
     } = parts;
-    // Drawn again below, while the cluster and the chevron show.
+    // Drawn again below, while the cluster and the chevrons show.
     fields.record_button.set(None);
+    fields.more_button.set(None);
     popover.chevron.set(None);
     let mut row = div()
         .flex()
@@ -1202,12 +1365,8 @@ pub fn render(
             Piece::Cluster => cluster(state, fields, scope, cx),
             Piece::Loop => loop_button(state.looping, scope, cx),
             Piece::Readout(b) => readout(b, state.readout.texts.text(b), scope),
-            Piece::Position | Piece::EditFields => {
-                let mut group = div().flex().flex_row().flex_none().gap(px(GAP));
-                for f in piece.fields() {
-                    group = group.child(field(*f, state, fields, scope, window, cx));
-                }
-                group.into_any_element()
+            Piece::Position | Piece::EditFields | Piece::PunchFields => {
+                field_group(piece, state, fields, &plan.labels, scope, window, cx)
             }
             Piece::Space => div().flex_1().into_any_element(),
             Piece::MainView => main_view(state.main, &mut scope.container(), cx),
@@ -1231,7 +1390,24 @@ pub fn render(
     }
     let folded = plan.folded();
     if !folded.is_empty() {
-        let mut more = more_button(more_open, &folded, state, scope, window, cx);
+        let mut more = more_button(more_open, &folded, state, fields, scope, window, cx);
+        // A folded field item's popover, at ».
+        if let Some(p) = fields.popover().filter(|p| folded.contains(p)) {
+            more = div()
+                .relative()
+                .flex_none()
+                .child(more)
+                .child(field_popover(
+                    p,
+                    state,
+                    fields,
+                    &plan.labels,
+                    scope,
+                    window,
+                    cx,
+                ))
+                .into_any_element();
+        }
         // Folded, the popover opens at ».
         if let Some(f) = state.faults.as_ref().filter(|f| f.open)
             && folded.contains(&Piece::Faults)

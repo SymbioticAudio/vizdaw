@@ -1256,6 +1256,37 @@ fn transport_go_position_focuses_the_field(cx: &mut TestAppContext) {
     assert_eq!(node(&tree, "textfield", "Edit In")["focused"], true);
 }
 
+/// `transport.go_punch` answers as P and E do: Punch In on the bar takes
+/// the keyboard; with no Punch In on the row, the window shows none.
+#[gpui::test]
+fn transport_go_punch_focuses_punch_in(cx: &mut TestAppContext) {
+    let s = setup(cx, demo_fake());
+    ok(call(&s, cx, "app.new_demo", json!({})));
+    let e = call(&s, cx, "command.run", json!({"id": "transport.go_punch"})).unwrap_err();
+    assert_eq!(e.code, ErrorCode::Unavailable);
+    assert_eq!(e.message, "The window shows no transport fields.");
+    ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "ui.set_transport_bar",
+            "params": {"items": "cluster,edit_fields,punch_fields"}}),
+    ));
+    let ran = ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "transport.go_punch"}),
+    ));
+    assert_eq!(ran["command"], "transport.go_punch");
+    let tree = ok(call(&s, cx, "ui.tree", json!({})));
+    assert_eq!(node(&tree, "textfield", "Punch In")["focused"], true);
+    ok(call(&s, cx, "ui.key", json!({"text": "3"})));
+    ok(call(&s, cx, "ui.key", json!({"key": "return"})));
+    let e = ok(call(&s, cx, "state.get", json!({"target": "editor"})));
+    assert_eq!(e["transport"]["punch_in"], 2 * BAR, "{e}");
+}
+
 #[gpui::test]
 fn transport_commands_run_and_refuse_over_the_channel(cx: &mut TestAppContext) {
     let s = setup(cx, demo_fake());

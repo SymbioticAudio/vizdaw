@@ -308,6 +308,7 @@ impl DocumentWindow {
                     // The window lost the keyboard: a field edit cancels, a
                     // hold ends where it got to, a held key lands.
                     this.cancel_field(window, cx);
+                    this.close_field_popover(window, cx);
                     // The record popover closes (Swift's transient
                     // popover), dropping its drafts.
                     this.escape_record_popover(window, cx);
@@ -338,6 +339,9 @@ impl DocumentWindow {
         let state = app.clone();
         subscriptions.push(cx.on_release(move |this: &mut Self, cx| {
             this._hold = None;
+            // A transport field's edit ends with its window: the keys come
+            // back, and a bar punch draft does not stay to refuse Record.
+            let field = this.transport_fields.editing();
             let shuttle = &mut this.shuttle;
             let roll = &mut this.piano_roll;
             // A sheet's field edit ends with its window: the document's
@@ -350,6 +354,10 @@ impl DocumentWindow {
                 s.store.with_document(doc, |d, _| {
                     if let Some(owner) = &sheet_owner {
                         d.end_text_editing(owner);
+                    }
+                    if field.is_some() {
+                        d.end_text_editing(vizdaw_app::transport_fields::TEXT_OWNER);
+                        d.bar_punch_ended();
                     }
                     shuttle.cancel(d);
                     shuttle.key_up(d);
@@ -703,7 +711,7 @@ impl DocumentWindow {
     }
 
     /// Esc: the Faults popover closes; true when it was open.
-    fn escape_faults(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn escape_faults(&mut self, cx: &mut Context<Self>) -> bool {
         let open = self.read_model(cx, DocumentModel::shows_faults) == Some(true);
         if open {
             self.close_faults(cx);
@@ -1103,6 +1111,7 @@ impl DocumentWindow {
         }
         let headers = std::mem::take(&mut self.track_headers.add_menu_open);
         let more = std::mem::take(&mut self.more_open);
+        let field_popover = self.close_field_popover(window, cx);
         let faults = self.escape_faults(cx);
         let record = self.escape_record_popover(window, cx);
         let arrangement = self.arrangement.close_menus();
@@ -1112,6 +1121,7 @@ impl DocumentWindow {
         if self.menu_bar.as_mut().is_some_and(MenuBar::close)
             || headers
             || more
+            || field_popover
             || faults
             || record
             || arrangement
@@ -1665,6 +1675,14 @@ impl DocumentWindow {
         )
     }
 
+    /// What the bar shows now and then, with its labels measured.
+    fn bar_shows(bar: Option<&BarState>, window: &Window) -> transport_bar::Shows {
+        transport_bar::Shows {
+            labels: transport_bar::LabelWidths::measure(window),
+            ..bar.map(BarState::shows).unwrap_or_default()
+        }
+    }
+
     /// The Mixer window: the menu bar (off macOS), the alert, its
     /// transport bar without the document-only items, then the mixer's
     /// Window placement.
@@ -1685,17 +1703,10 @@ impl DocumentWindow {
             &layout,
             f32::from(window.viewport_size().width),
             false,
-            bar.as_ref().map(BarState::shows).unwrap_or_default(),
+            Self::bar_shows(bar.as_ref(), window),
         );
-        self.set_shown_fields(
-            if bar.is_some() {
-                plan.shown_fields()
-            } else {
-                vec![]
-            },
-            window,
-            cx,
-        );
+        let other_popover = bar.as_ref().is_some_and(|b| b.record_popover.is_some());
+        self.follow_bar_fields(bar.as_ref().map(|_| &plan), other_popover, window, cx);
         if plan.folded().is_empty() {
             self.more_open = false;
         }
@@ -1877,7 +1888,7 @@ impl Render for DocumentWindow {
         let plan = Plan::new(
             &layout,
             f32::from(window.viewport_size().width),
-            bar.as_ref().map(BarState::shows).unwrap_or_default(),
+            Self::bar_shows(bar.as_ref(), window),
         );
         // Faults went (its lines cleared): so does its popover, after the
         // draw (nothing shows the flag meanwhile).
@@ -1889,15 +1900,10 @@ impl Render for DocumentWindow {
                 });
             });
         }
-        self.set_shown_fields(
-            if bar.is_some() {
-                plan.shown_fields()
-            } else {
-                vec![]
-            },
-            window,
-            cx,
-        );
+        let other_popover = bar.as_ref().is_some_and(|b| {
+            b.record_popover.is_some() || b.faults.as_ref().is_some_and(|f| f.open)
+        });
+        self.follow_bar_fields(bar.as_ref().map(|_| &plan), other_popover, window, cx);
         if plan.folded().is_empty() {
             self.more_open = false;
         }

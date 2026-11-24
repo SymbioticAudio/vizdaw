@@ -158,7 +158,7 @@ item (false: keys, the Keys settings and the control channel only).
 | transport.set_click_mode | Transport | Click Mode |  | false | S8a | S8a |
 | transport.go_position | Transport | Go to Position Field | P | true | S3 | S3 |
 | transport.go_edit_in | Transport | Go to Edit-In Field | E | true | S3 | S3 |
-| transport.go_punch | Transport | Go to Punch Fields | U | true | | |
+| transport.go_punch | Transport | Go to Punch Fields | U | true | S8b (U and channel; folded, » opens at Punch In) | S8b (U and channel; folded, » opens at Punch In) |
 | transport.arm_previous | Transport | Arm Previous Track | ⌥⇧↑ | true | S8a | S8a |
 | transport.arm_next | Transport | Arm Next Track | ⌥⇧↓ | true | S8a | S8a |
 | marker.add | Transport | Add Marker |  | false | S8a | S8a |
@@ -556,7 +556,7 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 | window_views_and_panes_over_the_channel | S6a (views and panes; markers and mixer-window steps later) | S6a (views via ui.view_*; ⌃2 is ⌘2 on Linux) |
 | themes_and_the_strip_over_the_channel | | |
 | edits_a_region_in_the_audio_editor | | |
-| transport_jumps_readouts_and_fields_over_the_channel | S3 (steps 0–6; step 7 Punch/Record: later slice) | S3 (steps 0–6; step 7 Punch/Record: later slice) |
+| transport_jumps_readouts_and_fields_over_the_channel | S3 (steps 0–6), S8b (step 7) | S3 (steps 0–6); step 7 S8b, Linux run pending |
 | new_project_tracks_over_the_channel | S3 (passed with the screen locked once the channel draws a fresh frame) | S2 |
 | loop_wraps_at_the_end | S3 | S3 |
 | arpeggiates_an_injected_chord_while_recording | S8a | S8a |

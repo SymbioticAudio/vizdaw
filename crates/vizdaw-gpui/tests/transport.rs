@@ -415,13 +415,13 @@ fn a_field_that_folds_away_cancels_its_edit(cx: &mut TestAppContext) {
     s.resize(WIDE);
     assert_eq!(s.value("textfield", "Edit In"), "");
     assert!(!s.focused("Edit In"));
-    // A folded field refuses its key.
+    // A folded field's key opens » at it (slice 8b controller ruling).
     s.resize(600.);
     s.keys("p");
-    assert_eq!(
-        s.status().as_deref(),
-        Some("The window shows no transport fields.")
-    );
+    assert_eq!(s.status(), None);
+    assert!(s.has("group", "Position Field"), "{:?}", s.tree());
+    assert!(s.focused("Position"));
+    s.keys("escape");
     assert!(s.keys_enabled());
 }
 
@@ -1038,4 +1038,368 @@ fn folded_record_items_are_swifts_entries_in_more(cx: &mut TestAppContext) {
         false
     );
     assert_eq!(s.node("menuitem", "Count-in").unwrap()["enabled"], false);
+}
+
+// Slice 8b Task 4: Punch In and Out on the bar, the field keys and » at
+// the field.
+
+const PUNCH_BAR: &str = "cluster,bar,position_field,edit_fields,punch_fields";
+const DRAFT: &str = "Press Return to set the punch, or Esc to discard it.";
+
+impl Setup {
+    fn editing_field(&mut self) -> Option<vizdaw_app::transport_fields::TransportField> {
+        self.window
+            .read_with(&self.cx, |v, _| v.editing_field())
+            .unwrap()
+    }
+
+    fn draft(&mut self) -> bool {
+        self.with_doc(|d| d.has_open_punch_draft())
+    }
+
+    fn punch_in(&mut self) -> i64 {
+        self.with_doc(|d| d.layout().transport.punch_in)
+    }
+
+    /// Record, then Stop Recording: Record is not refused.
+    fn records_and_stops(&mut self, how: &str) {
+        let before = self.fake.count("record(3)");
+        self.update_model(|d| d.set_status(None));
+        self.click("button", "Record");
+        assert_eq!(self.status(), None, "{how}: Record is not refused");
+        assert_eq!(self.fake.count("record(3)"), before + 1, "{how}");
+        self.click("button", "Stop Recording");
+        assert!(!self.recording(), "{how}");
+    }
+}
+
+/// Tab goes Position → Edit In → Edit Out → Punch In → Punch Out and
+/// round (Swift `tabMovesBetweenTheFields`, `punchFieldsKeepTheirOrder`).
+#[gpui::test]
+fn tab_goes_through_the_punch_fields(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    s.set_bar(PUNCH_BAR);
+    s.click("textfield", "Position");
+    for label in ["Edit In", "Edit Out", "Punch In", "Punch Out", "Position"] {
+        s.keys("tab");
+        assert!(s.focused(label), "Tab reaches {label}");
+    }
+    s.keys("shift-tab");
+    assert!(s.focused("Punch Out"));
+    s.keys("shift-tab");
+    assert!(s.focused("Punch In"));
+    s.keys("escape");
+    assert!(s.keys_enabled());
+}
+
+/// A typed bar Punch In refuses Record with the draft message; the field
+/// keeps the keyboard and the draft, and Return then sets the punch.
+#[gpui::test]
+fn a_typed_bar_punch_in_refuses_record_until_return(cx: &mut TestAppContext) {
+    let mut s = setup(cx, armed_fake());
+    s.set_bar(PUNCH_BAR);
+    s.click("textfield", "Punch In");
+    s.keys("3");
+    assert!(s.draft());
+    s.click("button", "Record");
+    assert_eq!(s.status().as_deref(), Some(DRAFT));
+    assert_eq!(s.fake.count("record(3)"), 0);
+    assert!(s.focused("Punch In"), "the field keeps the keyboard");
+    assert_eq!(s.value("textfield", "Punch In"), "3");
+    assert_eq!(s.punch_in(), 0, "not set yet");
+    s.keys("enter");
+    assert_eq!(s.punch_in(), 2 * BAR);
+    assert!(!s.draft() && s.keys_enabled());
+    s.records_and_stops("after Return");
+}
+
+/// A way a field's edit ends.
+type End = fn(&mut Setup);
+
+/// Every end of a bar punch edit clears its draft: Return, Esc, Tab,
+/// ⇧Tab, a click elsewhere, the field folding away and the window losing
+/// the keyboard. Record is then not refused.
+#[gpui::test]
+fn every_end_of_a_bar_punch_edit_clears_its_draft(cx: &mut TestAppContext) {
+    let mut s = setup(cx, armed_fake());
+    s.set_bar(PUNCH_BAR);
+    let ends: [(&str, End); 7] = [
+        ("Return", |s| s.keys("enter")),
+        ("Esc", |s| s.keys("escape")),
+        ("Tab", |s| s.keys("tab escape")),
+        ("Shift-Tab", |s| s.keys("shift-tab escape")),
+        ("a click elsewhere", |s| s.click("text", "Bar Readout")),
+        ("folding away", |s| {
+            s.resize(600.);
+            assert!(!s.has("textfield", "Punch In"), "folded");
+            s.resize(WIDE);
+        }),
+        ("the window losing the keyboard", |s| {
+            s.cx.deactivate_window();
+            s.cx.run_until_parked();
+            s.cx.update(|window, _| window.activate_window());
+            s.cx.run_until_parked();
+        }),
+    ];
+    for (how, end) in ends {
+        s.click("textfield", "Punch Out");
+        // Return commits a refused text: the draft goes all the same.
+        s.keys("x");
+        assert!(s.draft(), "{how}: typed");
+        end(&mut s);
+        assert!(!s.draft(), "{how}: the draft is cleared");
+        assert!(s.keys_enabled(), "{how}: the keys are back");
+        s.records_and_stops(how);
+    }
+}
+
+/// The Mixer window closing with its bar's Punch In typed in leaves no
+/// draft behind.
+#[gpui::test]
+fn closing_the_mixer_window_ends_its_punch_edit(cx: &mut TestAppContext) {
+    let mut s = setup(cx, armed_fake());
+    s.set_bar(PUNCH_BAR);
+    let doc = s.doc();
+    let app = s.app.clone();
+    let mixer =
+        s.cx.update(|_, cx| DocumentWindow::open_mixer(&app, doc, cx).unwrap());
+    s.cx.run_until_parked();
+    let mut mcx = VisualTestContext::from_window(mixer.into(), &s.cx);
+    mcx.simulate_resize(size(px(WIDE), px(640.)));
+    mcx.run_until_parked();
+    let tree = mixer
+        .read_with(&mcx, |v, _| v.registry().borrow().tree())
+        .unwrap();
+    let id = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["role"] == "textfield" && n["label"] == "Punch In")
+        .expect("the Mixer window's Punch In")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let at = mixer
+        .read_with(&mcx, |v, _| {
+            v.registry().borrow().resolve(&id).unwrap().bounds.center()
+        })
+        .unwrap();
+    mcx.simulate_click(at, Modifiers::none());
+    mcx.simulate_keystrokes("5");
+    mcx.run_until_parked();
+    assert!(s.draft());
+    mixer
+        .update(&mut mcx, |_, window, _| window.remove_window())
+        .unwrap();
+    s.cx.run_until_parked();
+    assert!(!s.draft());
+    assert!(s.keys_enabled());
+    s.records_and_stops("after the Mixer window closed");
+}
+
+/// U focuses Punch In on the row; folded, it opens » at Punch In, where
+/// typing and Return set it; with no punch item it says so.
+#[gpui::test]
+fn u_goes_to_punch_in_on_the_row_or_in_more(cx: &mut TestAppContext) {
+    let mut s = setup(cx, armed_fake());
+    s.set_bar(PUNCH_BAR);
+    s.keys("u");
+    assert!(s.focused("Punch In"));
+    s.keys("3 enter");
+    assert_eq!(s.punch_in(), 2 * BAR);
+    // Folded: » opens at the field, live and with the keyboard.
+    s.resize(600.);
+    assert!(!s.has("textfield", "Punch In"));
+    s.keys("u");
+    assert!(s.has("group", "Punch In and Out"), "{:?}", s.tree());
+    assert!(s.focused("Punch In"));
+    assert!(s.has("textfield", "Punch Out"));
+    s.keys("5");
+    // Record refuses there too, and the field keeps the keyboard.
+    s.click("button", "Record");
+    assert_eq!(s.status().as_deref(), Some(DRAFT));
+    assert!(s.focused("Punch In"));
+    s.keys("enter");
+    assert_eq!(s.punch_in(), 4 * BAR);
+    assert!(!s.draft());
+    // Esc closes it.
+    s.keys("escape");
+    assert!(!s.has("group", "Punch In and Out"));
+    // P with Position folded opens » at Position the same way.
+    s.resize(300.);
+    s.keys("p");
+    assert!(s.has("group", "Position Field"), "{:?}", s.tree());
+    assert!(s.focused("Position"));
+    s.keys("5 enter");
+    assert_eq!(s.locates(), vec![format!("locate({})", 4 * BAR)]);
+    s.keys("escape");
+    // No punch item: the status says so.
+    s.resize(WIDE);
+    s.set_bar("cluster,position_field");
+    s.keys("u");
+    assert_eq!(
+        s.status().as_deref(),
+        Some("The window shows no transport fields.")
+    );
+    assert!(s.keys_enabled());
+}
+
+/// In », the field items are popovers with live fields: a click on the
+/// entry opens it; a click on a field edits it as on the bar; a click
+/// outside closes it, cancelling the edit.
+#[gpui::test]
+fn folded_fields_are_popovers_in_more(cx: &mut TestAppContext) {
+    let mut s = setup(cx, armed_fake());
+    s.set_bar(PUNCH_BAR);
+    s.resize(600.);
+    s.click("button", "More Transport Items");
+    s.click("menuitem", "Punch In and Out");
+    assert!(!s.has("menuitem", "Punch In and Out"), "the menu closed");
+    assert!(s.has("group", "Punch In and Out"));
+    assert!(!s.focused("Punch In"), "opened, not editing");
+    s.click("textfield", "Punch Out");
+    assert!(s.focused("Punch Out"));
+    s.keys("7");
+    assert!(s.draft());
+    s.click("text", "Bar Readout");
+    assert!(
+        !s.has("group", "Punch In and Out"),
+        "a click outside closes it"
+    );
+    assert!(!s.draft() && s.keys_enabled());
+    // The window losing the keyboard closes it too.
+    s.keys("u");
+    s.keys("4");
+    assert!(s.draft());
+    s.cx.deactivate_window();
+    s.cx.run_until_parked();
+    assert!(!s.has("group", "Punch In and Out"));
+    assert!(!s.draft() && s.keys_enabled());
+    s.cx.update(|window, _| window.activate_window());
+    s.cx.run_until_parked();
+    // Main View stays a text entry.
+    s.set_bar("cluster,bar,position_field,main_view");
+    s.resize(300.);
+    s.click("button", "More Transport Items");
+    let entry = s.node("menuitem", "Main View").expect("an entry");
+    assert_eq!(entry["enabled"], false, "{entry}");
+}
+
+/// The bar's Punch In and Out share their labels with the record
+/// popover's: the popover's are found through its group, the bar's
+/// outside it, and the bar's edit ends when the chevron is pressed.
+#[gpui::test]
+fn the_bar_and_popover_punch_fields_stay_apart(cx: &mut TestAppContext) {
+    let mut s = setup(cx, armed_fake());
+    s.set_bar("cluster,edit_fields,punch_fields,record_options");
+    s.click("textfield", "Punch In");
+    s.keys("3");
+    s.click("button", "Record Options");
+    assert!(!s.draft(), "the chevron ended the bar's edit");
+    s.click("checkbox", "Punch");
+    let tree = s.tree();
+    let group = tree
+        .iter()
+        .find(|n| n["role"] == "group" && n["label"] == "Record Options")
+        .expect("the popover")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let inside: Vec<&Value> = tree
+        .iter()
+        .filter(|n| n["role"] == "textfield" && n["label"] == "Punch In")
+        .collect();
+    assert_eq!(inside.len(), 2, "the bar's and the popover's");
+    let path = |n: &Value| {
+        n["id"]
+            .as_str()
+            .unwrap()
+            .split(':')
+            .next()
+            .unwrap()
+            .to_owned()
+    };
+    let group = group.split(':').next().unwrap().to_owned();
+    let in_group = |n: &&&Value| path(n).starts_with(&format!("{group}."));
+    assert_eq!(
+        inside.iter().filter(in_group).count(),
+        1,
+        "one under the popover: {inside:?} {group}"
+    );
+    // The popover's is the one it edits.
+    let ours = inside.iter().find(in_group).unwrap()["id"].clone();
+    let at = s
+        .window
+        .read_with(&s.cx, |v, _| {
+            v.registry()
+                .borrow()
+                .resolve(ours.as_str().unwrap())
+                .unwrap()
+                .bounds
+                .center()
+        })
+        .unwrap();
+    s.cx.simulate_click(at, Modifiers::none());
+    s.cx.run_until_parked();
+    let focused: Vec<bool> = s
+        .tree()
+        .iter()
+        .filter(|n| n["role"] == "textfield" && n["label"] == "Punch In")
+        .map(|n| n["focused"] == true)
+        .collect();
+    assert_eq!(focused.iter().filter(|f| **f).count(), 1, "{focused:?}");
+    assert!(
+        s.editing_field().is_none(),
+        "the bar's field is not editing"
+    );
+}
+
+/// The labels do not clip: each label's box is at least its text's width
+/// at the caption size.
+#[gpui::test]
+fn the_field_labels_do_not_clip(cx: &mut TestAppContext) {
+    use vizdaw_app::transport_fields::TransportField;
+    let mut s = setup(cx, demo_fake());
+    s.set_bar(PUNCH_BAR);
+    let fields: Vec<(TransportField, f32, f32)> = TransportField::ALL
+        .into_iter()
+        .map(|f| {
+            let n = s.node("textfield", f.title()).unwrap();
+            let x = n["frame"]["x"].as_f64().unwrap() as f32;
+            let w = n["frame"]["width"].as_f64().unwrap() as f32;
+            (f, x, x + w)
+        })
+        .collect();
+    let caption = |text: &'static str, s: &mut Setup| {
+        s.cx.update(|window, _| {
+            let font = window.text_style().font();
+            let size = window.rem_size() * 0.75;
+            let run = gpui::TextRun {
+                len: text.len(),
+                font,
+                color: gpui::black(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            f32::from(
+                window
+                    .text_system()
+                    .shape_line(text.into(), size, &[run], None)
+                    .width,
+            )
+        })
+    };
+    // From the end of the field before (or the Bar readout) to the start
+    // of this one: the gap, the label and the gap after it.
+    let bar = s.node("text", "Bar Readout").unwrap();
+    let mut end =
+        (bar["frame"]["x"].as_f64().unwrap() + bar["frame"]["width"].as_f64().unwrap()) as f32;
+    for (f, x, right) in fields {
+        // The gap between pieces (8) and between label and field (4).
+        let label = x - end - 12.;
+        let text = caption(f.title(), &mut s);
+        assert!(label >= text, "{} has {label} for {text}", f.title());
+        end = right;
+    }
 }
