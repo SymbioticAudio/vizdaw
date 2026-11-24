@@ -40,7 +40,7 @@ use crate::instance::{
 use crate::process::ParamEvent;
 use core_model::mixer::{ParamId, PluginFormat as Format};
 use crossbeam_queue::ArrayQueue;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -83,6 +83,10 @@ struct Active {
     alive: Arc<AtomicBool>,
     /// Set by a state load (the processor drops what it has from before).
     stale: Arc<AtomicBool>,
+    /// The parameters the processor's first block carries…
+    first_ids: Vec<u32>,
+    /// …and set once a processed block has carried them.
+    first_sent: Arc<AtomicBool>,
 }
 
 /// A loaded VST3 plug-in (main-thread half). Not `Send`: the VST3 SDK
@@ -360,6 +364,8 @@ impl PluginInstance for Vst3Instance {
             echoes: Arc::new(ArrayQueue::new(ECHO_QUEUE)),
             alive: Arc::new(AtomicBool::new(true)),
             stale: Arc::new(AtomicBool::new(false)),
+            first_ids: first.iter().map(|(id, _)| *id).collect(),
+            first_sent: Arc::new(AtomicBool::new(first.is_empty())),
         };
         let setup = ProcessorSetup {
             data: RtData::new(processor, &in_counts, &out_counts, first.len()),
@@ -374,6 +380,7 @@ impl PluginInstance for Vst3Instance {
             echoes: active.echoes.clone(),
             alive: active.alive.clone(),
             stale: active.stale.clone(),
+            first_sent: active.first_sent.clone(),
         };
         let proc = Vst3Processor::new(setup, &self.info);
         self.active = Some(active);
@@ -398,6 +405,21 @@ impl PluginInstance for Vst3Instance {
         state::save(&self.plugin, &self.class_id)
     }
 
+    /// Values the component has not been given in a processed block:
+    /// `pending` (set while inactive, or spilled), and the first block's
+    /// values while no block has carried them. A processor dropped before
+    /// its first block has handed them back to `pending` (`reclaim`).
+    fn unsaved_params(&mut self) -> Vec<ParamId> {
+        self.reclaim();
+        let mut ids: BTreeSet<u32> = self.pending.keys().copied().collect();
+        if let Some(a) = &self.active {
+            if !a.first_sent.load(Ordering::Acquire) {
+                ids.extend(a.first_ids.iter().copied());
+            }
+        }
+        ids.into_iter().map(|id| ParamId(u64::from(id))).collect()
+    }
+
     /// Loads a blob from [`PluginInstance::save_state`] (or a
     /// `.vstpreset` of this class); active or not, as the CLAP host
     /// loads. Values set or edited before a load that the component (or
@@ -416,7 +438,9 @@ impl PluginInstance for Vst3Instance {
                 .into_iter()
                 .filter(|e| !matches!(e, Edit::Perform(..))),
         );
-        if let Some(a) = &self.active {
+        if let Some(a) = &mut self.active {
+            // The loaded state holds every value now.
+            a.first_ids.clear();
             a.stale.store(true, Ordering::Release);
             while a.edits.pop().is_some() {}
             while a.returned.pop().is_some() {}

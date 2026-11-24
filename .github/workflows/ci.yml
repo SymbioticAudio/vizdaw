@@ -54,7 +54,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: target/vst3sdk/out
-          key: vst3sdk-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-vst3-samples.sh') }}
+          key: vst3sdk-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-vst3-samples.sh', 'scripts/licence-texts/vst3sdk/SOURCE') }}
       - name: Build the VST3 SDK samples
         run: scripts/build-vst3-samples.sh
       - name: Test

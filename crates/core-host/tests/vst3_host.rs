@@ -288,36 +288,65 @@ fn both_state_streams_survive_a_saved_song() {
     // The controller's own state carries a memo no parameter has.
     p.probe.set_memo(41);
     {
+        // Captured before any block ran: the component has not been given
+        // -12 dB yet, so the capture keeps it in the overlay.
         let mut host = host_for(&p.path, &[VST3_GAIN_ID]);
         host.sync(hist.doc());
         host.wait_ready(WAIT);
-        // A VST3 component takes values in a processed block, so the
-        // engine plays one before the capture (see the Task 6 report).
-        let (mut engine, mut be) = engine(&host);
-        engine.load(hist.doc(), song).unwrap();
-        peak(&mut be, 512);
         let blob = host.capture(&mut hist, gain).unwrap();
         let slot = hist.doc().plugin_slot(gain).unwrap();
         assert_eq!(slot.state, Some(blob));
-        assert!(slot.params.is_empty(), "the overlay is in the state");
-        drop(engine);
+        let kept = slot.params.get(&pid(VST3_PARAM_GAIN)).copied();
+        assert!(kept.is_some_and(|v| (v + 12.0).abs() < 1e-9), "{kept:?}");
     }
-    let d = tempfile::tempdir().unwrap();
-    let package = d.path().join("Song.vizdaw");
-    core_model::file::save(hist.doc(), &package).unwrap();
-    let doc = core_model::file::load(&package).unwrap();
+    let saved = |doc: &core_model::document::Document| {
+        let d = tempfile::tempdir().unwrap();
+        let package = d.path().join("Song.vizdaw");
+        core_model::file::save(doc, &package).unwrap();
+        core_model::file::load(&package).unwrap()
+    };
+    let gain_of = |host: &mut PluginHost| {
+        host.instance(gain)
+            .unwrap()
+            .param_value(pid(VST3_PARAM_GAIN))
+            .unwrap()
+    };
+    let doc = saved(hist.doc());
     p.probe.set_memo(0);
     let mut fresh = host_for(&p.path, &[VST3_GAIN_ID]);
     fresh.sync(&doc);
     let r = fresh.wait_ready(WAIT);
     assert!(r.rejected_state.is_empty(), "{:?}", r.rejected_state);
-    let v = fresh
-        .instance(gain)
-        .unwrap()
-        .param_value(pid(VST3_PARAM_GAIN))
-        .unwrap();
+    let v = gain_of(&mut fresh);
     assert!((v + 12.0).abs() < 1e-9, "{v}");
     assert_eq!(p.probe.counters().last_memo, 41, "the controller's stream");
+
+    // Once a block has carried it, a newer value wins and the capture
+    // folds it into the component's state.
+    let mut hist = History::new(doc);
+    run(
+        &mut hist,
+        MixerCmd::SetPluginParams {
+            slot: gain,
+            params: vec![(pid(VST3_PARAM_GAIN), -6.0)],
+        },
+    );
+    fresh.sync(hist.doc());
+    let (mut engine, mut be) = engine(&fresh);
+    engine.load(hist.doc(), song).unwrap();
+    peak(&mut be, 512);
+    fresh.capture(&mut hist, gain).unwrap();
+    assert!(
+        hist.doc().plugin_slot(gain).unwrap().params.is_empty(),
+        "folded into the state"
+    );
+    drop(engine);
+    let doc = saved(hist.doc());
+    let mut again = host_for(&p.path, &[VST3_GAIN_ID]);
+    again.sync(&doc);
+    again.wait_ready(WAIT);
+    let v = gain_of(&mut again);
+    assert!((v + 6.0).abs() < 1e-9, "the component's state: {v}");
 }
 
 /// Plan 5f-2 Ruling 7, for VST3: a bounce host's copies are set up with
@@ -534,30 +563,32 @@ fn sdk_adelay_delays_and_its_state_survives_a_saved_song() {
         host.sync(hist.doc());
         let r = host.wait_ready(WAIT);
         assert_eq!(r.loaded, vec![slot], "{:?}", r.failed);
-        let (mut engine, mut be) = engine(&host);
-        engine.load(hist.doc(), song).unwrap();
-        peak(&mut be, 512);
+        // Before any block ran.
         host.capture(&mut hist, slot).unwrap();
-        drop(engine);
     }
     let d = tempfile::tempdir().unwrap();
     let package = d.path().join("Delay.vizdaw");
     core_model::file::save(hist.doc(), &package).unwrap();
     let doc = core_model::file::load(&package).unwrap();
-    assert!(doc.plugin_slot(slot).unwrap().params.is_empty());
     let mut fresh = host_for(&path, &[sdk::ADELAY]);
     fresh.sync(&doc);
     let r = fresh.wait_ready(WAIT);
     assert!(r.rejected_state.is_empty(), "{:?}", r.rejected_state);
     let inst = fresh.instance(slot).unwrap();
     assert_eq!(inst.param_value(delay), Some(0.0625), "the controller");
-    // The component's delay, from the state the host applied.
-    let mut copy = load_vst3(&path, sdk::ADELAY);
-    let state = fresh.applied_state_bytes(slot).unwrap();
-    copy.load_state(&state).unwrap();
-    let out = adelay_output(copy.as_mut());
-    assert!(out[..3000].iter().all(|x| *x == 0.0));
-    assert!(out[3000..].iter().all(|x| *x == 1.0), "the component");
+    // The component plays it (its default, 1 s, would be silent for the
+    // whole second).
+    let (mut engine, mut be) = engine(&fresh);
+    engine.load(&doc, song).unwrap();
+    engine.play().unwrap();
+    let mut wet = Vec::new();
+    while wet.len() < 24_000 {
+        be.block(256);
+        wet.extend_from_slice(be.output(256).0);
+    }
+    assert!(wet[..3000].iter().all(|x| *x == 0.0), "delayed");
+    assert!(wet[3000..].iter().any(|x| *x != 0.0), "by 0.0625 s");
+    drop(engine);
 }
 
 #[test]

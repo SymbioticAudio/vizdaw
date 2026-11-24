@@ -218,6 +218,9 @@ pub(crate) struct ProcessorSetup {
     /// Set by a state load: what the processor still has from before it
     /// (`first`, the held edit) is older than the load and is dropped.
     pub stale: Arc<AtomicBool>,
+    /// Set once a processed block has carried `first` (the component's
+    /// state holds those values from then on).
+    pub first_sent: Arc<AtomicBool>,
 }
 
 /// The real-time half of a [`super::Vst3Instance`].
@@ -239,6 +242,8 @@ pub struct Vst3Processor {
     midi: Box<[ParamID]>,
     first: Box<[(ParamID, f64)]>,
     first_sent: bool,
+    /// [`ProcessorSetup::first_sent`], published after the block.
+    first_published: Arc<AtomicBool>,
     edits: Arc<ArrayQueue<(ParamID, f64)>>,
     /// An edit popped while every queue was taken: sent first next block.
     held: Option<(ParamID, f64)>,
@@ -309,6 +314,7 @@ impl Vst3Processor {
             midi: s.midi.into_boxed_slice(),
             first: s.first.into_boxed_slice(),
             first_sent: false,
+            first_published: s.first_sent,
             edits: s.edits,
             held: None,
             returned: s.returned,
@@ -589,6 +595,9 @@ impl AudioProcessor for Vst3Processor {
             .data
             .process(self.mode, i32::try_from(n).unwrap_or(i32::MAX));
         self.read_changes(ctx);
+        if self.first_sent {
+            self.first_published.store(true, Ordering::Release);
+        }
         self.continuous = self.continuous.wrapping_add(n as i64);
         if ok {
             ProcessStatus::Ok

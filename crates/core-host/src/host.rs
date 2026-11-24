@@ -1457,9 +1457,11 @@ impl PluginHost {
         let State::Live(live) = state else {
             return Err(HostError::NotFound(format!("instance {id} is not loaded")));
         };
+        // Asked before the state is taken: what it will not hold.
+        let unsaved = live.inst.unsaved_params();
         let bytes = live.inst.save_state()?;
         let overlay = history.doc().plugin_slot(id).map(|s| &s.params);
-        let keep: BTreeMap<ParamId, f64> = automated
+        let mut keep: BTreeMap<ParamId, f64> = automated
             .iter()
             .copied()
             .filter_map(|p| {
@@ -1469,6 +1471,21 @@ impl PluginHost {
             })
             .filter(|(_, v)| v.is_finite())
             .collect();
+        // A value the plugin has but its state does not yet (a VST3 whose
+        // processor has not run a block) stays in the overlay too: the
+        // document's value, else the one the plugin holds.
+        for p in unsaved {
+            if keep.contains_key(&p) {
+                continue;
+            }
+            let v = overlay
+                .and_then(|o| o.get(&p))
+                .copied()
+                .or_else(|| live.inst.param_value(p));
+            if let Some(v) = v.filter(|v| v.is_finite()) {
+                keep.insert(p, v);
+            }
+        }
         let blob = history
             .capture_state_keeping(id, &bytes, &keep)
             .map_err(|e| HostError::StateRejected(e.to_string()))?;

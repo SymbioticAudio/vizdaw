@@ -18,15 +18,21 @@
 # libpango1.0-dev libwayland-dev wayland-protocols, plus ninja-build.
 set -euo pipefail
 
+root="$(cd "$(dirname "$0")/.." && pwd)"
+
 # The pin: the SDK's release tag v3.8.0_build_66 (the SDK version the vst3
-# crate's bindings are generated from).
-SDK_SHA=9fad9770f2ae8542ab1a548a68c1ad1ac690abe0
-SDK_URL=https://github.com/steinbergmedia/vst3sdk
+# crate's bindings are generated from). Its URL, tag and commit live beside
+# its licence text (scripts/licence-texts/vst3sdk/SOURCE).
+source_file="$root/scripts/licence-texts/vst3sdk/SOURCE"
+pin() { sed -n "s/^$1=//p" "$source_file"; }
+SDK_URL="$(pin url)"
+SDK_TAG="$(pin tag)"
+SDK_SHA="$(pin commit)"
+[[ -n "$SDK_URL" && -n "$SDK_TAG" && -n "$SDK_SHA" ]] || { echo "vst3 samples: $source_file lacks url, tag or commit" >&2; exit 1; }
 SUBMODULES=(base cmake pluginterfaces public.sdk vstgui4)
 # The CMake targets; each makes <target>.vst3.
 TARGETS=(again again-sample-accurate adelay note-expression-synth host-checker panner)
 
-root="$(cd "$(dirname "$0")/.." && pwd)"
 base="$root/target/vst3sdk"
 work="$base/work"
 out="$base/out"
@@ -96,7 +102,7 @@ cp "$src/LICENSE.txt" "$out/LICENSE.txt"
 cat >"$out/SOURCE.txt" <<EOF
 VST3 SDK sample plug-ins (test fixtures, not shipped), built by VizDAW's
 scripts/build-vst3-samples.sh from $SDK_URL
-commit $SDK_SHA (tag v3.8.0_build_66), with the submodules it pins:
+commit $SDK_SHA (tag $SDK_TAG), with the submodules it pins:
 ${SUBMODULES[*]}. The SDK is MIT licensed (LICENSE.txt).
 EOF
 

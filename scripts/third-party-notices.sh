@@ -229,7 +229,15 @@ if any(p["name"] == "vst3" for p in crates):
     rule()
     lines.append("VST 3 SDK 3.8.0 (the vst3 crate's bindings are generated from its interface headers)")
     lines.append("Licence: MIT")
-    lines.append("Source: https://github.com/steinbergmedia/vst3sdk (tag v3.8.0_build_66)")
+    pins = {}
+    with open(os.path.join(VENDORED, "vst3sdk", "SOURCE")) as f:
+        for line in f:
+            key, sep, value = line.strip().partition("=")
+            if sep and not key.startswith("#"):
+                pins[key] = value
+    if not pins.get("url") or not pins.get("tag"):
+        sys.exit("third-party-notices: scripts/licence-texts/vst3sdk/SOURCE lacks url or tag")
+    lines.append(f"Source: {pins['url']} (tag {pins['tag']})")
     rule()
     sdk = os.path.join(VENDORED, "vst3sdk", "LICENSE.txt")
     if not os.path.isfile(sdk):
