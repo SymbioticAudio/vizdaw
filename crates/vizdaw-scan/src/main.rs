@@ -12,9 +12,9 @@
 //! `--list` prints the plugins of the bundle; `--id` loads the plugin,
 //! activates it at 48 kHz / 512 frames, processes one silent block,
 //! deactivates it and prints its `PluginInfo`. A VST3 `--id` loads the
-//! module and creates and releases the class's component, and replies
-//! "not validated": the plug-in is checked fully when first loaded, until
-//! the VST3 instance can be exercised here. The reply is one JSON line
+//! plug-in (component and controller, initialised and connected), prints
+//! its `PluginInfo` and releases it; it is not activated until VST3
+//! processing exists. The reply is one JSON line
 //! on stdout ([`core_host::scan::ScanReply`]); failures print a message on
 //! stderr and exit with status 2. A crash or a hang is the caller's to
 //! detect.
@@ -132,10 +132,8 @@ fn scan(args: &Args) -> Result<ScanReply, String> {
         (Format::Vst3, None) => core_host::vst3::list_bundle(&args.path)
             .map(ScanReply::Listed)
             .map_err(|e| e.to_string()),
-        (Format::Vst3, Some(id)) => core_host::vst3::check_class(&args.path, id)
-            .map(|()| {
-                ScanReply::NotValidated("created; checked in full when first loaded (VST3)".into())
-            })
+        (Format::Vst3, Some(id)) => core_host::vst3::Vst3Instance::load(&args.path, id)
+            .map(|inst| ScanReply::Scanned(inst.info().clone()))
             .map_err(|e| e.to_string()),
     }
 }

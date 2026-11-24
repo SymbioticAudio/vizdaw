@@ -40,13 +40,28 @@ fn lists_every_class_and_checks_one() {
             (VST3_HANGER_ID, PluginKind::Effect),
         ]
     );
-    // Until the VST3 instance exists, a class that creates cleanly is
-    // checked again when first loaded.
+    // A class that loads is scanned: its info comes from the instance.
     let gain = run(exe(), &req(Some(VST3_GAIN_ID), Duration::from_secs(10)));
-    assert!(
-        matches!(gain, ScanOutcome::Done(ScanReply::NotValidated(_))),
-        "{gain:?}"
-    );
+    let ScanOutcome::Done(ScanReply::Scanned(info)) = gain else {
+        panic!("{gain:?}");
+    };
+    assert_eq!(info.plugin.id, VST3_GAIN_ID);
+    assert_eq!(info.plugin.name, "Test Gain");
+    assert_eq!(info.kind, PluginKind::Effect);
+    assert_eq!(info.inputs.len(), 2);
+    assert_eq!(info.sidechain_input(), Some(1));
+    let gain_param = info
+        .params
+        .iter()
+        .find(|p| p.id.0 == u64::from(test_plugins::VST3_PARAM_GAIN))
+        .unwrap();
+    assert_eq!((gain_param.min, gain_param.max), (-60.0, 12.0));
+    let synth = run(exe(), &req(Some(VST3_SYNTH_ID), Duration::from_secs(10)));
+    let ScanOutcome::Done(ScanReply::Scanned(info)) = synth else {
+        panic!("{synth:?}");
+    };
+    assert_eq!(info.kind, PluginKind::Instrument);
+    assert!(info.note_input);
 }
 
 #[test]
@@ -105,8 +120,8 @@ fn a_full_scan_records_each_class() {
         1
     );
     let status = |id: &str| cat.status(PluginFormat::Vst3, id).unwrap();
-    assert_eq!(status(VST3_GAIN_ID), PluginStatus::NotValidated);
-    assert_eq!(status(VST3_SYNTH_ID), PluginStatus::NotValidated);
+    assert_eq!(status(VST3_GAIN_ID), PluginStatus::Ok);
+    assert_eq!(status(VST3_SYNTH_ID), PluginStatus::Ok);
     assert_eq!(
         status(VST3_CRASHER_ID),
         PluginStatus::Blocklisted("crashed (signal 11)".into())
@@ -117,7 +132,7 @@ fn a_full_scan_records_each_class() {
     );
     let synth = cat.get(PluginFormat::Vst3, VST3_SYNTH_ID).unwrap();
     assert_eq!(synth.kind, Some(PluginKind::Instrument));
-    assert_eq!(synth.status, ScanStatus::NotValidated);
+    assert_eq!(synth.status, ScanStatus::Ok);
     let names: Vec<String> = cat
         .browser(PluginKind::Effect)
         .into_iter()

@@ -487,10 +487,7 @@ fn vst3_bundles_are_scanned_when_asked_and_saved() {
             .find(|r| r.plugin.id == id && r.plugin.format == PluginFormatTag::Vst3)
             .unwrap_or_else(|| panic!("{id} not in the catalog"))
     };
-    assert_eq!(
-        row(test_plugins::VST3_GAIN_ID).status,
-        PluginStatusRow::NotValidated
-    );
+    assert_eq!(row(test_plugins::VST3_GAIN_ID).status, PluginStatusRow::Ok);
     assert_eq!(
         row(test_plugins::VST3_SYNTH_ID).kind,
         Some(PluginKindTag::Instrument)

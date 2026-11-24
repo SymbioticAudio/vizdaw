@@ -5,11 +5,15 @@
 //! app never loads an unscanned bundle (spec §8).
 //!
 //! A plug-in's ID is its class ID as 32 upper-case hex digits
-//! ([`class_id_hex`]).
+//! ([`class_id_hex`]). A loaded plug-in is a [`Vst3Instance`]; the
+//! [`Vst3Format`] makes them and shares one loaded module between the
+//! instances of a bundle.
 
 mod ffi;
+mod instance;
 mod module;
 
+pub use instance::{Vst3Format, Vst3Instance};
 pub(crate) use module::bundle_version;
 pub use module::{binary_path, class_id_hex, parse_class_id};
 
@@ -17,8 +21,8 @@ use crate::error::HostError;
 use crate::info::PluginKind;
 use core_model::mixer::PluginRef;
 use ffi::Module;
+use ffi::sdk::Vst::IComponent;
 use std::path::{Path, PathBuf};
-use vst3::Steinberg::Vst::IComponent;
 
 /// The VST3 search folders: the app's bundled folder
 /// ([`crate::bundled::dir`]) first, then the user's, then the system's.

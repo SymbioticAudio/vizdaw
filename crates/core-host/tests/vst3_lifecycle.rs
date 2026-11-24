@@ -50,18 +50,7 @@ fn a_module_whose_entry_fails_gets_no_exit() {
     let e = vst3::list_bundle(&copy).unwrap_err();
     assert!(matches!(e, HostError::LoadFailed(_)), "{e}");
     assert!(e.to_string().contains("entry"), "{e}");
-    assert_eq!(
-        probe.counters(),
-        Vst3Counters {
-            entries: 0,
-            exits: 0,
-            factory_releases: 0,
-            component_releases: 0,
-            last_factory_release: 0,
-            last_component_release: 0,
-            last_exit: 0,
-        }
-    );
+    assert_eq!(probe.counters(), Vst3Counters::default());
 }
 
 #[test]
