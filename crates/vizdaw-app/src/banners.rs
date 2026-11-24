@@ -87,6 +87,13 @@ impl ProjectBanner {
         }
     }
 
+    /// A held merge holds this button back (Convert, the rate change:
+    /// the core refuses a format job beside it; Swift
+    /// `ProjectBanners`, help `MergeModel.heldHelp`).
+    pub fn waits_for_merge(&self) -> bool {
+        matches!(self, Self::Mismatched { .. } | Self::RateMismatch { .. })
+    }
+
     /// What the button does.
     pub fn action(&self) -> BannerAction {
         match self {
@@ -147,8 +154,29 @@ impl DocumentModel {
         out
     }
 
-    /// Runs a bar's button.
+    /// Whether bar `b`'s button is enabled: Convert and the rate change
+    /// are off while a merge is held.
+    pub fn banner_enabled(&self, b: &ProjectBanner) -> bool {
+        !(self.merge_held && b.waits_for_merge())
+    }
+
+    /// Bar `b`'s button help: [`crate::merge::HELD_HELP`] while it waits
+    /// for a held merge.
+    pub fn banner_help(&self, b: &ProjectBanner) -> Option<&'static str> {
+        (!self.banner_enabled(b)).then_some(crate::merge::HELD_HELP)
+    }
+
+    /// Runs a bar's button (Convert and the rate change do nothing while
+    /// a merge is held).
     pub fn run_banner(&mut self, action: BannerAction) {
+        if self.merge_held
+            && matches!(
+                action,
+                BannerAction::Convert | BannerAction::ChangeRateToDevice
+            )
+        {
+            return;
+        }
         match action {
             BannerAction::CancelJob(id) => self.cancel_job(id),
             BannerAction::Convert => self.convert_media(),

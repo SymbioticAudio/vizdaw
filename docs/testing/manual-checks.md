@@ -91,3 +91,29 @@ either platform's panels.
 | macOS | Click into the document window (or another one) while a panel is up: the panel stays in front and the app doesn't look frozen | open |
 | macOS | Start playback, then open a panel: the playhead keeps moving behind it | open |
 | macOS | Close the panel's window (or its document) while the panel is up: the panel goes and keys and menus come back | open |
+
+### Interchange sheets: MIDI, For Another DAW, DAWproject and merge (GPUI slice 7c)
+
+The README steps run again on a GPUI build from `next` (both platforms
+where marked). The models, sheets and prompts are tested headless
+(`crates/vizdaw-app/tests/{interchange,midi_export,for_daw,dawproject,merge,report}.rs`,
+`crates/vizdaw-gpui/tests/{import_midi,export_midi,for_daw,report,merge,alerts}.rs`);
+what's left is what a person sees, hears and opens elsewhere.
+
+| Steps | What | Status |
+|---|---|---|
+| 257–261 | MIDI import: the sheet (where, channel → destination, Split, MPE, tempo map), one Undo, the report after it and from File › Last Import or Export Report…, type 0 split, File › Open… a `.mid` | open |
+| 262–264 | MIDI export and MIDI Clip export: "What won't transfer" follows the options; the replace question (Cancel is the default); a place inside the project refused; Cancel leaves no file | open |
+| 265–266 | Song info in Project Settings (Undo, save and reopen); typing a region's name | open |
+| 267–273 | Export for Another DAW: the sheet and Bounce share the format rows; the folder (numbered on a second export), `About these files.txt`, muted and unticked strips, a pickup, Add the stems, Cancel mid-export, waiting for a running import | open |
+| 282–285 | Export DAWproject: Region gain changes "What won't transfer"; the core's name in the save panel; replace asks first; waits for a bounce | open |
+| 286–290 | Import a DAWproject from VizDAW (the return prompt, New Project); a missing instrument's placeholder; Cancel closes the new window; Song info round trip | open |
+| 291–294 | Merge demo files; the return prompt names the open match; Merge With Existing Project… shows "Merge DAWproject" with "Reading the file…", the counts line and two conflicts; Cancel (and Esc) change nothing | open |
+| 295–296 | Merge (Return): the edits arrive, "Drums" keeps its level, "Keys" gets an inactive "Returned <today>" take; the "Merge Report" opens; one Undo restores everything | open |
+| 297 | No project open: Merge With Existing Project… asks for the project (panel #12); choosing `Merge Demo.vizdaw` opens it with the sheet | open |
+| 298 | Merging the same file again: same conflicts, nothing added; while the merge waits, Convert, the rate change, Project Settings' format change and Relink are off with the tooltip "Finish or cancel the DAWproject merge waiting to be confirmed first." | open |
+| 298 | While a merge waits, start each export (For Another DAW, DAWproject, AAF): each says it is waiting, and runs once Merge or Cancel ends the hold | open |
+| 299 | `Other.dawproject` (not from VizDAW): no prompt; it opens as a new project | open |
+| Linux | Panel #12 (Merge With Existing Project…): choosing `project.json` inside a `.vizdaw` folder merges into that project | open |
+| Linux | The return prompt as the sheet card: Return is New Project, Esc is Cancel, Merge With Existing Project… is clickable | open |
+| — | A file whose export ID was lost: the sheet lists the project's exports ("Export of <date> at <time>, N tracks", the newest selected); Preview starts the merge with the one chosen | open |

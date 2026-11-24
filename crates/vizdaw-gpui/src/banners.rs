@@ -7,8 +7,10 @@
 //! column, so they take their height from this frame's layout and the
 //! pane host below gets what is left.
 //!
-//! A held merge disabling Convert and the rate change (Swift
-//! `MergeModel.heldHelp`) comes with the merge flow (slice 7c).
+//! While a merge is held, Convert and the rate change are off with the
+//! help `Finish or cancel the DAWproject merge waiting to be confirmed
+//! first.` (Swift `MergeModel.heldHelp`), as their tooltip and their
+//! `value` in the tree.
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -30,10 +32,29 @@ const BAR_BACKGROUND: u32 = 0x2a2a33;
 const TRACK: u32 = 0x15151a;
 const FILL: u32 = 0x3f5f8f;
 
+/// One bar: what it shows, whether its button is enabled, its help.
+pub(crate) struct Bar {
+    banner: ProjectBanner,
+    enabled: bool,
+    help: Option<&'static str>,
+}
+
+/// `d`'s bars, top first, with their buttons' state.
+pub(crate) fn bars(d: &DocumentModel) -> Vec<Bar> {
+    d.banners()
+        .into_iter()
+        .map(|banner| Bar {
+            enabled: d.banner_enabled(&banner),
+            help: d.banner_help(&banner),
+            banner,
+        })
+        .collect()
+}
+
 /// The bars, or `None` when there are none (nothing is drawn or recorded
 /// then, so the registry paths after them stay as they were).
 pub(crate) fn render(
-    banners: Vec<ProjectBanner>,
+    banners: Vec<Bar>,
     scope: &mut RegistryScope,
     cx: &mut Context<DocumentWindow>,
 ) -> Option<impl IntoElement + use<>> {
@@ -51,10 +72,11 @@ pub(crate) fn render(
 
 fn row(
     i: usize,
-    b: &ProjectBanner,
+    bar: &Bar,
     scope: &mut RegistryScope,
     cx: &mut Context<DocumentWindow>,
 ) -> impl IntoElement + use<> {
+    let b = &bar.banner;
     let text = b.text();
     let lead = match b {
         ProjectBanner::Job { progress, .. } => progress_bar(*progress, &text, scope),
@@ -75,10 +97,19 @@ fn row(
         .child(scope.control("text", &text, true));
     let action = b.action();
     let title = b.button();
-    let button = transport_bar::button(("banner-button", i), &title, true, colors::BUTTON, scope)
-        .on_click(cx.listener(move |this, _, _, cx| {
+    let button = transport_bar::button_with_help(
+        ("banner-button", i),
+        &title,
+        bar.enabled,
+        bar.help,
+        colors::BUTTON,
+        scope,
+    )
+    .when(bar.enabled, |d| {
+        d.on_click(cx.listener(move |this, _, _, cx| {
             this.with_model(cx, |d: &mut DocumentModel| d.run_banner(action));
-        }));
+        }))
+    });
     div()
         .flex()
         .flex_row()

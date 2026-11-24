@@ -9,8 +9,10 @@
 //! - the recovery questions (Open with Plugins Off?, Restore Autosave)
 //!   before a project opens, on the front window; the answer opens it.
 //! - the DAWproject return prompt (New Project, Merge With Existing
-//!   Project… shown disabled until slice 7c, Cancel), as a sheet on the
-//!   front window (a platform prompt cannot disable a button).
+//!   Project…, Cancel) on the front window. Merge brings the matched
+//!   project's window forward with the Merge DAWproject sheet, or asks
+//!   for the project first (panel #12; on Linux a `project.json` is its
+//!   package).
 //! - Recovered Recordings on a project's window once it opens.
 //!
 //! With no window open at all, each shows in a small dialog window of its
@@ -27,7 +29,9 @@ use gpui::{AnyWindowHandle, App, Global, PromptLevel};
 use vizdaw_app::DocId;
 use vizdaw_app::alerts::AlertItem;
 use vizdaw_app::document::{RECOVERY_IMPORT, RECOVERY_LATER, RECOVERY_TITLE, RECOVERY_TRASH};
-use vizdaw_app::store::{CrashChoice, OpenQuestion, ReturnChoice, ReturnPrompt};
+use vizdaw_app::store::{
+    CrashChoice, MergeFile, OpenQuestion, ReturnChoice, ReturnNext, ReturnPrompt,
+};
 
 use crate::app_state::AppState;
 use crate::sheet_host::{Ask, AskDialog, AskSheet, ButtonRole, SheetButton};
@@ -125,6 +129,7 @@ pub fn present(cx: &mut App) {
         crate::sheets::aaf::present_export(cx, |_, _| false);
         crate::sheets::aaf::present_import(cx, |_, _| false);
         crate::sheets::report::present(cx, |_, _| false);
+        crate::sheets::merge::present(cx, |_, _| false);
         return;
     }
     let app = AppState::global(cx);
@@ -178,6 +183,9 @@ pub fn present(cx: &mut App) {
     crate::sheets::aaf::present_export(cx, |w, cx| !busy(Target::Window(w), cx));
     crate::sheets::aaf::present_import(cx, |w, cx| !busy(Target::Window(w), cx));
     crate::sheets::report::present(cx, |w, cx| !busy(Target::Window(w), cx));
+    // After the report: a merge queued behind a confirmed one waits for
+    // the confirmed one's report.
+    crate::sheets::merge::present(cx, |w, cx| !busy(Target::Window(w), cx));
     crate::sheets::relink::present(cx, |w, cx| !busy(Target::Window(w), cx));
 }
 
@@ -326,17 +334,24 @@ fn present_return(cx: &mut App) {
         let answer = answer.await;
         cx.update(|cx| {
             if let Ok(i) = answer {
-                let choice = if i == 0 {
-                    ReturnChoice::NewProject
-                } else {
-                    ReturnChoice::Cancel
+                let choice = match i {
+                    0 => ReturnChoice::NewProject,
+                    1 => ReturnChoice::Merge,
+                    _ => ReturnChoice::Cancel,
                 };
-                AppState::global(cx).update(cx, |s, cx| {
-                    s.store.answer_return(choice);
+                let next = AppState::global(cx).update(cx, |s, cx| {
                     cx.notify();
+                    s.store.answer_return(choice)
                 });
                 // A new project's window opens.
                 crate::control::files::settle(cx);
+                match next {
+                    Some(ReturnNext::Merging(doc)) => {
+                        crate::show_or_front(doc, cx);
+                    }
+                    Some(ReturnNext::ChooseProject(file)) => choose_merge_project(file, cx),
+                    None => {}
+                }
             }
             present(cx);
         });
@@ -344,8 +359,7 @@ fn present_return(cx: &mut App) {
     .detach();
 }
 
-/// The return prompt as an ask (Swift `ReturnPrompts`): Merge With
-/// Existing Project… is shown, disabled, until slice 7c.
+/// The return prompt as an ask (Swift `ReturnPrompts`).
 pub fn return_ask(p: &ReturnPrompt) -> Ask {
     Ask {
         level: PromptLevel::Info,
@@ -353,10 +367,49 @@ pub fn return_ask(p: &ReturnPrompt) -> Ask {
         detail: Some(p.informative()),
         buttons: vec![
             SheetButton::new(ReturnPrompt::NEW_PROJECT, ButtonRole::Default),
-            SheetButton::new(ReturnPrompt::MERGE, ButtonRole::Plain).disabled(),
+            SheetButton::new(ReturnPrompt::MERGE, ButtonRole::Plain),
             SheetButton::new(ReturnPrompt::CANCEL, ButtonRole::Cancel),
         ],
     }
+}
+
+/// Merge With Existing Project… with no open match: panel #12 (over the
+/// front window), then the chosen project (a Linux `project.json` is its
+/// package) found open or opened, its window forward with the merge
+/// sheet. Cancelled: nothing. Never under the control channel.
+fn choose_merge_project(file: MergeFile, cx: &mut App) {
+    if crate::control::channel_on(cx) {
+        return;
+    }
+    let window = front_window(cx);
+    let chosen = crate::file_panels::choose(
+        &vizdaw_app::panels::MERGE_PROJECT,
+        crate::file_panels::PanelPlace::default(),
+        window,
+        cx,
+    );
+    cx.spawn(async move |cx| {
+        let answer = chosen.await;
+        cx.update(|cx| match answer {
+            Ok(Some(paths)) => {
+                let Some(project) = paths.first() else { return };
+                let doc = AppState::global(cx).update(cx, |s, cx| {
+                    cx.notify();
+                    s.store.merge_into(project, file)
+                });
+                match doc {
+                    Some(doc) => {
+                        crate::show_or_front(doc, cx);
+                    }
+                    // A recovery question or an alert shows first.
+                    None => present(cx),
+                }
+            }
+            Ok(None) => {}
+            Err(e) => crate::panel_failed(e, cx),
+        });
+    })
+    .detach();
 }
 
 fn present_recovery(cx: &mut App) {

@@ -117,6 +117,8 @@ pub struct DocumentModel {
     /// A DAWproject merge is held, waiting to be confirmed (Swift
     /// `DocumentModel.mergeHeld`; the merge sheet sets it, slice 7c).
     pub(crate) merge_held: bool,
+    /// The Merge DAWproject sheet's state (slice 7c Task 6).
+    pub(crate) merge: crate::merge::Merge,
     /// The media rows, with the media version they were read at.
     pub(crate) media_rows: Mutex<Option<(u64, Vec<vizdaw_ffi::MediaRow>)>>,
     /// Whether the saved project has Co-Producer copies, and when that
@@ -239,6 +241,7 @@ impl DocumentModel {
             report_shown: false,
             report_written: vec![],
             merge_held: false,
+            merge: crate::merge::Merge::default(),
             media_rows: Mutex::new(None),
             copies_read: Mutex::new(None),
         };

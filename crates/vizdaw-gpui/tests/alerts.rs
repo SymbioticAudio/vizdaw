@@ -2,7 +2,7 @@
 //! on its own window with OK, store alerts on the front window, one at a
 //! time in order; a dialog window when no window is open (a GUI MIDI open
 //! whose import fails); the recovery questions before a GUI open; the
-//! DAWproject return prompt as a sheet (Merge shown disabled);
+//! DAWproject return prompt as a sheet;
 //! Recovered Recordings; and nothing at all under the control channel.
 
 use std::path::Path;
@@ -384,19 +384,6 @@ fn sheet(cx: &mut TestAppContext, w: WindowHandle<DocumentWindow>) -> Option<Str
     w.read_with(cx, |v, _| v.sheet_label()).unwrap()
 }
 
-fn button(cx: &mut TestAppContext, w: WindowHandle<DocumentWindow>, label: &str) -> Value {
-    let tree = w
-        .read_with(cx, |v, _| v.registry().borrow().tree())
-        .unwrap();
-    tree["nodes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|n| n["role"] == "button" && n["label"] == label)
-        .cloned()
-        .unwrap_or_else(|| panic!("no button {label} in {tree}"))
-}
-
 #[gpui::test]
 fn a_gui_open_of_a_vizdaw_made_dawproject_shows_the_return_prompt(cx: &mut TestAppContext) {
     let s = setup(cx);
@@ -404,22 +391,22 @@ fn a_gui_open_of_a_vizdaw_made_dawproject_shows_the_return_prompt(cx: &mut TestA
         .set_dawproject_info("/tmp/Back.dawproject", from_vizdaw());
     cx.update(|cx| vizdaw_gpui::open_path(Path::new("/tmp/Back.dawproject"), cx));
     cx.run_until_parked();
+    // Every button enabled (Merge too, slice 7c): the platform's prompt
+    // (Swift's `NSAlert`), on the front window.
     assert_eq!(
-        sheet(cx, s.window).as_deref(),
-        Some("This DAWproject came from a VizDAW project.")
+        cx.pending_prompt(),
+        Some((
+            "This DAWproject came from a VizDAW project.".into(),
+            "Merge it into the project it came from, or open it as a new project.".into()
+        ))
     );
-    assert_eq!(button(cx, s.window, "New Project")["enabled"], true);
-    assert_eq!(
-        button(cx, s.window, "Merge With Existing Project\u{2026}")["enabled"],
-        false,
-        "Merge is slice 7c"
-    );
-    assert_eq!(button(cx, s.window, "Cancel")["enabled"], true);
-    // Esc is Cancel: nothing opens.
-    let mut vcx = VisualTestContext::from_window(s.window.into(), cx);
-    vcx.simulate_keystrokes("escape");
-    vcx.run_until_parked();
+    let shown = showing(cx);
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0], (AnyWindowHandle::from(s.window), Showing::Return));
     assert_eq!(sheet(cx, s.window), None);
+    // Cancel: nothing opens.
+    answer(cx, "Cancel");
+    assert!(!cx.has_pending_prompt());
     assert_eq!(documents(cx), 1);
     let none = cx.update(|cx| {
         AppState::global(cx)
@@ -429,16 +416,15 @@ fn a_gui_open_of_a_vizdaw_made_dawproject_shows_the_return_prompt(cx: &mut TestA
             .is_none()
     });
     assert!(none);
-    // Again; Return is New Project: a project imports it, in its window.
+    // Again; New Project: a project imports it, in its window.
     let made = Arc::new(FakeSession::new(vec![seq(9, "New", true, 0)]));
     made.script_job(JobScript::done().steps(&[0.5]));
     s.core.hand_out("new_project", made);
     cx.update(|cx| vizdaw_gpui::open_path(Path::new("/tmp/Back.dawproject"), cx));
     cx.run_until_parked();
-    assert!(sheet(cx, s.window).is_some());
-    vcx.simulate_keystrokes("enter");
-    vcx.run_until_parked();
-    assert_eq!(sheet(cx, s.window), None);
+    assert!(cx.has_pending_prompt());
+    answer(cx, "New Project");
+    assert!(!cx.has_pending_prompt());
     assert_eq!(documents(cx), 2);
     assert_eq!(windows(cx), 2);
 }
@@ -446,6 +432,8 @@ fn a_gui_open_of_a_vizdaw_made_dawproject_shows_the_return_prompt(cx: &mut TestA
 #[gpui::test]
 fn a_return_prompt_whose_window_closes_shows_again_on_the_front_window(cx: &mut TestAppContext) {
     let s = setup(cx);
+    // As off macOS: the prompt is drawn as the sheet card.
+    cx.update(vizdaw_gpui::sheet_host::use_sheet_prompts);
     let other = cx
         .update(vizdaw_gpui::new_document)
         .expect("a second window");
@@ -455,19 +443,22 @@ fn a_return_prompt_whose_window_closes_shows_again_on_the_front_window(cx: &mut 
     cx.update(|cx| vizdaw_gpui::open_path(Path::new("/tmp/Back.dawproject"), cx));
     cx.run_until_parked();
     // The key window asks.
-    let (asking, waiting) = if sheet(cx, other).is_some() {
-        (other, s.window)
+    let shown = showing(cx);
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].1, Showing::Return);
+    let asking = shown[0].0;
+    let waiting = if asking == AnyWindowHandle::from(other) {
+        s.window
     } else {
-        (s.window, other)
+        other
     };
-    assert!(sheet(cx, asking).is_some());
     asking
         .update(cx, |_, window, _| window.remove_window())
         .unwrap();
     cx.run_until_parked();
     assert_eq!(
-        sheet(cx, waiting).as_deref(),
-        Some("This DAWproject came from a VizDAW project.")
+        showing(cx),
+        [(AnyWindowHandle::from(waiting), Showing::Return)]
     );
 }
 

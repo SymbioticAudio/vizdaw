@@ -1710,7 +1710,7 @@ impl Render for DocumentWindow {
                 // The roll's axes first: the notes drawn follow them.
                 d.filter(|d| self.piano_roll.prepare(d))
                     .and_then(|d| RollState::of(d, s.transport(doc), Instant::now())),
-                d.map(DocumentModel::banners).unwrap_or_default(),
+                d.map(banners::bars).unwrap_or_default(),
             )
         };
         match &rolled {

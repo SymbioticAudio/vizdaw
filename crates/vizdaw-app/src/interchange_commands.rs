@@ -845,7 +845,7 @@ pub fn merge_date_today() -> String {
 
 /// The local zone's offset east of UTC at `unix_secs` (0 when unknown).
 #[cfg(unix)]
-fn local_offset(unix_secs: i64) -> i64 {
+pub(crate) fn local_offset(unix_secs: i64) -> i64 {
     let t = unix_secs as libc::time_t;
     // SAFETY: `localtime_r` writes only into `tm`, which outlives the call.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
@@ -854,6 +854,6 @@ fn local_offset(unix_secs: i64) -> i64 {
 }
 
 #[cfg(not(unix))]
-fn local_offset(_unix_secs: i64) -> i64 {
+pub(crate) fn local_offset(_unix_secs: i64) -> i64 {
     0
 }

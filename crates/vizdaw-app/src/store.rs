@@ -17,8 +17,9 @@ use crate::document::DocumentModel;
 use crate::session::{CoreCalls, DocSession, LiveCore};
 
 pub use opening::{
-    CrashChoice, DisablePlugins, Landed, MidiRead, OPEN_FAILED, OpenQuestion, Opened, ReturnChoice,
-    ReturnPrompt, SlowRead, Spawner, is_aaf, is_copy, is_dawproject, is_midi, project_path,
+    CrashChoice, DisablePlugins, Landed, MergeFile, MidiRead, OPEN_FAILED, OpenQuestion, Opened,
+    ReturnChoice, ReturnNext, ReturnPrompt, SlowRead, Spawner, is_aaf, is_copy, is_dawproject,
+    is_midi, project_path,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -113,6 +114,8 @@ pub struct DocumentStore {
     made: HashSet<DocId>,
     return_prompt: Option<ReturnPrompt>,
     queued_prompts: VecDeque<ReturnPrompt>,
+    /// Merges whose project opens once its recovery question is answered.
+    merges_waiting: Vec<(PathBuf, MergeFile)>,
     /// Opens waiting for the recovery questions, the first asking.
     questions: VecDeque<opening::PendingOpen>,
     reads: opening::Reads,
@@ -150,6 +153,7 @@ impl DocumentStore {
             made: HashSet::new(),
             return_prompt: None,
             queued_prompts: VecDeque::new(),
+            merges_waiting: vec![],
             questions: VecDeque::new(),
             reads: opening::Reads::default(),
             shift_held: Box::new(|| false),
@@ -283,6 +287,8 @@ impl DocumentStore {
         self.pending.retain(|d| *d != id);
         self.reads.midi_generation.remove(&id);
         self.reads.aaf_generation.remove(&id);
+        // A waiting return prompt's match is gone: Merge asks instead.
+        self.unmatch_prompts(id);
         // Its alerts are never lost: the front window shows them.
         for (doc, _) in self.alerts.iter_mut() {
             if *doc == Some(id) {

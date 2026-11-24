@@ -19,6 +19,7 @@ pub mod interchange;
 pub mod interchange_commands;
 pub mod jobs;
 pub mod list;
+pub mod merge;
 pub mod mixer;
 pub mod panels;
 pub mod piano_roll;

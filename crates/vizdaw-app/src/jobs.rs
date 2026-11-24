@@ -524,6 +524,8 @@ impl DocumentModel {
                     self.for_daw_job_done(&r);
                     self.dawproject_job_done(&r);
                     self.aaf_export_job_done(&r);
+                    // A done Hold job is a preview, not a report.
+                    self.merge_job_done(&r);
                     self.refresh_after_job();
                 }
                 JobAnswer::Failed(message) => {
@@ -531,6 +533,7 @@ impl DocumentModel {
                         self.for_daw_job_done(&r);
                         self.dawproject_job_done(&r);
                         self.aaf_export_job_done(&r);
+                        self.merge_job_done(&r);
                     }
                     if opens && self.opened_file {
                         // The store made this project for the file: it
@@ -545,6 +548,8 @@ impl DocumentModel {
                         && !self.for_daw_job_failed(&r, &message)
                         && !self.dawproject_job_failed(&r, &message)
                         && !self.aaf_export_job_failed(&r, &message)
+                        // And the merge sheet's Hold job's.
+                        && !self.merge_job_failed(&r, &message)
                     {
                         self.alert = Some(AlertItem::new(failure_title(r.kind), message));
                     }
@@ -560,6 +565,7 @@ impl DocumentModel {
             self.for_daw_job_ended();
             self.dawproject_job_ended();
             self.aaf_export_job_ended();
+            self.merge_job_ended();
         }
         // The Bounce sheet closes once its job ended.
         self.bounce_poll();
@@ -587,9 +593,17 @@ impl DocumentModel {
         self.merge_held
     }
 
-    /// The merge sheet holds a merge, or lets it go (slice 7c).
+    /// The merge sheet holds a merge, or lets it go (slice 7c). Letting
+    /// it go releases what waited for it, as when a blocking job ends
+    /// (Swift `holdEnded`): the kept exports start if nothing else blocks
+    /// them.
     pub fn set_merge_held(&mut self, held: bool) {
         self.merge_held = held;
+        if !held {
+            self.for_daw_job_ended();
+            self.dawproject_job_ended();
+            self.aaf_export_job_ended();
+        }
     }
 
     /// The project's media, read again when the media version moved; a

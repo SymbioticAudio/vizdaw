@@ -8,6 +8,7 @@ pub mod dawproject;
 pub mod export_midi;
 pub mod for_daw;
 pub mod import_midi;
+pub mod merge;
 pub mod project_settings;
 pub mod relink;
 pub mod report;

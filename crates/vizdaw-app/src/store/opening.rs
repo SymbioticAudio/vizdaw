@@ -264,12 +264,31 @@ pub struct ReturnPrompt {
     pub match_name: Option<String>,
 }
 
-/// The return prompt's answers this slice offers (Merge With Existing
-/// Project… is slice 7c).
+/// The return prompt's answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReturnChoice {
     NewProject,
+    /// Merge With Existing Project….
+    Merge,
     Cancel,
+}
+
+/// A DAWproject file to merge, as the return prompt read it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergeFile {
+    pub path: String,
+    pub info: DawprojectInfoRow,
+}
+
+/// What follows the return prompt's Merge answer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReturnNext {
+    /// The merge sheet begins on this open project (its window comes
+    /// forward).
+    Merging(DocId),
+    /// No open project matches: the app asks for one (panel #12) and
+    /// hands the answer to [`DocumentStore::merge_into`].
+    ChooseProject(MergeFile),
 }
 
 impl ReturnPrompt {
@@ -526,7 +545,10 @@ impl DocumentStore {
         }
         let mut p = self.questions.pop_front()?;
         match choice {
-            CrashChoice::Cancel => return None,
+            CrashChoice::Cancel => {
+                self.merge_after_question(&p.path, None);
+                return None;
+            }
             CrashChoice::PluginsOff => p.options.plugins_off = true,
             CrashChoice::Normally => {}
             // Never open normally with the crashing plugin still enabled.
@@ -543,7 +565,9 @@ impl DocumentStore {
             self.questions.push_front(p);
             return None;
         }
-        self.open_now(&p.path, Some(p.options)).ok()
+        let opened = self.open_now(&p.path, Some(p.options)).ok();
+        self.merge_after_question(&p.path, opened);
+        opened
     }
 
     /// The autosave question's answer (`restore`: the autosave): the
@@ -559,7 +583,9 @@ impl DocumentStore {
         if restore {
             p.options.autosave = p.info.autosave.clone();
         }
-        self.open_now(&p.path, Some(p.options)).ok()
+        let opened = self.open_now(&p.path, Some(p.options)).ok();
+        self.merge_after_question(&p.path, opened);
+        opened
     }
 
     /// Makes Shift-held read as the app sees it (Shift asks the crash
@@ -1093,16 +1119,90 @@ impl DocumentStore {
     }
 
     /// The return prompt's answer. New Project: a project at the file's
-    /// rate imports it. Cancel: nothing. The next waiting prompt follows.
-    pub fn answer_return(&mut self, choice: ReturnChoice) {
-        let Some(p) = self.return_prompt.take() else {
-            return;
-        };
+    /// rate imports it. Merge: the matched project, while it is still
+    /// open, begins the merge sheet; else the app asks for the project
+    /// ([`ReturnNext::ChooseProject`]). Cancel: nothing. The next waiting
+    /// prompt follows.
+    pub fn answer_return(&mut self, choice: ReturnChoice) -> Option<ReturnNext> {
+        let p = self.return_prompt.take()?;
         self.return_prompt = self.queued_prompts.pop_front();
         match choice {
-            ReturnChoice::Cancel => {}
+            ReturnChoice::Cancel => None,
             ReturnChoice::NewProject => {
-                self.import_landed(p.info.sample_rate, ic::dawproject_import_job(&p.path))
+                self.import_landed(p.info.sample_rate, ic::dawproject_import_job(&p.path));
+                None
+            }
+            ReturnChoice::Merge => {
+                if let Some(id) = p.matched.filter(|d| self.documents.contains_key(d)) {
+                    self.begin_merge_on(id, &p.path, p.info);
+                    return Some(ReturnNext::Merging(id));
+                }
+                Some(ReturnNext::ChooseProject(MergeFile {
+                    path: p.path,
+                    info: p.info,
+                }))
+            }
+        }
+    }
+
+    /// Panel #12's answer: `project` (a Linux `project.json` is its
+    /// package) found open, or opened, begins the merge sheet for `file`;
+    /// its document. A project that asks a recovery question first
+    /// begins it once the question opens it; anything but a `.vizdaw`
+    /// project is the alert "Open Failed".
+    pub fn merge_into(&mut self, project: &Path, file: MergeFile) -> Option<DocId> {
+        let project = project_path(project);
+        if let Some(id) = self.document_for_path(&project) {
+            self.begin_merge_on(id, &file.path, file.info);
+            return Some(id);
+        }
+        if is_midi(&project) || is_dawproject(&project) || is_aaf(&project) {
+            let message = format!("{} is not a .vizdaw project.", file_name(&project));
+            self.post_alert(AlertItem::new(OPEN_FAILED, message));
+            return None;
+        }
+        match self.open(&project) {
+            Ok(Opened::Doc(id)) => {
+                self.begin_merge_on(id, &file.path, file.info);
+                Some(id)
+            }
+            Ok(Opened::Asking) => {
+                self.merges_waiting.push((project, file));
+                None
+            }
+            Ok(Opened::Reading) | Err(_) => None,
+        }
+    }
+
+    fn begin_merge_on(&mut self, id: DocId, path: &str, info: DawprojectInfoRow) {
+        if let Some(d) = self.documents.get_mut(&id) {
+            d.begin_merge(path, info);
+        }
+    }
+
+    /// A recovery question about `path` was answered: a merge waiting for
+    /// that project begins on it once open (`opened`), or goes.
+    fn merge_after_question(&mut self, path: &Path, opened: Option<DocId>) {
+        let Some(i) = self.merges_waiting.iter().position(|(p, _)| p == path) else {
+            return;
+        };
+        let (_, file) = self.merges_waiting.remove(i);
+        if let Some(id) = opened {
+            self.begin_merge_on(id, &file.path, file.info);
+        }
+    }
+
+    /// Document `id` closed: a waiting return prompt naming it no longer
+    /// matches an open project (its Merge asks for the project instead).
+    pub(super) fn unmatch_prompts(&mut self, id: DocId) {
+        for p in self
+            .return_prompt
+            .iter_mut()
+            .chain(self.queued_prompts.iter_mut())
+        {
+            if p.matched == Some(id) {
+                p.matched = None;
+                p.match_name = None;
             }
         }
     }

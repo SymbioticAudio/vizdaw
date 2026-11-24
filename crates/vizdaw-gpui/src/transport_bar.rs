@@ -273,6 +273,26 @@ pub(crate) fn button(
         .child(scope.control("button", label, enabled))
 }
 
+/// As [`button`], with `help` (Swift `.help`) as its tooltip and its
+/// `value` in the tree.
+pub(crate) fn button_with_help(
+    id: impl Into<ElementId>,
+    label: &str,
+    enabled: bool,
+    help: Option<&str>,
+    background: u32,
+    scope: &mut RegistryScope,
+) -> Stateful<Div> {
+    let face = face(id, label, enabled, background)
+        .min_w(px(96.))
+        .px_3()
+        .child(scope.control_with("button", label, enabled, help, false));
+    match help {
+        Some(h) => crate::sheet_host::with_help(face, h.to_owned()),
+        None => face,
+    }
+}
+
 /// A button's look, showing `text`, unrecorded.
 fn face(id: impl Into<ElementId>, text: &str, enabled: bool, background: u32) -> Stateful<Div> {
     div()
