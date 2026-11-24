@@ -1,5 +1,7 @@
 //! The slice of the core session the document model uses.
 
+use std::sync::Arc;
+
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::automation::{
     AutomationModeRow, AutomationStateRow, GestureHolderRow, GesturePhaseRow,
@@ -9,10 +11,20 @@ use vizdaw_ffi::control::ControlArg;
 use vizdaw_ffi::edit::EditCommand;
 use vizdaw_ffi::events::{AutomationTargetRow, LaneEvents, MarkerRow, SequenceInfo};
 use vizdaw_ffi::mixer::{DestRow, MidiMixRow, MixerLevels, MixerSnapshot, SendRow, SwatchRow};
+use vizdaw_ffi::record::RecoveredFileRow;
 use vizdaw_ffi::selection::{SelectionRow, TickRange};
+use vizdaw_ffi::session::CopiesSizeRow;
 use vizdaw_ffi::session::Session;
 use vizdaw_ffi::snapshot::{DocSnapshot, LaneRow, PluginRefRow, TransportState};
 use vizdaw_ffi::tracks::TrackKindRow;
+use vizdaw_ffi::{
+    AafExportRequestRow, AafImportRequestRow, AafInfoRow, BounceCheckRow, BounceRequestRow,
+    BounceResultRow, BounceSettingsRow, ClipExportRequestRow, ClipNamesRow,
+    DawprojectExportRequestRow, DawprojectImportRequestRow, DawprojectInfoRow,
+    DawprojectMergeRequestRow, ForDawCheckRow, ForDawRequestRow, ImportTargetRow, JobRow, MediaRow,
+    MidiFileInfoRow, MidiImportRequestRow, OpenOptions, ProjectFormatRow, ProjectInfoRow,
+    RecoveryInfo, ReportRow, SmfExportRequestRow, SnapshotRow, SongInfoRow,
+};
 
 /// What a plugin timer tick brought (the core's `IdleUpdate`, the parts
 /// the app reads).
@@ -187,6 +199,96 @@ pub trait DocSession: Send + Sync {
         volume: Option<u8>,
         pan: Option<u8>,
     ) -> Result<bool, VizError>;
+
+    // Files and jobs (slice 7a).
+
+    /// The media pool, with offline items and use counts.
+    fn media(&self) -> Result<Vec<MediaRow>, VizError>;
+    /// Checks every media file again; true when the offline set changed.
+    fn recheck_media(&self) -> Result<bool, VizError>;
+    /// The project's format, its mismatched media and the device's rate.
+    fn project_info(&self) -> Result<ProjectInfoRow, VizError>;
+    /// Starts changing the project format (a `Format` job); the job ID.
+    fn set_project_format(&self, format: ProjectFormatRow) -> Result<u64, VizError>;
+    /// Starts converting media to the project format (a `Convert` job).
+    fn convert_media(&self) -> Result<u64, VizError>;
+    /// Starts importing `paths` (an `Import` job); `target` places regions.
+    fn import_audio(
+        &self,
+        paths: Vec<String>,
+        target: Option<ImportTargetRow>,
+    ) -> Result<u64, VizError>;
+    /// Job `id`, applied first when it just finished.
+    fn job(&self, id: u64) -> Result<JobRow, VizError>;
+    /// Asks job `id` to stop (nothing it did is applied).
+    fn cancel_job(&self, id: u64) -> Result<(), VizError>;
+    /// Starts relinking media item `media` to `path` (a `Relink` job).
+    fn relink_media(&self, media: u64, path: String) -> Result<u64, VizError>;
+    /// Starts searching `folder` for offline media (a `Relink` job).
+    fn search_media(&self, folder: String) -> Result<u64, VizError>;
+    /// Starts a bounce (a `Bounce` job).
+    fn bounce(&self, req: BounceRequestRow) -> Result<u64, VizError>;
+    /// What `bounce` would do with `req` (nothing starts).
+    fn bounce_check(&self, req: BounceRequestRow) -> Result<BounceCheckRow, VizError>;
+    /// What bounce job `job` wrote, once it is done.
+    fn bounce_result(&self, job: u64) -> Result<Option<BounceResultRow>, VizError>;
+    /// What a MIDI file holds (slow: call it off the UI thread).
+    fn midi_file_info(&self, path: String) -> Result<MidiFileInfoRow, VizError>;
+    /// Starts a MIDI file import (an `ImportMidi` job).
+    fn import_midi(&self, req: MidiImportRequestRow) -> Result<u64, VizError>;
+    /// Starts a Standard MIDI File export (an `ExportMidi` job).
+    fn export_midi(&self, req: SmfExportRequestRow) -> Result<u64, VizError>;
+    /// The dry run of `export_midi`.
+    fn export_midi_check(&self, req: SmfExportRequestRow) -> Result<ReportRow, VizError>;
+    /// Starts a MIDI clip file export (an `ExportMidi` job).
+    fn export_midi_clip(&self, req: ClipExportRequestRow) -> Result<u64, VizError>;
+    /// The dry run of `export_midi_clip`.
+    fn export_midi_clip_check(&self, req: ClipExportRequestRow) -> Result<ReportRow, VizError>;
+    /// The file names a clip export into a folder writes, and those taken.
+    fn export_midi_clip_names(&self, req: ClipExportRequestRow) -> Result<ClipNamesRow, VizError>;
+    /// Starts an export for another DAW (an `ExportProject` job).
+    fn export_for_daw(&self, req: ForDawRequestRow) -> Result<u64, VizError>;
+    /// The dry run of `export_for_daw`.
+    fn export_for_daw_check(&self, req: ForDawRequestRow) -> Result<ForDawCheckRow, VizError>;
+    /// Starts a DAWproject export (an `ExportDawproject` job).
+    fn export_dawproject(&self, req: DawprojectExportRequestRow) -> Result<u64, VizError>;
+    /// The dry run of `export_dawproject`.
+    fn export_dawproject_check(
+        &self,
+        req: DawprojectExportRequestRow,
+    ) -> Result<ReportRow, VizError>;
+    /// Starts a DAWproject import into this (new) project (an
+    /// `ImportProject` job).
+    fn import_dawproject(&self, req: DawprojectImportRequestRow) -> Result<u64, VizError>;
+    /// The file name a DAWproject export of `seq` suggests.
+    fn dawproject_name(&self, seq: u64) -> Result<String, VizError>;
+    /// The project's DAWproject snapshots, newest first (slow).
+    fn dawproject_snapshots(&self) -> Result<Vec<SnapshotRow>, VizError>;
+    /// Starts a DAWproject merge (a `MergeDawproject` job).
+    fn merge_dawproject(&self, req: DawprojectMergeRequestRow) -> Result<u64, VizError>;
+    /// Applies the merge job `job` holds; its report.
+    fn confirm_merge(&self, job: u64) -> Result<ReportRow, VizError>;
+    /// Drops the merge job `job` holds.
+    fn cancel_merge(&self, job: u64) -> Result<(), VizError>;
+    /// Starts an AAF export (an `ExportAaf` job).
+    fn export_aaf(&self, req: AafExportRequestRow) -> Result<u64, VizError>;
+    /// The dry run of `export_aaf`.
+    fn export_aaf_check(&self, req: AafExportRequestRow) -> Result<ReportRow, VizError>;
+    /// Starts an AAF import (an `ImportAaf` job).
+    fn import_aaf(&self, req: AafImportRequestRow) -> Result<u64, VizError>;
+    /// The folder name an AAF export of `seq` suggests.
+    fn aaf_folder_name(&self, seq: u64) -> Result<String, VizError>;
+    /// The report of the last import or export job, if any.
+    fn interchange_report(&self) -> Result<Option<ReportRow>, VizError>;
+    fn song_info(&self) -> Result<SongInfoRow, VizError>;
+    /// Sets the song info, one undo step "Set Song Info".
+    fn set_song_info(&self, info: SongInfoRow) -> Result<DocSnapshot, VizError>;
+    /// The recordings offered for recovery.
+    fn recovered_files(&self) -> Result<Vec<RecoveredFileRow>, VizError>;
+    /// Answers the recovery offer (`import`: onto new tracks).
+    fn recover_recordings(&self, import: bool) -> Result<DocSnapshot, VizError>;
+    /// How many Co-Producer copies the project keeps, and their bytes.
+    fn co_producer_copies_size(&self) -> Result<CopiesSizeRow, VizError>;
 }
 
 impl DocSession for Session {
@@ -432,5 +534,213 @@ impl DocSession for Session {
         pan: Option<u8>,
     ) -> Result<bool, VizError> {
         Session::preview_midi_mix(self, dest, volume, pan)
+    }
+    fn media(&self) -> Result<Vec<MediaRow>, VizError> {
+        Session::media(self)
+    }
+    fn recheck_media(&self) -> Result<bool, VizError> {
+        Session::recheck_media(self)
+    }
+    fn project_info(&self) -> Result<ProjectInfoRow, VizError> {
+        Session::project_info(self)
+    }
+    fn set_project_format(&self, format: ProjectFormatRow) -> Result<u64, VizError> {
+        Session::set_project_format(self, format)
+    }
+    fn convert_media(&self) -> Result<u64, VizError> {
+        Session::convert_media(self)
+    }
+    fn import_audio(
+        &self,
+        paths: Vec<String>,
+        target: Option<ImportTargetRow>,
+    ) -> Result<u64, VizError> {
+        Session::import_audio(self, paths, target)
+    }
+    fn job(&self, id: u64) -> Result<JobRow, VizError> {
+        Session::job(self, id)
+    }
+    fn cancel_job(&self, id: u64) -> Result<(), VizError> {
+        Session::cancel_job(self, id)
+    }
+    fn relink_media(&self, media: u64, path: String) -> Result<u64, VizError> {
+        Session::relink_media(self, media, path)
+    }
+    fn search_media(&self, folder: String) -> Result<u64, VizError> {
+        Session::search_media(self, folder)
+    }
+    fn bounce(&self, req: BounceRequestRow) -> Result<u64, VizError> {
+        Session::bounce(self, req)
+    }
+    fn bounce_check(&self, req: BounceRequestRow) -> Result<BounceCheckRow, VizError> {
+        Session::bounce_check(self, req)
+    }
+    fn bounce_result(&self, job: u64) -> Result<Option<BounceResultRow>, VizError> {
+        Session::bounce_result(self, job)
+    }
+    fn midi_file_info(&self, path: String) -> Result<MidiFileInfoRow, VizError> {
+        Session::midi_file_info(self, path)
+    }
+    fn import_midi(&self, req: MidiImportRequestRow) -> Result<u64, VizError> {
+        Session::import_midi(self, req)
+    }
+    fn export_midi(&self, req: SmfExportRequestRow) -> Result<u64, VizError> {
+        Session::export_midi(self, req)
+    }
+    fn export_midi_check(&self, req: SmfExportRequestRow) -> Result<ReportRow, VizError> {
+        Session::export_midi_check(self, req)
+    }
+    fn export_midi_clip(&self, req: ClipExportRequestRow) -> Result<u64, VizError> {
+        Session::export_midi_clip(self, req)
+    }
+    fn export_midi_clip_check(&self, req: ClipExportRequestRow) -> Result<ReportRow, VizError> {
+        Session::export_midi_clip_check(self, req)
+    }
+    fn export_midi_clip_names(&self, req: ClipExportRequestRow) -> Result<ClipNamesRow, VizError> {
+        Session::export_midi_clip_names(self, req)
+    }
+    fn export_for_daw(&self, req: ForDawRequestRow) -> Result<u64, VizError> {
+        Session::export_for_daw(self, req)
+    }
+    fn export_for_daw_check(&self, req: ForDawRequestRow) -> Result<ForDawCheckRow, VizError> {
+        Session::export_for_daw_check(self, req)
+    }
+    fn export_dawproject(&self, req: DawprojectExportRequestRow) -> Result<u64, VizError> {
+        Session::export_dawproject(self, req)
+    }
+    fn export_dawproject_check(
+        &self,
+        req: DawprojectExportRequestRow,
+    ) -> Result<ReportRow, VizError> {
+        Session::export_dawproject_check(self, req)
+    }
+    fn import_dawproject(&self, req: DawprojectImportRequestRow) -> Result<u64, VizError> {
+        Session::import_dawproject(self, req)
+    }
+    fn dawproject_name(&self, seq: u64) -> Result<String, VizError> {
+        Session::dawproject_name(self, seq)
+    }
+    fn dawproject_snapshots(&self) -> Result<Vec<SnapshotRow>, VizError> {
+        Session::dawproject_snapshots(self)
+    }
+    fn merge_dawproject(&self, req: DawprojectMergeRequestRow) -> Result<u64, VizError> {
+        Session::merge_dawproject(self, req)
+    }
+    fn confirm_merge(&self, job: u64) -> Result<ReportRow, VizError> {
+        Session::confirm_merge(self, job)
+    }
+    fn cancel_merge(&self, job: u64) -> Result<(), VizError> {
+        Session::cancel_merge(self, job)
+    }
+    fn export_aaf(&self, req: AafExportRequestRow) -> Result<u64, VizError> {
+        Session::export_aaf(self, req)
+    }
+    fn export_aaf_check(&self, req: AafExportRequestRow) -> Result<ReportRow, VizError> {
+        Session::export_aaf_check(self, req)
+    }
+    fn import_aaf(&self, req: AafImportRequestRow) -> Result<u64, VizError> {
+        Session::import_aaf(self, req)
+    }
+    fn aaf_folder_name(&self, seq: u64) -> Result<String, VizError> {
+        Session::aaf_folder_name(self, seq)
+    }
+    fn interchange_report(&self) -> Result<Option<ReportRow>, VizError> {
+        Session::interchange_report(self)
+    }
+    fn song_info(&self) -> Result<SongInfoRow, VizError> {
+        Session::song_info(self)
+    }
+    fn set_song_info(&self, info: SongInfoRow) -> Result<DocSnapshot, VizError> {
+        Session::set_song_info(self, info)
+    }
+    fn recovered_files(&self) -> Result<Vec<RecoveredFileRow>, VizError> {
+        Session::recovered_files(self)
+    }
+    fn recover_recordings(&self, import: bool) -> Result<DocSnapshot, VizError> {
+        Session::recover_recordings(self, import)
+    }
+    fn co_producer_copies_size(&self) -> Result<CopiesSizeRow, VizError> {
+        Session::co_producer_copies_size(self)
+    }
+}
+
+/// The core's constructors and free functions the app uses (open, new,
+/// file reads before an open). The store holds one: `LiveCore` over the
+/// real core, `FakeCore` (testing) in tests.
+pub trait CoreCalls: Send + Sync {
+    /// An empty untitled document (the default format).
+    fn new_empty(&self) -> Result<Arc<dyn DocSession>, VizError>;
+    /// The demo song.
+    fn new_demo(&self) -> Result<Arc<dyn DocSession>, VizError>;
+    /// The demo song with audio.
+    fn new_demo_audio(&self) -> Result<Arc<dyn DocSession>, VizError>;
+    /// An empty untitled document in `format`.
+    fn new_project(&self, format: ProjectFormatRow) -> Result<Arc<dyn DocSession>, VizError>;
+    /// Opens the `.vizdaw` package at `path`.
+    fn open(&self, path: &str) -> Result<Arc<dyn DocSession>, VizError>;
+    /// Opens `path` with recovery options (plugins off, an autosave).
+    fn open_with(&self, path: &str, options: OpenOptions) -> Result<Arc<dyn DocSession>, VizError>;
+    /// Opens a Co-Producer copy (refused when `path` is not one).
+    fn open_copy(&self, path: &str) -> Result<Arc<dyn DocSession>, VizError>;
+    /// What a DAWproject file holds before an import (slow).
+    fn dawproject_info(&self, path: &str) -> Result<DawprojectInfoRow, VizError>;
+    /// What an AAF file holds before an import (slow).
+    fn aaf_info(&self, path: &str) -> Result<AafInfoRow, VizError>;
+    /// What to ask before opening `path` (a crash, a newer autosave).
+    fn recovery_check(&self, path: &str) -> Result<RecoveryInfo, VizError>;
+    /// The allowed project rates.
+    fn project_rates(&self) -> Vec<u32>;
+    /// Display text, e.g. "44.1 kHz, 16-bit".
+    fn format_label(&self, format: ProjectFormatRow) -> String;
+    /// The bounce settings (the tail cap).
+    fn bounce_settings(&self) -> BounceSettingsRow;
+}
+
+/// `CoreCalls` over the real core.
+pub struct LiveCore;
+
+fn doc(s: Result<Arc<Session>, VizError>) -> Result<Arc<dyn DocSession>, VizError> {
+    Ok(s? as Arc<dyn DocSession>)
+}
+
+impl CoreCalls for LiveCore {
+    fn new_empty(&self) -> Result<Arc<dyn DocSession>, VizError> {
+        doc(Session::new_empty())
+    }
+    fn new_demo(&self) -> Result<Arc<dyn DocSession>, VizError> {
+        doc(Session::new_demo())
+    }
+    fn new_demo_audio(&self) -> Result<Arc<dyn DocSession>, VizError> {
+        doc(Session::new_demo_audio())
+    }
+    fn new_project(&self, format: ProjectFormatRow) -> Result<Arc<dyn DocSession>, VizError> {
+        doc(Session::new_project(format))
+    }
+    fn open(&self, path: &str) -> Result<Arc<dyn DocSession>, VizError> {
+        doc(Session::open(path.to_owned()))
+    }
+    fn open_with(&self, path: &str, options: OpenOptions) -> Result<Arc<dyn DocSession>, VizError> {
+        doc(Session::open_with(path.to_owned(), options))
+    }
+    fn open_copy(&self, path: &str) -> Result<Arc<dyn DocSession>, VizError> {
+        doc(Session::open_copy(path.to_owned()))
+    }
+    fn dawproject_info(&self, path: &str) -> Result<DawprojectInfoRow, VizError> {
+        vizdaw_ffi::dawproject_info(path.to_owned())
+    }
+    fn aaf_info(&self, path: &str) -> Result<AafInfoRow, VizError> {
+        vizdaw_ffi::aaf_info(path.to_owned())
+    }
+    fn recovery_check(&self, path: &str) -> Result<RecoveryInfo, VizError> {
+        vizdaw_ffi::recovery::recovery_check(path.to_owned())
+    }
+    fn project_rates(&self) -> Vec<u32> {
+        vizdaw_ffi::project_rates()
+    }
+    fn format_label(&self, format: ProjectFormatRow) -> String {
+        vizdaw_ffi::format_label(format)
+    }
+    fn bounce_settings(&self) -> BounceSettingsRow {
+        vizdaw_ffi::bounce_settings()
     }
 }

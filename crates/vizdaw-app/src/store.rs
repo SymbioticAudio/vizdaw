@@ -6,11 +6,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use vizdaw_ffi::VizError;
-use vizdaw_ffi::session::Session;
+use vizdaw_ffi::{
+    AafInfoRow, BounceSettingsRow, DawprojectInfoRow, OpenOptions, ProjectFormatRow, RecoveryInfo,
+};
 
 use crate::alerts::{AlertItem, error_message};
 use crate::document::DocumentModel;
-use crate::session::DocSession;
+use crate::session::{CoreCalls, DocSession, LiveCore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DocId(pub u64);
@@ -22,10 +24,69 @@ pub struct WindowToken(pub u64);
 type Make = Box<dyn Fn() -> Result<Arc<dyn DocSession>, VizError> + Send + Sync>;
 type OpenFn = Box<dyn Fn(&str) -> Result<Arc<dyn DocSession>, VizError> + Send + Sync>;
 
-pub struct DocumentStore {
+/// `CoreCalls` from the three makers slices 1–6 build stores with; every
+/// other constructor and file read is refused (`not_scripted`), and the
+/// pure format calls answer as the core does.
+struct Makers {
     make_empty: Make,
     make_demo: Make,
     open_path: OpenFn,
+}
+
+fn not_scripted(call: &str) -> VizError {
+    VizError::Model {
+        message: format!("{call} is not available in this store"),
+    }
+}
+
+impl CoreCalls for Makers {
+    fn new_empty(&self) -> Result<Arc<dyn DocSession>, VizError> {
+        (self.make_empty)()
+    }
+    fn new_demo(&self) -> Result<Arc<dyn DocSession>, VizError> {
+        (self.make_demo)()
+    }
+    fn new_demo_audio(&self) -> Result<Arc<dyn DocSession>, VizError> {
+        Err(not_scripted("new_demo_audio"))
+    }
+    fn new_project(&self, _format: ProjectFormatRow) -> Result<Arc<dyn DocSession>, VizError> {
+        Err(not_scripted("new_project"))
+    }
+    fn open(&self, path: &str) -> Result<Arc<dyn DocSession>, VizError> {
+        (self.open_path)(path)
+    }
+    fn open_with(
+        &self,
+        _path: &str,
+        _options: OpenOptions,
+    ) -> Result<Arc<dyn DocSession>, VizError> {
+        Err(not_scripted("open_with"))
+    }
+    fn open_copy(&self, _path: &str) -> Result<Arc<dyn DocSession>, VizError> {
+        Err(not_scripted("open_copy"))
+    }
+    fn dawproject_info(&self, _path: &str) -> Result<DawprojectInfoRow, VizError> {
+        Err(not_scripted("dawproject_info"))
+    }
+    fn aaf_info(&self, _path: &str) -> Result<AafInfoRow, VizError> {
+        Err(not_scripted("aaf_info"))
+    }
+    fn recovery_check(&self, _path: &str) -> Result<RecoveryInfo, VizError> {
+        Err(not_scripted("recovery_check"))
+    }
+    fn project_rates(&self) -> Vec<u32> {
+        LiveCore.project_rates()
+    }
+    fn format_label(&self, format: ProjectFormatRow) -> String {
+        LiveCore.format_label(format)
+    }
+    fn bounce_settings(&self) -> BounceSettingsRow {
+        LiveCore.bounce_settings()
+    }
+}
+
+pub struct DocumentStore {
+    core: Arc<dyn CoreCalls>,
     documents: HashMap<DocId, DocumentModel>,
     next_id: u64,
     key_window: Option<(DocId, WindowToken)>,
@@ -37,11 +98,20 @@ pub struct DocumentStore {
 }
 
 impl DocumentStore {
+    /// A store whose new, demo and open come from these makers (the rest
+    /// of `CoreCalls` is refused; see `with_core`).
     pub fn new(make_empty: Make, make_demo: Make, open: OpenFn) -> Self {
-        DocumentStore {
+        DocumentStore::with_core(Arc::new(Makers {
             make_empty,
             make_demo,
             open_path: open,
+        }))
+    }
+
+    /// A store over `core`'s constructors and free functions.
+    pub fn with_core(core: Arc<dyn CoreCalls>) -> Self {
+        DocumentStore {
+            core,
             documents: HashMap::new(),
             next_id: 1,
             key_window: None,
@@ -54,11 +124,13 @@ impl DocumentStore {
 
     /// A store over real core sessions.
     pub fn live() -> Self {
-        DocumentStore::new(
-            Box::new(|| Ok(Session::new_empty()? as Arc<dyn DocSession>)),
-            Box::new(|| Ok(Session::new_demo()? as Arc<dyn DocSession>)),
-            Box::new(|p| Ok(Session::open(p.to_string())? as Arc<dyn DocSession>)),
-        )
+        DocumentStore::with_core(Arc::new(LiveCore))
+    }
+
+    /// The core calls this store makes and reads files with (a clone can
+    /// go to a background thread).
+    pub fn core(&self) -> Arc<dyn CoreCalls> {
+        self.core.clone()
     }
 
     pub fn document(&self, id: DocId) -> Option<&DocumentModel> {
@@ -102,11 +174,11 @@ impl DocumentStore {
     }
 
     pub fn new_empty(&mut self) -> Option<DocId> {
-        self.add("New Document Failed", |s| (s.make_empty)())
+        self.add("New Document Failed", |s| s.core.new_empty())
     }
 
     pub fn new_demo(&mut self) -> Option<DocId> {
-        self.add("Demo Project Failed", |s| (s.make_demo)())
+        self.add("Demo Project Failed", |s| s.core.new_demo())
     }
 
     /// Opens a `.vizdaw` package. A refusal or failure is also posted as an
@@ -129,7 +201,7 @@ impl DocumentStore {
             return Ok(*id);
         }
         let text = path.to_string_lossy().into_owned();
-        match self.add("Open Failed", |s| (s.open_path)(&text)) {
+        match self.add("Open Failed", |s| s.core.open(&text)) {
             Some(id) => Ok(id),
             None => Err(self
                 .last_failure

@@ -24,5 +24,5 @@ pub mod view;
 pub use alerts::AlertItem;
 pub use document::{DocumentModel, SaveAction};
 pub use prefs::Prefs;
-pub use session::DocSession;
+pub use session::{CoreCalls, DocSession, LiveCore};
 pub use store::{DocId, DocumentStore, WindowToken};

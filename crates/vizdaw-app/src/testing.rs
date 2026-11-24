@@ -6,7 +6,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
 use crate::DocSession;
+use crate::session::CoreCalls;
 use crate::session::IdleNews;
+use std::sync::Arc;
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::automation::{
     AutomationModeRow, AutomationStateRow, GestureHolderRow, GesturePhaseRow, StripModeRow,
@@ -22,13 +24,24 @@ use vizdaw_ffi::mixer::{
     BusRow, DestRow, GroupRow, MidiMixRow, MixerLevels, MixerSnapshot, StripColourRow,
     StripKindRow, StripRow, SwatchRow, VcaRow,
 };
+use vizdaw_ffi::record::RecoveredFileRow;
 use vizdaw_ffi::revs::LaneRev;
 use vizdaw_ffi::selection::{SelectionRow, TickRange};
+use vizdaw_ffi::session::CopiesSizeRow;
 use vizdaw_ffi::snapshot::{
     DocSnapshot, LaneRow, PluginFormatTag, PluginRefRow, SeqRow, SlotRow, SlotStatus,
     TransportState,
 };
 use vizdaw_ffi::tracks::TrackKindRow;
+use vizdaw_ffi::{
+    AafExportRequestRow, AafImportRequestRow, AafInfoRow, BitDepthRow, BounceCheckRow,
+    BounceRequestRow, BounceResultRow, BounceSettingsRow, ClipExportRequestRow, ClipNamesRow,
+    DawprojectExportRequestRow, DawprojectImportRequestRow, DawprojectInfoRow,
+    DawprojectMergeRequestRow, ForDawCheckRow, ForDawRequestRow, ImportTargetRow, JobKindRow,
+    JobRow, JobStateRow, MediaRow, MergePreviewRow, MidiFileInfoRow, MidiImportRequestRow,
+    OpenOptions, ProjectFormatRow, ProjectInfoRow, RecoveryInfo, ReportRow, SmfExportRequestRow,
+    SnapshotRow, SongInfoRow,
+};
 
 struct State {
     snap: DocSnapshot,
@@ -109,6 +122,204 @@ struct State {
     midi_previews: Vec<(u64, Option<u8>, Option<u8>)>,
     /// Every `set_midi_mix(dest, mix)`.
     midi_mixes: Vec<(u64, MidiMixRow)>,
+    /// Files and jobs (slice 7a).
+    files: Files,
+}
+
+/// How a scripted job ends.
+// A test script: the size of the done variant does not matter.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum JobEnd {
+    /// Applied: what it wrote, reported, created, previewed and bounced.
+    Done {
+        written: Vec<String>,
+        report: Option<ReportRow>,
+        created: Vec<u64>,
+        merge: Option<MergePreviewRow>,
+        bounce: Option<BounceResultRow>,
+        /// Files that failed while the rest went on.
+        problems: Vec<String>,
+    },
+    /// Nothing changed: why, and the files that failed.
+    Failed {
+        message: String,
+        problems: Vec<String>,
+    },
+    Cancelled,
+}
+
+/// A job's script: its progress at each `job(id)` while running, then
+/// its end (the poll after the last step answers the end).
+#[derive(Debug, Clone, PartialEq)]
+pub struct JobScript {
+    pub steps: Vec<f32>,
+    pub end: JobEnd,
+}
+
+impl JobScript {
+    /// Done at the first poll, having done nothing visible.
+    pub fn done() -> Self {
+        JobScript {
+            steps: vec![],
+            end: JobEnd::Done {
+                written: vec![],
+                report: None,
+                created: vec![],
+                merge: None,
+                bounce: None,
+                problems: vec![],
+            },
+        }
+    }
+
+    pub fn failed(message: &str) -> Self {
+        JobScript {
+            steps: vec![],
+            end: JobEnd::Failed {
+                message: message.into(),
+                problems: vec![],
+            },
+        }
+    }
+
+    pub fn cancelled() -> Self {
+        JobScript {
+            steps: vec![],
+            end: JobEnd::Cancelled,
+        }
+    }
+
+    /// Running at these progresses first, one per poll.
+    pub fn steps(mut self, steps: &[f32]) -> Self {
+        self.steps = steps.to_vec();
+        self
+    }
+
+    fn done_mut(&mut self) -> Option<&mut JobEnd> {
+        matches!(self.end, JobEnd::Done { .. }).then_some(&mut self.end)
+    }
+
+    /// A done job's written paths.
+    pub fn written(mut self, paths: &[&str]) -> Self {
+        if let Some(JobEnd::Done { written, .. }) = self.done_mut() {
+            *written = paths.iter().map(|p| p.to_string()).collect();
+        }
+        self
+    }
+
+    /// A done job's report.
+    pub fn report(mut self, r: ReportRow) -> Self {
+        if let Some(JobEnd::Done { report, .. }) = self.done_mut() {
+            *report = Some(r);
+        }
+        self
+    }
+
+    /// A done job's created media.
+    pub fn created(mut self, ids: &[u64]) -> Self {
+        if let Some(JobEnd::Done { created, .. }) = self.done_mut() {
+            *created = ids.to_vec();
+        }
+        self
+    }
+
+    /// A done merge job's preview.
+    pub fn merge(mut self, m: MergePreviewRow) -> Self {
+        if let Some(JobEnd::Done { merge, .. }) = self.done_mut() {
+            *merge = Some(m);
+        }
+        self
+    }
+
+    /// What a done bounce job's `bounce_result` answers.
+    pub fn bounce(mut self, b: BounceResultRow) -> Self {
+        if let Some(JobEnd::Done { bounce, .. }) = self.done_mut() {
+            *bounce = Some(b);
+        }
+        self
+    }
+
+    /// The problems of a failed job (or of a done one: files that failed
+    /// while the rest went on are on its row too).
+    pub fn problems(mut self, list: &[&str]) -> Self {
+        let list: Vec<String> = list.iter().map(|p| p.to_string()).collect();
+        match &mut self.end {
+            JobEnd::Failed { problems, .. } | JobEnd::Done { problems, .. } => *problems = list,
+            JobEnd::Cancelled => {}
+        }
+        self
+    }
+}
+
+/// What started a job, as given.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JobRequest {
+    Import {
+        paths: Vec<String>,
+        target: Option<ImportTargetRow>,
+    },
+    Convert,
+    Format(ProjectFormatRow),
+    Relink {
+        media: u64,
+        path: String,
+    },
+    Search(String),
+    Bounce(BounceRequestRow),
+    ImportMidi(MidiImportRequestRow),
+    ExportMidi(SmfExportRequestRow),
+    ExportMidiClip(ClipExportRequestRow),
+    ForDaw(ForDawRequestRow),
+    ExportDawproject(DawprojectExportRequestRow),
+    ImportDawproject(DawprojectImportRequestRow),
+    MergeDawproject(DawprojectMergeRequestRow),
+    ExportAaf(AafExportRequestRow),
+    ImportAaf(AafImportRequestRow),
+}
+
+/// A job the fake started.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StartedJob {
+    pub id: u64,
+    pub kind: JobKindRow,
+    pub request: JobRequest,
+}
+
+struct FakeJob {
+    kind: JobKindRow,
+    script: JobScript,
+    /// Polls answered so far.
+    polls: usize,
+    cancelled: bool,
+    /// `confirm_merge` or `cancel_merge` answered it.
+    merge_closed: bool,
+}
+
+#[derive(Default)]
+struct Files {
+    scripts: VecDeque<JobScript>,
+    jobs: Vec<(u64, FakeJob)>,
+    started: Vec<StartedJob>,
+    next_job: u64,
+    cancelled: Vec<u64>,
+    /// Reads by call name.
+    reads: HashMap<String, usize>,
+    media: Vec<MediaRow>,
+    recheck: bool,
+    project_info: Option<ProjectInfoRow>,
+    bounce_check: Option<BounceCheckRow>,
+    /// The dry-run reports by call name.
+    reports: HashMap<String, ReportRow>,
+    for_daw_check: Option<ForDawCheckRow>,
+    midi_info: HashMap<String, MidiFileInfoRow>,
+    clip_names: Option<ClipNamesRow>,
+    snapshots: Vec<SnapshotRow>,
+    merge_report: Option<ReportRow>,
+    interchange_report: Option<ReportRow>,
+    song_info: SongInfoRow,
+    recovered: Vec<RecoveredFileRow>,
+    copies: Option<CopiesSizeRow>,
 }
 
 /// What the session keeps of a selection it is given (after dropping
@@ -233,6 +444,10 @@ impl FakeSession {
             loaded: vec![],
             midi_previews: vec![],
             midi_mixes: vec![],
+            files: Files {
+                next_job: 1,
+                ..Files::default()
+            },
         }))
     }
 
@@ -753,6 +968,271 @@ impl FakeSession {
             }
         }
         Ok(())
+    }
+}
+
+/// Files and jobs (slice 7a): scripted jobs and the file reads.
+impl FakeSession {
+    /// The next job started runs `script` (queued: several start in turn;
+    /// with none queued a job is done at its first poll).
+    pub fn script_job(&self, script: JobScript) {
+        self.st().files.scripts.push_back(script);
+    }
+
+    /// Every job started, in order, with what started it.
+    pub fn jobs_started(&self) -> Vec<StartedJob> {
+        self.st().files.started.clone()
+    }
+
+    /// Every `cancel_job(id)`, in order.
+    pub fn cancelled_jobs(&self) -> Vec<u64> {
+        self.st().files.cancelled.clone()
+    }
+
+    /// How many times read call `name` (`job`, `media`, `project_info`,
+    /// the checks …) was answered.
+    pub fn reads(&self, name: &str) -> usize {
+        self.st().files.reads.get(name).copied().unwrap_or(0)
+    }
+
+    pub fn set_media(&self, rows: Vec<MediaRow>) {
+        self.st().files.media = rows;
+    }
+
+    /// What `recheck_media` answers (the offline set changed).
+    pub fn set_recheck_media(&self, changed: bool) {
+        self.st().files.recheck = changed;
+    }
+
+    /// What `project_info` answers (default: 48 kHz, 24-bit, nothing
+    /// mismatched, no device rate).
+    pub fn set_project_info(&self, info: ProjectInfoRow) {
+        self.st().files.project_info = Some(info);
+    }
+
+    /// What `bounce_check` answers (default: no frames, no files).
+    pub fn set_bounce_check(&self, row: BounceCheckRow) {
+        self.st().files.bounce_check = Some(row);
+    }
+
+    /// What dry run `call` (`export_midi_check`, `export_midi_clip_check`,
+    /// `export_dawproject_check`, `export_aaf_check`) answers (default: an
+    /// empty report).
+    pub fn set_check_report(&self, call: &str, report: ReportRow) {
+        self.st().files.reports.insert(call.to_owned(), report);
+    }
+
+    /// What `export_for_daw_check` answers (unscripted: refused).
+    pub fn set_for_daw_check(&self, row: ForDawCheckRow) {
+        self.st().files.for_daw_check = Some(row);
+    }
+
+    /// What `midi_file_info(path)` answers (unscripted: refused as
+    /// unreadable).
+    pub fn set_midi_file_info(&self, path: &str, info: MidiFileInfoRow) {
+        self.st().files.midi_info.insert(path.to_owned(), info);
+    }
+
+    /// What `export_midi_clip_names` answers (default: none).
+    pub fn set_clip_names(&self, row: ClipNamesRow) {
+        self.st().files.clip_names = Some(row);
+    }
+
+    pub fn set_snapshots(&self, rows: Vec<SnapshotRow>) {
+        self.st().files.snapshots = rows;
+    }
+
+    /// What `confirm_merge` answers (default: an empty report).
+    pub fn set_merge_report(&self, report: ReportRow) {
+        self.st().files.merge_report = Some(report);
+    }
+
+    pub fn set_interchange_report(&self, report: Option<ReportRow>) {
+        self.st().files.interchange_report = report;
+    }
+
+    /// The song info the session holds now.
+    pub fn song(&self) -> SongInfoRow {
+        self.st().files.song_info.clone()
+    }
+
+    pub fn set_recovered_files(&self, rows: Vec<RecoveredFileRow>) {
+        self.st().files.recovered = rows;
+    }
+
+    pub fn set_copies_size(&self, row: CopiesSizeRow) {
+        self.st().files.copies = Some(row);
+    }
+
+    fn read(s: &mut State, call: &str) -> Result<(), VizError> {
+        Self::scripted(s, call)?;
+        *s.files.reads.entry(call.to_owned()).or_default() += 1;
+        Ok(())
+    }
+
+    /// Starts a job of `kind` for `request`: its ID.
+    fn start_job(
+        &self,
+        call: &str,
+        logged: String,
+        kind: JobKindRow,
+        request: JobRequest,
+    ) -> Result<u64, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, call)?;
+        s.calls.push(logged);
+        let f = &mut s.files;
+        let id = f.next_job;
+        f.next_job += 1;
+        let script = f.scripts.pop_front().unwrap_or_else(JobScript::done);
+        f.jobs.push((
+            id,
+            FakeJob {
+                kind,
+                script,
+                polls: 0,
+                cancelled: false,
+                merge_closed: false,
+            },
+        ));
+        f.started.push(StartedJob { id, kind, request });
+        Ok(id)
+    }
+
+    fn job_mut(f: &mut Files, id: u64) -> Result<&mut FakeJob, VizError> {
+        f.jobs
+            .iter_mut()
+            .find(|(j, _)| *j == id)
+            .map(|(_, j)| j)
+            .ok_or_else(|| VizError::Model {
+                message: format!("unknown job {id}"),
+            })
+    }
+
+    /// The row of a job, as a poll answers it (advancing it one step).
+    fn poll(f: &mut Files, id: u64) -> Result<JobRow, VizError> {
+        let job = Self::job_mut(f, id)?;
+        let mut row = JobRow {
+            id,
+            kind: job.kind,
+            progress: 0.0,
+            state: JobStateRow::Running,
+            message: None,
+            problems: vec![],
+            created: vec![],
+            report: None,
+            written: vec![],
+            merge: None,
+        };
+        let step = job.polls;
+        job.polls += 1;
+        if job.cancelled {
+            row.state = JobStateRow::Cancelled;
+            return Ok(row);
+        }
+        if let Some(p) = job.script.steps.get(step) {
+            row.progress = *p;
+            return Ok(row);
+        }
+        match &job.script.end {
+            JobEnd::Done {
+                written,
+                report,
+                created,
+                merge,
+                problems,
+                ..
+            } => {
+                row.progress = 1.0;
+                row.state = JobStateRow::Done;
+                row.written = written.clone();
+                row.report = report.clone();
+                row.created = created.clone();
+                row.merge = merge.clone();
+                row.problems = problems.clone();
+            }
+            JobEnd::Failed { message, problems } => {
+                row.state = JobStateRow::Failed;
+                row.message = Some(message.clone());
+                row.problems = problems.clone();
+            }
+            JobEnd::Cancelled => row.state = JobStateRow::Cancelled,
+        }
+        Ok(row)
+    }
+
+    /// A job that ended done just now: what it changes in the fake.
+    fn landed(f: &mut Files, id: u64) {
+        let Some(StartedJob {
+            request: JobRequest::Format(format),
+            ..
+        }) = f.started.iter().find(|j| j.id == id)
+        else {
+            return;
+        };
+        let format = *format;
+        let info = f.project_info.get_or_insert_with(default_project_info);
+        info.format = format;
+    }
+
+    /// A merge job done, not cancelled, and not yet confirmed or dropped.
+    fn held_merge(f: &mut Files, job: u64) -> Result<&mut FakeJob, VizError> {
+        let no = || VizError::Model {
+            message: vizdaw_ffi::dawproject::NO_MERGE_WAITING.into(),
+        };
+        let j = Self::job_mut(f, job).map_err(|_| no())?;
+        let ended = j.polls > j.script.steps.len();
+        let done = matches!(j.script.end, JobEnd::Done { .. });
+        if j.kind != JobKindRow::MergeDawproject || !ended || !done || j.cancelled || j.merge_closed
+        {
+            return Err(no());
+        }
+        Ok(j)
+    }
+
+    fn check_report(&self, call: &str) -> Result<ReportRow, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, call)?;
+        Ok(s.files
+            .reports
+            .get(call)
+            .cloned()
+            .unwrap_or_else(empty_report))
+    }
+
+    /// The name an export of `seq` suggests: the song title, else the
+    /// sequence's name.
+    fn song_name(s: &State, seq: u64) -> Result<String, VizError> {
+        if let Some(t) = s.files.song_info.title.as_ref().filter(|t| !t.is_empty()) {
+            return Ok(t.clone());
+        }
+        s.snap
+            .sequences
+            .iter()
+            .find(|q| q.id == seq)
+            .map(|q| q.name.clone())
+            .ok_or_else(|| VizError::Model {
+                message: format!("unknown sequence {seq}"),
+            })
+    }
+}
+
+fn default_project_info() -> ProjectInfoRow {
+    ProjectInfoRow {
+        format: ProjectFormatRow {
+            sample_rate: 48_000,
+            depth: BitDepthRow::Int24,
+        },
+        mismatched: 0,
+        rate_mismatch: false,
+        device_rate: 0.0,
+    }
+}
+
+fn empty_report() -> ReportRow {
+    ReportRow {
+        summary: String::new(),
+        items: vec![],
     }
 }
 
@@ -1527,6 +2007,314 @@ impl DocSession for FakeSession {
         s.midi_previews.push((dest, volume, pan));
         Ok(true)
     }
+    fn media(&self) -> Result<Vec<MediaRow>, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, "media")?;
+        Ok(s.files.media.clone())
+    }
+    fn recheck_media(&self) -> Result<bool, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "recheck_media")?;
+        s.calls.push("recheck_media".into());
+        Ok(std::mem::take(&mut s.files.recheck))
+    }
+    fn project_info(&self) -> Result<ProjectInfoRow, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, "project_info")?;
+        Ok(s.files
+            .project_info
+            .clone()
+            .unwrap_or_else(default_project_info))
+    }
+    fn set_project_format(&self, format: ProjectFormatRow) -> Result<u64, VizError> {
+        self.start_job(
+            "set_project_format",
+            format!(
+                "set_project_format({},{:?})",
+                format.sample_rate, format.depth
+            ),
+            JobKindRow::Format,
+            JobRequest::Format(format),
+        )
+    }
+    fn convert_media(&self) -> Result<u64, VizError> {
+        self.start_job(
+            "convert_media",
+            "convert_media".into(),
+            JobKindRow::Convert,
+            JobRequest::Convert,
+        )
+    }
+    fn import_audio(
+        &self,
+        paths: Vec<String>,
+        target: Option<ImportTargetRow>,
+    ) -> Result<u64, VizError> {
+        self.start_job(
+            "import_audio",
+            format!("import_audio({paths:?})"),
+            JobKindRow::Import,
+            JobRequest::Import { paths, target },
+        )
+    }
+    fn job(&self, id: u64) -> Result<JobRow, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, "job")?;
+        let row = Self::poll(&mut s.files, id)?;
+        let just_ended = Self::job_mut(&mut s.files, id)
+            .is_ok_and(|j| j.polls == j.script.steps.len() + 1 && !j.cancelled);
+        if row.state == JobStateRow::Done && just_ended {
+            Self::landed(&mut s.files, id);
+        }
+        Ok(row)
+    }
+    fn cancel_job(&self, id: u64) -> Result<(), VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "cancel_job")?;
+        s.calls.push(format!("cancel_job({id})"));
+        s.files.cancelled.push(id);
+        // Like the core: a job that ended stays as it ended.
+        if let Ok(j) = Self::job_mut(&mut s.files, id)
+            && j.polls <= j.script.steps.len()
+        {
+            j.cancelled = true;
+        }
+        Ok(())
+    }
+    fn relink_media(&self, media: u64, path: String) -> Result<u64, VizError> {
+        self.start_job(
+            "relink_media",
+            format!("relink_media({media},{path})"),
+            JobKindRow::Relink,
+            JobRequest::Relink { media, path },
+        )
+    }
+    fn search_media(&self, folder: String) -> Result<u64, VizError> {
+        self.start_job(
+            "search_media",
+            format!("search_media({folder})"),
+            JobKindRow::Relink,
+            JobRequest::Search(folder),
+        )
+    }
+    fn bounce(&self, req: BounceRequestRow) -> Result<u64, VizError> {
+        self.start_job(
+            "bounce",
+            format!("bounce({:?})", req.path),
+            JobKindRow::Bounce,
+            JobRequest::Bounce(req),
+        )
+    }
+    fn bounce_check(&self, _req: BounceRequestRow) -> Result<BounceCheckRow, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, "bounce_check")?;
+        Ok(s.files.bounce_check.clone().unwrap_or(BounceCheckRow {
+            external_lanes: 0,
+            frames: 0,
+            files: vec![],
+            warning: None,
+        }))
+    }
+    fn bounce_result(&self, job: u64) -> Result<Option<BounceResultRow>, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, "bounce_result")?;
+        let j = Self::job_mut(&mut s.files, job)?;
+        let ended = j.polls > j.script.steps.len() && !j.cancelled;
+        Ok(match &j.script.end {
+            JobEnd::Done { bounce, .. } if ended => bounce.clone(),
+            _ => None,
+        })
+    }
+    fn midi_file_info(&self, path: String) -> Result<MidiFileInfoRow, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, "midi_file_info")?;
+        s.files
+            .midi_info
+            .get(&path)
+            .cloned()
+            .ok_or_else(|| VizError::Io {
+                message: format!("{path} could not be read"),
+            })
+    }
+    fn import_midi(&self, req: MidiImportRequestRow) -> Result<u64, VizError> {
+        self.start_job(
+            "import_midi",
+            format!("import_midi({})", req.path),
+            JobKindRow::ImportMidi,
+            JobRequest::ImportMidi(req),
+        )
+    }
+    fn export_midi(&self, req: SmfExportRequestRow) -> Result<u64, VizError> {
+        self.start_job(
+            "export_midi",
+            format!("export_midi({})", req.path),
+            JobKindRow::ExportMidi,
+            JobRequest::ExportMidi(req),
+        )
+    }
+    fn export_midi_check(&self, _req: SmfExportRequestRow) -> Result<ReportRow, VizError> {
+        self.check_report("export_midi_check")
+    }
+    fn export_midi_clip(&self, req: ClipExportRequestRow) -> Result<u64, VizError> {
+        self.start_job(
+            "export_midi_clip",
+            format!("export_midi_clip({})", req.path),
+            JobKindRow::ExportMidi,
+            JobRequest::ExportMidiClip(req),
+        )
+    }
+    fn export_midi_clip_check(&self, _req: ClipExportRequestRow) -> Result<ReportRow, VizError> {
+        self.check_report("export_midi_clip_check")
+    }
+    fn export_midi_clip_names(&self, _req: ClipExportRequestRow) -> Result<ClipNamesRow, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, "export_midi_clip_names")?;
+        Ok(s.files.clip_names.clone().unwrap_or(ClipNamesRow {
+            names: vec![],
+            taken: vec![],
+        }))
+    }
+    fn export_for_daw(&self, req: ForDawRequestRow) -> Result<u64, VizError> {
+        self.start_job(
+            "export_for_daw",
+            format!("export_for_daw({})", req.path),
+            JobKindRow::ExportProject,
+            JobRequest::ForDaw(req),
+        )
+    }
+    fn export_for_daw_check(&self, _req: ForDawRequestRow) -> Result<ForDawCheckRow, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, "export_for_daw_check")?;
+        s.files
+            .for_daw_check
+            .clone()
+            .ok_or_else(|| VizError::Model {
+                message: "export_for_daw_check is not scripted".into(),
+            })
+    }
+    fn export_dawproject(&self, req: DawprojectExportRequestRow) -> Result<u64, VizError> {
+        self.start_job(
+            "export_dawproject",
+            format!("export_dawproject({})", req.path),
+            JobKindRow::ExportDawproject,
+            JobRequest::ExportDawproject(req),
+        )
+    }
+    fn export_dawproject_check(
+        &self,
+        _req: DawprojectExportRequestRow,
+    ) -> Result<ReportRow, VizError> {
+        self.check_report("export_dawproject_check")
+    }
+    fn import_dawproject(&self, req: DawprojectImportRequestRow) -> Result<u64, VizError> {
+        self.start_job(
+            "import_dawproject",
+            format!("import_dawproject({})", req.path),
+            JobKindRow::ImportProject,
+            JobRequest::ImportDawproject(req),
+        )
+    }
+    fn dawproject_name(&self, seq: u64) -> Result<String, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, "dawproject_name")?;
+        Ok(format!("{}.dawproject", Self::song_name(&s, seq)?))
+    }
+    fn dawproject_snapshots(&self) -> Result<Vec<SnapshotRow>, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, "dawproject_snapshots")?;
+        Ok(s.files.snapshots.clone())
+    }
+    fn merge_dawproject(&self, req: DawprojectMergeRequestRow) -> Result<u64, VizError> {
+        self.start_job(
+            "merge_dawproject",
+            format!("merge_dawproject({},{:?})", req.path, req.step),
+            JobKindRow::MergeDawproject,
+            JobRequest::MergeDawproject(req),
+        )
+    }
+    fn confirm_merge(&self, job: u64) -> Result<ReportRow, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "confirm_merge")?;
+        Self::held_merge(&mut s.files, job)?.merge_closed = true;
+        s.calls.push(format!("confirm_merge({job})"));
+        let report = s.files.merge_report.clone().unwrap_or_else(empty_report);
+        s.files.interchange_report = Some(report.clone());
+        Self::command_result(&mut s);
+        Ok(report)
+    }
+    fn cancel_merge(&self, job: u64) -> Result<(), VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "cancel_merge")?;
+        Self::held_merge(&mut s.files, job)?.merge_closed = true;
+        s.calls.push(format!("cancel_merge({job})"));
+        Ok(())
+    }
+    fn export_aaf(&self, req: AafExportRequestRow) -> Result<u64, VizError> {
+        self.start_job(
+            "export_aaf",
+            format!("export_aaf({})", req.path),
+            JobKindRow::ExportAaf,
+            JobRequest::ExportAaf(req),
+        )
+    }
+    fn export_aaf_check(&self, _req: AafExportRequestRow) -> Result<ReportRow, VizError> {
+        self.check_report("export_aaf_check")
+    }
+    fn import_aaf(&self, req: AafImportRequestRow) -> Result<u64, VizError> {
+        self.start_job(
+            "import_aaf",
+            format!("import_aaf({})", req.path),
+            JobKindRow::ImportAaf,
+            JobRequest::ImportAaf(req),
+        )
+    }
+    fn aaf_folder_name(&self, seq: u64) -> Result<String, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, "aaf_folder_name")?;
+        Ok(format!("{} AAF", Self::song_name(&s, seq)?))
+    }
+    fn interchange_report(&self) -> Result<Option<ReportRow>, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, "interchange_report")?;
+        Ok(s.files.interchange_report.clone())
+    }
+    fn song_info(&self) -> Result<SongInfoRow, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, "song_info")?;
+        Ok(s.files.song_info.clone())
+    }
+    fn set_song_info(&self, info: SongInfoRow) -> Result<DocSnapshot, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "set_song_info")?;
+        s.calls.push("set_song_info".into());
+        s.files.song_info = info;
+        Ok(Self::command_result(&mut s))
+    }
+    fn recovered_files(&self) -> Result<Vec<RecoveredFileRow>, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, "recovered_files")?;
+        Ok(s.files.recovered.clone())
+    }
+    fn recover_recordings(&self, import: bool) -> Result<DocSnapshot, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "recover_recordings")?;
+        if s.files.recovered.is_empty() {
+            return Err(VizError::Model {
+                message: "there are no recovered recordings".into(),
+            });
+        }
+        s.calls.push(format!("recover_recordings({import})"));
+        s.files.recovered.clear();
+        Ok(Self::command_result(&mut s))
+    }
+    fn co_producer_copies_size(&self) -> Result<CopiesSizeRow, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, "co_producer_copies_size")?;
+        Ok(s.files
+            .copies
+            .clone()
+            .unwrap_or(CopiesSizeRow { count: 0, bytes: 0 }))
+    }
 }
 
 /// Every slot of every strip: instrument, EQ, inserts.
@@ -1886,4 +2674,217 @@ pub fn demo_fake() -> FakeSession {
         vec![lane_row(30, "Groove", false), lane_row(31, "Chords", false)],
     );
     f
+}
+
+#[derive(Default)]
+struct CoreState {
+    calls: Vec<String>,
+    call_errors: HashMap<String, VizError>,
+    next_errors: HashMap<String, VecDeque<VizError>>,
+    /// Sessions to hand out, by constructor name.
+    sessions: HashMap<String, VecDeque<Arc<FakeSession>>>,
+    made: Vec<(String, Arc<FakeSession>)>,
+    dawproject: HashMap<String, DawprojectInfoRow>,
+    aaf: HashMap<String, AafInfoRow>,
+    recovery: HashMap<String, RecoveryInfo>,
+}
+
+/// A scripted `CoreCalls` (constructors and free functions): a call log,
+/// scripted errors, the sessions it hands out and the file reads.
+#[derive(Default)]
+pub struct FakeCore(Mutex<CoreState>);
+
+impl FakeCore {
+    pub fn new() -> Self {
+        FakeCore::default()
+    }
+
+    fn st(&self) -> std::sync::MutexGuard<'_, CoreState> {
+        self.0.lock().unwrap()
+    }
+
+    /// Every call, in order, as `name` or `name(arg)`.
+    pub fn calls(&self) -> Vec<String> {
+        self.st().calls.clone()
+    }
+
+    /// Makes `call` answer `e` every time (`None`: normally again).
+    pub fn set_call_error(&self, call: &str, e: Option<VizError>) {
+        let mut s = self.st();
+        match e {
+            Some(e) => s.call_errors.insert(call.to_owned(), e),
+            None => s.call_errors.remove(call),
+        };
+    }
+
+    /// Makes the next `call` answer `e` (queued).
+    pub fn fail_next(&self, call: &str, e: VizError) {
+        self.st()
+            .next_errors
+            .entry(call.to_owned())
+            .or_default()
+            .push_back(e);
+    }
+
+    /// The next constructor `call` (`new_empty`, `new_demo`,
+    /// `new_demo_audio`, `new_project`, `open`, `open_with`, `open_copy`)
+    /// hands out `session` (queued). Unscripted, `new_demo` and
+    /// `new_demo_audio` make a `demo_fake`, the others an empty fake; an
+    /// opened one has its path.
+    pub fn hand_out(&self, call: &str, session: Arc<FakeSession>) {
+        self.st()
+            .sessions
+            .entry(call.to_owned())
+            .or_default()
+            .push_back(session);
+    }
+
+    /// Every session made, with the constructor that made it.
+    pub fn made(&self) -> Vec<(String, Arc<FakeSession>)> {
+        self.st().made.clone()
+    }
+
+    /// The last session made.
+    pub fn last_made(&self) -> Option<Arc<FakeSession>> {
+        self.st().made.last().map(|(_, s)| s.clone())
+    }
+
+    pub fn set_dawproject_info(&self, path: &str, row: DawprojectInfoRow) {
+        self.st().dawproject.insert(path.to_owned(), row);
+    }
+
+    pub fn set_aaf_info(&self, path: &str, row: AafInfoRow) {
+        self.st().aaf.insert(path.to_owned(), row);
+    }
+
+    /// What `recovery_check(path)` answers (default: nothing to ask).
+    pub fn set_recovery(&self, path: &str, row: RecoveryInfo) {
+        self.st().recovery.insert(path.to_owned(), row);
+    }
+
+    fn scripted(s: &mut CoreState, call: &str) -> Result<(), VizError> {
+        if let Some(e) = s.next_errors.get_mut(call).and_then(VecDeque::pop_front) {
+            return Err(e);
+        }
+        match s.call_errors.get(call) {
+            Some(e) => Err(e.clone()),
+            None => Ok(()),
+        }
+    }
+
+    fn make(
+        &self,
+        call: &str,
+        logged: String,
+        path: Option<&str>,
+    ) -> Result<Arc<FakeSession>, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, call)?;
+        s.calls.push(logged);
+        let session = match s.sessions.get_mut(call).and_then(VecDeque::pop_front) {
+            Some(f) => f,
+            None => {
+                let f = match call {
+                    "new_demo" | "new_demo_audio" => demo_fake(),
+                    _ => FakeSession::new(vec![]),
+                };
+                f.set_path(path);
+                Arc::new(f)
+            }
+        };
+        s.made.push((call.to_owned(), session.clone()));
+        Ok(session)
+    }
+
+    fn info<T: Clone>(
+        &self,
+        call: &str,
+        path: &str,
+        pick: impl FnOnce(&CoreState) -> Option<T>,
+    ) -> Result<Option<T>, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, call)?;
+        s.calls.push(format!("{call}({path})"));
+        Ok(pick(&s))
+    }
+}
+
+fn as_doc(f: Arc<FakeSession>) -> Arc<dyn DocSession> {
+    f
+}
+
+fn unreadable(path: &str) -> VizError {
+    VizError::Io {
+        message: format!("{path} could not be read"),
+    }
+}
+
+impl CoreCalls for FakeCore {
+    fn new_empty(&self) -> Result<Arc<dyn DocSession>, VizError> {
+        self.make("new_empty", "new_empty".into(), None).map(as_doc)
+    }
+    fn new_demo(&self) -> Result<Arc<dyn DocSession>, VizError> {
+        self.make("new_demo", "new_demo".into(), None).map(as_doc)
+    }
+    fn new_demo_audio(&self) -> Result<Arc<dyn DocSession>, VizError> {
+        self.make("new_demo_audio", "new_demo_audio".into(), None)
+            .map(as_doc)
+    }
+    fn new_project(&self, format: ProjectFormatRow) -> Result<Arc<dyn DocSession>, VizError> {
+        let made = self.make(
+            "new_project",
+            format!("new_project({},{:?})", format.sample_rate, format.depth),
+            None,
+        )?;
+        made.set_project_info(ProjectInfoRow {
+            format,
+            ..default_project_info()
+        });
+        Ok(made)
+    }
+    fn open(&self, path: &str) -> Result<Arc<dyn DocSession>, VizError> {
+        self.make("open", format!("open({path})"), Some(path))
+            .map(as_doc)
+    }
+    fn open_with(&self, path: &str, options: OpenOptions) -> Result<Arc<dyn DocSession>, VizError> {
+        self.make(
+            "open_with",
+            format!(
+                "open_with({path},plugins_off={},autosave={:?})",
+                options.plugins_off, options.autosave
+            ),
+            Some(path),
+        )
+        .map(as_doc)
+    }
+    fn open_copy(&self, path: &str) -> Result<Arc<dyn DocSession>, VizError> {
+        self.make("open_copy", format!("open_copy({path})"), Some(path))
+            .map(as_doc)
+    }
+    fn dawproject_info(&self, path: &str) -> Result<DawprojectInfoRow, VizError> {
+        self.info("dawproject_info", path, |s| s.dawproject.get(path).cloned())?
+            .ok_or_else(|| unreadable(path))
+    }
+    fn aaf_info(&self, path: &str) -> Result<AafInfoRow, VizError> {
+        self.info("aaf_info", path, |s| s.aaf.get(path).cloned())?
+            .ok_or_else(|| unreadable(path))
+    }
+    fn recovery_check(&self, path: &str) -> Result<RecoveryInfo, VizError> {
+        Ok(self
+            .info("recovery_check", path, |s| s.recovery.get(path).cloned())?
+            .unwrap_or(RecoveryInfo {
+                crashed: false,
+                loading: vec![],
+                autosave: None,
+            }))
+    }
+    fn project_rates(&self) -> Vec<u32> {
+        vizdaw_ffi::project_rates()
+    }
+    fn format_label(&self, format: ProjectFormatRow) -> String {
+        vizdaw_ffi::format_label(format)
+    }
+    fn bounce_settings(&self) -> BounceSettingsRow {
+        vizdaw_ffi::bounce_settings()
+    }
 }
