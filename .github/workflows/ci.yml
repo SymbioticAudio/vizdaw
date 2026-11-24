@@ -33,7 +33,7 @@ jobs:
       - name: VST3 SDK sample build packages
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get install -y ninja-build libx11-dev libx11-xcb-dev libxcb-util-dev libxcb-cursor-dev libxcb-keysyms1-dev libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libcairo2-dev libfreetype6-dev libpango1.0-dev libwayland-dev wayland-protocols libglib2.0-dev
+          sudo apt-get install -y ninja-build libx11-dev libx11-xcb-dev libxcb-util-dev libxcb-cursor-dev libxcb-keysyms1-dev libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libcairo2-dev libfreetype6-dev libpango1.0-dev libwayland-dev wayland-protocols libglib2.0-dev libgtkmm-3.0-dev
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all -- --check
