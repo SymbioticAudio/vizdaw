@@ -19,35 +19,33 @@
 //! per-window owner). Never under the control channel.
 
 use std::panic::AssertUnwindSafe;
+use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, AppContext, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    ParentElement, StatefulInteractiveElement, Styled, Window, anchored, deferred, div, px,
-    relative, rgb,
+    AnyElement, App, FocusHandle, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
 use vizdaw_app::DocId;
+use vizdaw_app::audio_format::AudioFormatChoices;
 use vizdaw_app::bounce::{
-    ADD_TO_PROJECT, ALSO_WRITE_FILES, BITS, BOUNCE, BounceChoices, CANCEL, CAPTION, CONTAINERS,
-    DEPTHS, DITHER, FAILED, FORMAT, MIX, OTHER, OTHER_LABEL, OTHER_PLACEHOLDER, RATE, RATES, STEMS,
-    STEMS_CAPTION, Source, TIME_SELECTION_ONLY, TITLE, extension, rate_title,
+    ADD_TO_PROJECT, ALSO_WRITE_FILES, BOUNCE, BounceChoices, CANCEL, CAPTION, FAILED, MIX, STEMS,
+    STEMS_CAPTION, Source, TIME_SELECTION_ONLY, TITLE, extension,
 };
 use vizdaw_app::panels;
-use vizdaw_ffi::{BitDepthRow, StripRow};
+use vizdaw_ffi::StripRow;
 
+use super::audio_format::{EditFormat, FormatRows, progress_bar, row, text};
 use crate::app_state::AppState;
 use crate::file_menu::choose_at;
 use crate::file_panels::PanelPlace;
 use crate::registry::RegistryScope;
 use crate::sheet_host::{ButtonRole, Sheet, SheetButton, sheet_is};
 use crate::shell::DocumentWindow;
-use crate::text_input::TextInput;
 use crate::transport_bar::colors;
 
 /// The card's width (Swift `.frame(width: 440)`).
 const WIDTH: f32 = 440.;
-/// The width of a row's label column.
-const LABEL_WIDTH: f32 = 90.;
 /// The stems list's height (Swift `.frame(height: 120)`).
 const STEMS_HEIGHT: f32 = 120.;
 /// The accessibility label of the sheet's progress bar.
@@ -56,19 +54,6 @@ pub const PROGRESS_LABEL: &str = "Bounce progress";
 const WARNING_TEXT: u32 = 0xd8a040;
 /// The error's colour.
 const ERROR_TEXT: u32 = 0xe06060;
-
-/// Which picker is open.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Pick {
-    Format,
-    Bits,
-    Rate,
-}
-
-/// What the sheet's controls share with their click handlers.
-struct BounceUi {
-    open: Option<Pick>,
-}
 
 /// What the sheet shows of the document, read once per frame.
 struct View {
@@ -86,22 +71,15 @@ struct View {
 /// The Bounce sheet of document `doc`.
 pub struct BounceSheet {
     doc: DocId,
-    ui: Entity<BounceUi>,
-    /// The `Rate (Hz)` field.
-    other: Entity<TextInput>,
+    /// The Format, Bits, Rate and Dither rows.
+    format: FormatRows,
 }
 
 impl BounceSheet {
     fn new(doc: DocId, rate: u32, cx: &mut App) -> Self {
-        let text = rate.to_string();
         BounceSheet {
             doc,
-            ui: cx.new(|_| BounceUi { open: None }),
-            other: cx.new(|cx| {
-                TextInput::new(OTHER_PLACEHOLDER, cx)
-                    .compact()
-                    .with_text(&text)
-            }),
+            format: FormatRows::new(rate, cx),
         }
     }
 
@@ -220,33 +198,7 @@ fn begin(doc: DocId, c: &BounceChoices, window: &Window, cx: &mut App) {
     .detach();
 }
 
-/// A text line recorded in the tree.
-fn text(t: &str, scope: &mut RegistryScope) -> gpui::Div {
-    div()
-        .relative()
-        .child(t.to_owned())
-        .child(scope.control("text", t, true))
-}
-
-/// A labelled row: the label column, then `control`.
-fn row(label: &str, control: impl IntoElement) -> gpui::Div {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .child(
-            div()
-                .w(px(LABEL_WIDTH))
-                .flex_none()
-                .text_color(rgb(colors::TEXT))
-                .child(label.to_owned()),
-        )
-        .child(control)
-}
-
-/// A toggle: its box and label (`checkbox` in the tree, selected when
-/// on); a click flips it through `flip`.
+/// A toggle titled and labelled `label`.
 fn toggle(
     id: (&'static str, usize),
     label: &str,
@@ -255,28 +207,7 @@ fn toggle(
     scope: &mut RegistryScope,
     flip: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    div()
-        .id(id)
-        .relative()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .text_color(rgb(if enabled {
-            colors::TEXT
-        } else {
-            colors::DISABLED
-        }))
-        .child(if on { "\u{2611}" } else { "\u{2610}" })
-        .child(label.to_owned())
-        .child(scope.control_selected("checkbox", label, enabled, None, on))
-        .when(enabled, |d| {
-            d.cursor_pointer().on_click(move |_, window, cx| {
-                flip(window, cx);
-                cx.stop_propagation();
-            })
-        })
-        .into_any_element()
+    super::audio_format::toggle(id, label, label, on, enabled, scope, flip)
 }
 
 /// The `Mix`/`Stems` segments (`button`s, the chosen one selected).
@@ -317,171 +248,6 @@ fn segments(doc: DocId, source: Source, enabled: bool, scope: &mut RegistryScope
         .into_any_element()
 }
 
-/// Picker `which`'s items and the chosen one's title.
-fn items(which: Pick, c: &BounceChoices) -> (Vec<String>, String) {
-    match which {
-        Pick::Format => (
-            CONTAINERS.iter().map(|(_, t)| (*t).to_owned()).collect(),
-            CONTAINERS
-                .iter()
-                .find(|(k, _)| *k == c.container)
-                .map_or("", |(_, t)| t)
-                .to_owned(),
-        ),
-        Pick::Bits => (
-            DEPTHS.iter().map(|(_, t)| (*t).to_owned()).collect(),
-            DEPTHS
-                .iter()
-                .find(|(k, _)| *k == c.depth)
-                .map_or("", |(_, t)| t)
-                .to_owned(),
-        ),
-        Pick::Rate => {
-            let mut all: Vec<String> = RATES.iter().map(|r| rate_title(*r)).collect();
-            all.push(OTHER.to_owned());
-            let chosen = if c.other_rate {
-                OTHER.to_owned()
-            } else {
-                rate_title(c.rate)
-            };
-            (all, chosen)
-        }
-    }
-}
-
-/// Item `i` of picker `which`, chosen.
-fn choose(which: Pick, i: usize, c: &mut BounceChoices) {
-    match which {
-        Pick::Format => c.container = CONTAINERS[i].0,
-        Pick::Bits => c.depth = DEPTHS[i].0,
-        Pick::Rate => c.set_rate_choice(RATES.get(i).copied().unwrap_or(0)),
-    }
-}
-
-/// Picker `which` labelled `label`: its face (`menu`, its value the
-/// choice), and its items (`menuitem`) while open.
-fn picker(
-    doc: DocId,
-    which: Pick,
-    label: &str,
-    c: &BounceChoices,
-    ui: &Entity<BounceUi>,
-    scope: &mut RegistryScope,
-    cx: &App,
-) -> AnyElement {
-    let (all, chosen) = items(which, c);
-    let open = ui.read(cx).open == Some(which);
-    let toggle_ui = ui.clone();
-    let face = div()
-        .id(("bounce-picker", which as usize))
-        .relative()
-        .h(px(24.))
-        .min_w(px(120.))
-        .px_2()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .gap_2()
-        .rounded_md()
-        .border_1()
-        .border_color(rgb(colors::BORDER))
-        .bg(rgb(colors::BUTTON))
-        .cursor_pointer()
-        .child(chosen.clone())
-        .child(div().text_color(rgb(colors::DIM)).child("\u{25BE}"))
-        .child(scope.control_with("menu", label, true, Some(&chosen), false))
-        .on_click(move |_, window, cx| {
-            toggle_ui.update(cx, |u, _| {
-                u.open = (u.open != Some(which)).then_some(which);
-            });
-            window.refresh();
-        });
-    face.when(open, |d| {
-        let rows = all.iter().enumerate().map(|(i, title)| {
-            let ui = ui.clone();
-            div()
-                .id(("bounce-item", i))
-                .relative()
-                .px_3()
-                .py_1()
-                .cursor_pointer()
-                .hover(|s| s.bg(rgb(colors::BUTTON)))
-                .child(title.clone())
-                .child(scope.control_selected("menuitem", title, true, None, *title == chosen))
-                .on_click(move |_, window, cx| {
-                    ui.update(cx, |u, _| u.open = None);
-                    edit(doc, window, cx, |c| choose(which, i, c));
-                    cx.stop_propagation();
-                })
-        });
-        d.child(
-            div().absolute().top_full().left_0().child(
-                deferred(
-                    anchored().snap_to_window().child(
-                        div()
-                            .id("bounce-list")
-                            .occlude()
-                            .flex()
-                            .flex_col()
-                            .min_w(px(120.))
-                            .py_1()
-                            .bg(rgb(colors::LIST))
-                            .border_1()
-                            .border_color(rgb(colors::BORDER))
-                            .rounded_md()
-                            .children(rows),
-                    ),
-                )
-                .with_priority(3),
-            ),
-        )
-    })
-    .into_any_element()
-}
-
-/// The progress bar (0–1), its value the progress.
-fn progress_bar(p: f32, scope: &mut RegistryScope) -> AnyElement {
-    let p = p.clamp(0., 1.);
-    let value = format!("{p:.2}");
-    div()
-        .relative()
-        .w_full()
-        .h(px(6.))
-        .rounded_sm()
-        .bg(rgb(colors::READOUT))
-        .child(
-            div()
-                .h_full()
-                .w(relative(p))
-                .rounded_sm()
-                .bg(rgb(colors::ON)),
-        )
-        .child(scope.control_with("progress", PROGRESS_LABEL, true, Some(&value), false))
-        .into_any_element()
-}
-
-impl BounceSheet {
-    /// The `Rate (Hz)` field follows the choice: what is typed sets the
-    /// rate (clamped to 8,000–384,000); left, it shows the rate.
-    fn sync_other(&self, c: &BounceChoices, window: &mut Window, cx: &mut App) {
-        let focused = self.other.focus_handle(cx).is_focused(window);
-        let typed = self.other.read(cx).text().trim().to_owned();
-        if focused {
-            if let Ok(n) = typed.parse::<i64>() {
-                let mut next = c.clone();
-                next.set_other_rate(n);
-                if next.rate != c.rate {
-                    edit(self.doc, window, cx, |c| c.set_other_rate(n));
-                }
-            }
-        } else if typed != c.rate.to_string() {
-            let rate = c.rate.to_string();
-            self.other.update(cx, |f, cx| f.set_text(&rate, cx));
-        }
-    }
-}
-
 impl Sheet for BounceSheet {
     fn label(&self) -> String {
         TITLE.to_owned()
@@ -517,9 +283,6 @@ impl Sheet for BounceSheet {
         }
         run_check(doc, cx);
         let c = &v.choices;
-        if c.other_rate {
-            self.sync_other(c, window, cx);
-        }
         let mut body = div()
             .flex()
             .flex_col()
@@ -582,39 +345,16 @@ impl Sheet for BounceSheet {
             scope,
             move |window, cx| edit(doc, window, cx, |c| c.use_selection = !c.use_selection),
         ));
-        let ui = self.ui.clone();
-        body = body
-            .child(row(
-                FORMAT,
-                picker(doc, Pick::Format, FORMAT, c, &ui, scope, cx),
-            ))
-            .child(row(BITS, picker(doc, Pick::Bits, BITS, c, &ui, scope, cx)))
-            .child(row(RATE, picker(doc, Pick::Rate, RATE, c, &ui, scope, cx)));
-        if c.other_rate {
-            let typed = self.other.read(cx).text().to_owned();
-            let focused = self.other.focus_handle(cx).is_focused(window);
-            body = body.child(row(
-                "",
-                div()
-                    .relative()
-                    .w(px(120.))
-                    .child(self.other.clone())
-                    .child(scope.control_with(
-                        "textfield",
-                        OTHER_LABEL,
-                        true,
-                        Some(&typed),
-                        focused,
-                    )),
-            ));
-        }
-        body = body.child(toggle(
-            ("bounce-toggle", 1),
-            DITHER,
-            c.dither,
-            c.depth != BitDepthRow::Float32,
+        let edit_format: EditFormat = Rc::new(move |window, cx, f| {
+            edit(doc, window, cx, |c| c.edit_audio_format(f));
+        });
+        body = body.children(self.format.render(
+            &c.audio_format(),
+            true,
+            &edit_format,
             scope,
-            move |window, cx| edit(doc, window, cx, |c| c.dither = !c.dither),
+            window,
+            cx,
         ));
         body = body.child(toggle(
             ("bounce-toggle", 2),
@@ -665,7 +405,7 @@ impl Sheet for BounceSheet {
             );
         }
         if let Some(p) = v.progress {
-            body = body.child(progress_bar(p, scope));
+            body = body.child(progress_bar(p, PROGRESS_LABEL, scope));
         }
         body.into_any_element()
     }
@@ -687,8 +427,8 @@ impl Sheet for BounceSheet {
 
     fn focus_order(&self, cx: &App) -> Vec<FocusHandle> {
         match self.view(cx) {
-            Some(v) if v.choices.other_rate => vec![self.other.focus_handle(cx)],
-            _ => vec![],
+            Some(v) => self.format.focus_order(&v.choices.audio_format(), cx),
+            None => vec![],
         }
     }
 
@@ -717,7 +457,7 @@ impl Sheet for BounceSheet {
             });
             return true;
         }
-        self.ui.update(cx, |u, _| u.open = None);
+        self.format.close(cx);
         begin(doc, &v.choices, window, cx);
         false
     }

@@ -22,6 +22,8 @@
 //! - Bounce…: the Bounce sheet ([`crate::sheets::bounce`]).
 //! - Export › MIDI File… and MIDI Clip File…: their sheet
 //!   ([`crate::sheets::export_midi`]).
+//! - Export › For Another DAW… and DAWproject…: their sheet
+//!   ([`crate::sheets::for_daw`], [`crate::sheets::dawproject`]).
 //! - Last Import or Export Report…: the session's last report in the
 //!   report sheet ([`crate::sheets::report`]), or the status line `There
 //!   is no import or export report yet.`.
@@ -49,11 +51,7 @@ use crate::shell::DocumentWindow;
 
 /// The File items whose sheet or flow lands later; their menu item does
 /// nothing yet: the other Export items (slice 7c).
-pub const LATER: &[&str] = &[
-    "file.export_dawproject",
-    "file.export_aaf",
-    "file.export_for_daw",
-];
+pub const LATER: &[&str] = &["file.export_aaf"];
 
 /// Handles the File items that need no document.
 pub fn install(cx: &mut App) {
@@ -93,6 +91,8 @@ pub(crate) fn run_in_window(
         "file.export_midi_clip" => {
             crate::sheets::export_midi::show(ExportKind::Clip, view, window, cx)
         }
+        "file.export_for_daw" => crate::sheets::for_daw::show(view, window, cx),
+        "file.export_dawproject" => crate::sheets::dawproject::show(view, window, cx),
         "file.interchange_report" => crate::sheets::report::show_last(doc, cx),
         "media.relink" => AppState::global(cx).update(cx, |s, cx| {
             // The presenter shows the sheet once the window is free.

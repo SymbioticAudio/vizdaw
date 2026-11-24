@@ -97,6 +97,10 @@ pub struct DocumentModel {
     pub(crate) relink: crate::relink::RelinkOffer,
     /// The Bounce sheet's state (slice 7b Task 6).
     pub(crate) bounce: crate::bounce::Bounce,
+    /// The Export for Another DAW sheet's state (slice 7c Task 4).
+    pub(crate) for_daw: crate::for_daw::ForDaw,
+    /// The Export DAWproject sheet's state (slice 7c Task 4).
+    pub(crate) dawproject: crate::dawproject::Dawproject,
     /// The report of the last import or export this document's UI ran
     /// (Swift `InterchangeModel.report`).
     pub(crate) last_report: Option<vizdaw_ffi::ReportRow>,
@@ -223,6 +227,8 @@ impl DocumentModel {
             recovery: recovery::RecoveryOffer::default(),
             relink: crate::relink::RelinkOffer::default(),
             bounce: crate::bounce::Bounce::default(),
+            for_daw: crate::for_daw::ForDaw::default(),
+            dawproject: crate::dawproject::Dawproject::default(),
             last_report: None,
             report_shown: false,
             report_written: vec![],

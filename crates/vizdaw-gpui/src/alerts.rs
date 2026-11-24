@@ -120,6 +120,8 @@ pub fn present(cx: &mut App) {
         crate::sheets::relink::present(cx, |_, _| false);
         crate::sheets::import_midi::present(cx, |_, _| false);
         crate::sheets::export_midi::present(cx, |_, _| false);
+        crate::sheets::for_daw::present(cx, |_, _| false);
+        crate::sheets::dawproject::present(cx, |_, _| false);
         crate::sheets::report::present(cx, |_, _| false);
         return;
     }
@@ -169,6 +171,8 @@ pub fn present(cx: &mut App) {
     // Last: the sheet would hold back what waits for its window.
     crate::sheets::import_midi::present(cx, |w, cx| !busy(Target::Window(w), cx));
     crate::sheets::export_midi::present(cx, |w, cx| !busy(Target::Window(w), cx));
+    crate::sheets::for_daw::present(cx, |w, cx| !busy(Target::Window(w), cx));
+    crate::sheets::dawproject::present(cx, |w, cx| !busy(Target::Window(w), cx));
     crate::sheets::report::present(cx, |w, cx| !busy(Target::Window(w), cx));
     crate::sheets::relink::present(cx, |w, cx| !busy(Target::Window(w), cx));
 }

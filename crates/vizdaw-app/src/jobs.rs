@@ -427,9 +427,15 @@ impl DocumentModel {
         body: impl FnOnce(&dyn DocSession) -> Result<u64, VizError>,
     ) -> Result<u64, VizError> {
         let id = body(self.session.as_ref())?;
-        self.jobs.push(running(id, kind));
+        self.list_job(id, kind);
         self.poll_jobs();
         Ok(id)
+    }
+
+    /// Lists job `id` as running (a sheet that started it itself polls
+    /// once it knows the ID).
+    pub(crate) fn list_job(&mut self, id: u64, kind: JobKindRow) {
+        self.jobs.push(running(id, kind));
     }
 
     /// Asks job `id` to stop (a banner's or sheet's Cancel); its end
@@ -462,6 +468,8 @@ impl DocumentModel {
     pub fn poll_jobs(&mut self) {
         let listed = std::mem::take(&mut self.jobs);
         let mut still = Vec::with_capacity(listed.len());
+        // The kinds that ended (a job the session no longer knows ended).
+        let mut ended: Vec<JobKindRow> = vec![];
         for j in listed {
             let r = match self.session.job(j.id) {
                 Ok(r) => r,
@@ -469,13 +477,20 @@ impl DocumentModel {
                     still.push(j);
                     continue;
                 }
-                Err(_) => continue,
+                Err(_) => {
+                    ended.push(j.kind);
+                    continue;
+                }
             };
+            let answer = self.job_answer(&r);
+            if !matches!(answer, JobAnswer::Wait) {
+                ended.push(r.kind);
+            }
             let opens = matches!(
                 r.kind,
                 JobKindRow::ImportMidi | JobKindRow::ImportProject | JobKindRow::ImportAaf
             );
-            match self.job_answer(&r) {
+            match answer {
                 JobAnswer::Wait => still.push(r),
                 JobAnswer::Ok(_) => {
                     if !r.problems.is_empty() {
@@ -505,9 +520,16 @@ impl DocumentModel {
                     if opens {
                         self.opened_file = false;
                     }
+                    // The export sheets close once their job ended.
+                    self.for_daw_job_done(&r);
+                    self.dawproject_job_done(&r);
                     self.refresh_after_job();
                 }
                 JobAnswer::Failed(message) => {
+                    if r.state == JobStateRow::Cancelled {
+                        self.for_daw_job_done(&r);
+                        self.dawproject_job_done(&r);
+                    }
                     if opens && self.opened_file {
                         // The store made this project for the file: it
                         // closes it, or shows the alert ("Import Failed").
@@ -517,6 +539,9 @@ impl DocumentModel {
                     } else if r.state != JobStateRow::Cancelled
                         // A MIDI export's failure goes back to its sheet.
                         && !self.midi_export_job_failed(&r, &message)
+                        // So do the other export sheets' failures.
+                        && !self.for_daw_job_failed(&r, &message)
+                        && !self.dawproject_job_failed(&r, &message)
                     {
                         self.alert = Some(AlertItem::new(failure_title(r.kind), message));
                     }
@@ -527,6 +552,11 @@ impl DocumentModel {
         // A job started while polling (none yet) would be in `self.jobs`.
         still.append(&mut self.jobs);
         self.jobs = still;
+        // An export waiting for a job goes once the list is settled.
+        if ended.iter().any(|k| crate::for_daw::blocks(*k, true)) {
+            self.for_daw_job_ended();
+            self.dawproject_job_ended();
+        }
         // The Bounce sheet closes once its job ended.
         self.bounce_poll();
     }

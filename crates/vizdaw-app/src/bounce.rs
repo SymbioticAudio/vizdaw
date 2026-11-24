@@ -19,6 +19,7 @@ use vizdaw_ffi::{
 };
 
 use crate::alerts::error_message;
+use crate::audio_format::{AudioFormat, AudioFormatChoices};
 use crate::document::DocumentModel;
 use crate::formats::FALLBACK_FORMAT;
 use crate::session::DocSession;
@@ -37,16 +38,11 @@ pub const STEMS_CAPTION: &str =
 pub const TIME_SELECTION_ONLY: &str = "Time selection only";
 pub const ADD_TO_PROJECT: &str = "Add to project";
 pub const ALSO_WRITE_FILES: &str = "Also write the files";
-/// The format rows' labels.
-pub const FORMAT: &str = "Format";
-pub const BITS: &str = "Bits";
-pub const RATE: &str = "Rate";
-pub const DITHER: &str = "Dither";
-/// The rate picker's last item.
-pub const OTHER: &str = "Other\u{2026}";
-/// The "Other…" field's placeholder and accessibility label.
-pub const OTHER_PLACEHOLDER: &str = "Rate (Hz)";
-pub const OTHER_LABEL: &str = "Other rate in Hz, 8000 to 384000";
+/// The format rows, shared with Export for Another DAW.
+pub use crate::audio_format::{
+    BITS, CONTAINERS, DEPTHS, DITHER, FORMAT, OTHER, OTHER_LABEL, OTHER_PLACEHOLDER, OTHER_RATES,
+    RATE, RATES, rate_title,
+};
 /// The buttons.
 pub const CANCEL: &str = "Cancel";
 pub const BOUNCE: &str = "Bounce";
@@ -54,29 +50,6 @@ pub const BOUNCE: &str = "Bounce";
 pub const FAILED: &str = "Bounce Failed";
 /// The sheet's error with no sequence shown.
 pub const NO_SEQUENCE: &str = "No sequence is shown.";
-
-/// The six project rates; "Other…" takes 8,000–384,000.
-pub const RATES: [u32; 6] = [44_100, 48_000, 88_200, 96_000, 176_400, 192_000];
-/// The "Other…" field's range.
-pub const OTHER_RATES: std::ops::RangeInclusive<u32> = 8_000..=384_000;
-
-/// The Format picker's items.
-pub const CONTAINERS: [(ContainerRow, &str); 3] = [
-    (ContainerRow::Wav, "WAV"),
-    (ContainerRow::Aiff, "AIFF"),
-    (ContainerRow::Caf, "CAF"),
-];
-/// The Bits picker's items.
-pub const DEPTHS: [(BitDepthRow, &str); 3] = [
-    (BitDepthRow::Int16, "16-bit"),
-    (BitDepthRow::Int24, "24-bit"),
-    (BitDepthRow::Float32, "32-bit float"),
-];
-
-/// A Rate item's title: "44100 Hz".
-pub fn rate_title(rate: u32) -> String {
-    format!("{rate} Hz")
-}
 
 /// The file extension a mix in `c` is written with (an AIFF writes
 /// `.aif`).
@@ -150,28 +123,42 @@ impl Default for BounceChoices {
 impl BounceChoices {
     /// The Rate picker's value: a listed rate, or 0 for "Other…".
     pub fn rate_choice(&self) -> u32 {
-        if self.other_rate { 0 } else { self.rate }
+        self.audio_format().rate_choice()
     }
 
     /// Chooses a listed rate, or "Other…" (0), which keeps the rate.
     pub fn set_rate_choice(&mut self, choice: u32) {
-        if choice == 0 {
-            self.other_rate = true;
-        } else {
-            self.other_rate = false;
-            self.rate = choice;
-        }
+        self.edit_audio_format(&|f| f.set_rate_choice(choice));
     }
 
     /// The "Other…" field's value, clamped to 8,000–384,000.
     pub fn set_other_rate(&mut self, hz: i64) {
-        let (lo, hi) = (*OTHER_RATES.start(), *OTHER_RATES.end());
-        self.rate = hz.clamp(i64::from(lo), i64::from(hi)) as u32;
+        self.edit_audio_format(&|f| f.set_other_rate(hz));
     }
 
     /// What the sheet asks for: a file or folder, or nothing (add only).
     pub fn needs_destination(&self) -> bool {
         !self.add_to_project || self.write_files
+    }
+}
+
+impl AudioFormatChoices for BounceChoices {
+    fn audio_format(&self) -> AudioFormat {
+        AudioFormat {
+            container: self.container,
+            depth: self.depth,
+            rate: self.rate,
+            other_rate: self.other_rate,
+            dither: self.dither,
+        }
+    }
+
+    fn set_audio_format(&mut self, f: AudioFormat) {
+        self.container = f.container;
+        self.depth = f.depth;
+        self.rate = f.rate;
+        self.other_rate = f.other_rate;
+        self.dither = f.dither;
     }
 }
 
@@ -293,15 +280,9 @@ impl DocumentModel {
         b.choices = BounceChoices {
             source: Source::Mix,
             stems: strips.iter().map(|s| s.id).collect(),
-            use_selection: false,
-            container: ContainerRow::Wav,
-            depth: f.depth,
-            rate: f.sample_rate,
-            other_rate: !RATES.contains(&f.sample_rate),
-            dither: f.depth == BitDepthRow::Int16,
-            add_to_project: false,
-            write_files: true,
+            ..BounceChoices::default()
         };
+        b.choices.set_audio_format(AudioFormat::for_project(f));
         b.strips = strips;
         b.job = None;
         b.warning = None;
@@ -363,7 +344,7 @@ impl DocumentModel {
             container: c.container,
             depth: c.depth,
             rate: c.rate,
-            dither: c.depth != BitDepthRow::Float32 && c.dither,
+            dither: c.audio_format().sent_dither(),
             path: path.map(str::to_owned),
             add_to_project: c.add_to_project,
             replace: c.source == Source::Mix && replace,

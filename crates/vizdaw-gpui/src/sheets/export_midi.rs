@@ -437,7 +437,7 @@ fn picker(
 
 /// The dry run's report (Swift `WontTransfer`): its groups and lines,
 /// `Everything transfers.`, or the spinner while it runs.
-fn wont_transfer(
+pub(crate) fn wont_transfer(
     report: Option<&ReportRow>,
     checking: bool,
     scope: &mut RegistryScope,

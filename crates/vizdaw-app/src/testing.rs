@@ -315,6 +315,9 @@ struct Files {
     /// The dry-run reports by call name.
     reports: HashMap<String, ReportRow>,
     for_daw_check: Option<ForDawCheckRow>,
+    /// Every `export_for_daw_check(req)` and `export_dawproject_check(req)`, in order.
+    for_daw_checks: Vec<ForDawRequestRow>,
+    dawproject_checks: Vec<DawprojectExportRequestRow>,
     midi_info: HashMap<String, MidiFileInfoRow>,
     clip_names: Option<ClipNamesRow>,
     /// Every MIDI export dry run and clip names question, in order.
@@ -1062,6 +1065,16 @@ impl FakeSession {
     /// What `export_midi_clip_names` answers (default: none).
     pub fn set_clip_names(&self, row: ClipNamesRow) {
         self.st().files.clip_names = Some(row);
+    }
+
+    /// Every `export_for_daw_check(req)`, in order.
+    pub fn for_daw_checks(&self) -> Vec<ForDawRequestRow> {
+        self.st().files.for_daw_checks.clone()
+    }
+
+    /// Every `export_dawproject_check(req)`, in order.
+    pub fn dawproject_checks(&self) -> Vec<DawprojectExportRequestRow> {
+        self.st().files.dawproject_checks.clone()
     }
 
     /// Every `export_midi_check(req)`, in order.
@@ -2243,8 +2256,9 @@ impl DocSession for FakeSession {
             JobRequest::ForDaw(req),
         )
     }
-    fn export_for_daw_check(&self, _req: ForDawRequestRow) -> Result<ForDawCheckRow, VizError> {
+    fn export_for_daw_check(&self, req: ForDawRequestRow) -> Result<ForDawCheckRow, VizError> {
         let mut s = self.st();
+        s.files.for_daw_checks.push(req);
         Self::read(&mut s, "export_for_daw_check")?;
         s.files
             .for_daw_check
@@ -2263,8 +2277,9 @@ impl DocSession for FakeSession {
     }
     fn export_dawproject_check(
         &self,
-        _req: DawprojectExportRequestRow,
+        req: DawprojectExportRequestRow,
     ) -> Result<ReportRow, VizError> {
+        self.st().files.dawproject_checks.push(req);
         self.check_report("export_dawproject_check")
     }
     fn import_dawproject(&self, req: DawprojectImportRequestRow) -> Result<u64, VizError> {

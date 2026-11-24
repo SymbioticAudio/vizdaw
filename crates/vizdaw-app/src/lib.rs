@@ -3,13 +3,16 @@
 
 pub mod alerts;
 pub mod arrangement;
+pub mod audio_format;
 pub mod audition;
 pub mod banners;
 pub mod bounce;
 pub mod bounce_commands;
 pub mod commands;
+pub mod dawproject;
 pub mod document;
 pub mod editor;
+pub mod for_daw;
 pub mod formats;
 pub mod interchange;
 pub mod interchange_commands;
