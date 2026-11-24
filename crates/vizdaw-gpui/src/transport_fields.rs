@@ -8,7 +8,11 @@
 //! value in use again. While a field edits it is the document's
 //! "transport" text-editing owner, so the bare transport keys wait.
 
-use gpui::{AppContext, Context, Entity, Focusable, Subscription, Window};
+use std::cell::Cell;
+use std::rc::Rc;
+
+use gpui::{AppContext, Bounds, Context, Entity, Focusable, Pixels, Point, Subscription, Window};
+use vizdaw_app::record::RecordModel;
 use vizdaw_app::transport_fields::{self, TEXT_OWNER, TransportField};
 
 use crate::shell::DocumentWindow;
@@ -23,6 +27,9 @@ pub struct TransportFields {
     editing: Option<Editing>,
     /// The fields drawn last frame, in bar order.
     shown: Vec<TransportField>,
+    /// Where the bar drew Record last frame (Swift `RecordButtons`): a
+    /// press on it with a punch draft open keeps the edit.
+    pub(crate) record_button: Rc<Cell<Option<Bounds<Pixels>>>>,
 }
 
 struct Editing {
@@ -40,6 +47,7 @@ impl TransportFields {
             inputs,
             editing: None,
             shown: TransportField::ALL.to_vec(),
+            record_button: Rc::default(),
         }
     }
 
@@ -136,6 +144,30 @@ impl DocumentWindow {
             window.focus(&self.focus_handle(cx), cx);
         }
         cx.notify();
+    }
+
+    /// A press at `at` outside the field being edited: it ends the edit
+    /// (cancelling), unless it is on Record with a punch draft open, which
+    /// keeps it so Record refuses and Return still sets the punch (Swift
+    /// `handleMouseDown`, `RecordModel.closeAllowed`).
+    pub(crate) fn press_outside_field(
+        &mut self,
+        f: TransportField,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let on_record = self
+            .transport_fields
+            .record_button
+            .get()
+            .is_some_and(|b| b.contains(&at));
+        let draft = self
+            .read_model(cx, |d| d.has_open_punch_draft())
+            .unwrap_or(false);
+        if RecordModel::close_allowed(on_record, draft) {
+            self.end_field(f, false, window, cx);
+        }
     }
 
     /// The field key (P, E): `f` takes the keyboard with its text

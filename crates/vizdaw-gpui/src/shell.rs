@@ -59,7 +59,7 @@ use crate::piano_roll::{PianoRoll, RollState};
 use crate::registry::{RegistryScope, SharedRegistry};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::track_headers::{HeadersState, Rename, TrackHeaders};
-use crate::transport_bar::{self, BarState, FaultsState, Plan, colors};
+use crate::transport_bar::{self, BarState, FaultsState, Plan, RecordBar, colors};
 use crate::transport_fields::TransportFields;
 
 /// How long a status text shows (Swift `StatusLine`).
@@ -646,6 +646,23 @@ impl DocumentWindow {
     /// The bar's Loop button; a refusal is the alert "Loop Failed".
     pub(crate) fn toggle_loop(&mut self, cx: &mut Context<Self>) {
         self.with_model(cx, DocumentModel::toggle_loop);
+    }
+
+    /// The bar's Record (Swift `pressRecord`): the model's order, a
+    /// refusal in the status line; the poll follows the pass.
+    pub(crate) fn press_record(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.with_model(cx, DocumentModel::press_record);
+        self.after_transport(window, cx);
+    }
+
+    /// Replace/Overdub, on the bar or in »: `transport.overdub`.
+    pub(crate) fn press_record_mode(&mut self, cx: &mut Context<Self>) {
+        self.with_model(cx, DocumentModel::press_record_mode);
+    }
+
+    /// Count-in, on the bar or in »: off, or back to its last bars.
+    pub(crate) fn toggle_count_in(&mut self, cx: &mut Context<Self>) {
+        self.with_model(cx, |d| d.record_mut().toggle_count_in());
     }
 
     pub(crate) fn toggle_more(&mut self, cx: &mut Context<Self>) {
@@ -1638,19 +1655,7 @@ impl DocumentWindow {
             let d = s.store.document(doc);
             (
                 d.map(crate::app_state::mixer_title).unwrap_or_default(),
-                s.readout(doc).zip(d).map(|(readout, d)| BarState {
-                    readout,
-                    can_play: s.can_play(doc),
-                    has_sequence: d.selected_seq().is_some(),
-                    looping: d.looping(),
-                    field_texts: TransportField::ALL
-                        .into_iter()
-                        .map(|f| (f, fields_model::field_text(d, f)))
-                        .collect(),
-                    main: d.layout().views.main,
-                    panes: PaneSide::ALL.map(|side| d.layout().views.current().pane(side).shown),
-                    faults: None,
-                }),
+                d.and_then(|d| bar_state(s, doc, d, false)),
                 menus::menu_model(d, &s.keymap),
                 s.store.front().is_none_or(|f| f == doc),
                 s.transport_layout(),
@@ -1660,7 +1665,7 @@ impl DocumentWindow {
             &layout,
             f32::from(window.viewport_size().width),
             false,
-            false,
+            bar.as_ref().map(BarState::shows).unwrap_or_default(),
         );
         self.set_shown_fields(
             if bar.is_some() {
@@ -1765,23 +1770,7 @@ impl Render for DocumentWindow {
             (
                 s.title(doc).unwrap_or_default(),
                 s.is_dirty(doc),
-                s.readout(doc).zip(d).map(|(readout, d)| BarState {
-                    readout,
-                    can_play: s.can_play(doc),
-                    has_sequence: d.selected_seq().is_some(),
-                    looping: d.looping(),
-                    field_texts: TransportField::ALL
-                        .into_iter()
-                        .map(|f| (f, fields_model::field_text(d, f)))
-                        .collect(),
-                    main: d.layout().views.main,
-                    panes: PaneSide::ALL.map(|side| d.layout().views.current().pane(side).shown),
-                    faults: (d.has_faults() || d.has_report()).then(|| FaultsState {
-                        lines: d.fault_lines(),
-                        error: d.has_faults(),
-                        open: d.shows_faults(),
-                    }),
-                }),
+                d.and_then(|d| bar_state(s, doc, d, true)),
                 menus::menu_model(s.store.document(doc), &s.keymap),
                 s.store.front().is_none_or(|f| f == doc),
                 d.map(|d| d.lanes().to_vec()).unwrap_or_default(),
@@ -1863,7 +1852,7 @@ impl Render for DocumentWindow {
         let plan = Plan::new(
             &layout,
             f32::from(window.viewport_size().width),
-            faults.is_some(),
+            bar.as_ref().map(BarState::shows).unwrap_or_default(),
         );
         // Faults went (its lines cleared): so does its popover, after the
         // draw (nothing shows the flag meanwhile).
@@ -2012,4 +2001,33 @@ fn held_key(k: &Keystroke) -> Option<bool> {
         "." | ">" => Some(true),
         _ => None,
     }
+}
+
+/// What `doc`'s bar draws, in its document window (`document_window`) or
+/// its Mixer window, which has no Faults.
+fn bar_state(
+    s: &AppState,
+    doc: DocId,
+    d: &DocumentModel,
+    document_window: bool,
+) -> Option<BarState> {
+    Some(BarState {
+        readout: s.readout(doc)?,
+        can_play: s.can_play(doc),
+        has_sequence: d.selected_seq().is_some(),
+        looping: d.looping(),
+        field_texts: TransportField::ALL
+            .into_iter()
+            .map(|f| (f, fields_model::field_text(d, f)))
+            .collect(),
+        main: d.layout().views.main,
+        panes: PaneSide::ALL.map(|side| d.layout().views.current().pane(side).shown),
+        faults: (document_window && (d.has_faults() || d.has_report())).then(|| FaultsState {
+            lines: d.fault_lines(),
+            error: d.has_faults(),
+            open: d.shows_faults(),
+        }),
+        record: RecordBar::of(d),
+        summary: d.step_summary(),
+    })
 }

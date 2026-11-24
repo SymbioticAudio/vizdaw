@@ -699,3 +699,343 @@ fn faults_going_closes_its_popover(cx: &mut TestAppContext) {
     s.poll_until("no Faults", |s| !s.has("button", "Faults"));
     assert!(!s.faults_open());
 }
+
+// Slice 8b Task 2: the Record part of the cluster, Replace/Overdub,
+// Count-in and the Step Entry summary.
+
+/// The demo with Song (3)'s two tracks armed: Groove a stereo audio
+/// input, Chords a MIDI one.
+fn armed_fake() -> FakeSession {
+    use vizdaw_app::testing::lane_row;
+    use vizdaw_ffi::edit::LaneInputRow;
+    let f = demo_fake();
+    let mut groove = lane_row(30, "Groove", false);
+    groove.arm = true;
+    groove.input = Some(LaneInputRow::Audio {
+        first: 0,
+        stereo: true,
+        return_of: None,
+    });
+    let mut chords = lane_row(31, "Chords", false);
+    chords.arm = true;
+    chords.input = Some(LaneInputRow::Midi {
+        port: None,
+        channel: None,
+    });
+    f.set_lanes(3, vec![groove, chords]);
+    f
+}
+
+/// Bytes a second the armed stereo track records (48 kHz, 24-bit).
+const STEREO_RATE: u64 = 288_000;
+
+impl Setup {
+    fn update_model(&mut self, f: impl FnOnce(&mut vizdaw_app::DocumentModel)) {
+        let doc = self.doc();
+        self.app.update(&mut self.cx, |a, cx| {
+            a.store.with_document(doc, |d, _| f(d));
+            cx.notify();
+        });
+        self.cx.run_until_parked();
+    }
+
+    /// Every window's bar is `items` (`ui.set_transport_bar`'s text).
+    fn set_bar(&mut self, items: &str) {
+        let bar = vizdaw_app::transport_bar::TransportLayout::parse(items).unwrap();
+        self.app.update(&mut self.cx, |a, cx| {
+            a.prefs.set_transport_bar(&bar).unwrap();
+            cx.notify();
+        });
+        self.cx.run_until_parked();
+    }
+
+    fn enabled(&mut self, role: &str, label: &str) -> bool {
+        self.node(role, label)
+            .unwrap_or_else(|| panic!("no {role} {label:?} in {:?}", self.tree()))["enabled"]
+            == true
+    }
+
+    fn recording(&mut self) -> bool {
+        self.with_doc(|d| d.record().is_recording())
+    }
+
+    /// A text node whose label starts with `prefix`.
+    fn text_starting(&mut self, prefix: &str) -> Option<String> {
+        self.tree()
+            .into_iter()
+            .filter(|n| n["role"] == "text")
+            .filter_map(|n| n["label"].as_str().map(String::from))
+            .find(|l| l.starts_with(prefix))
+    }
+}
+
+const RECORD_BAR: &str = "cluster,loop,replace_overdub,count_in,separator,summary,space,faults";
+
+/// The cluster's Record and the record items as the Swift bar names them
+/// (`V/RecordControls.swift:12-64`, `V/TransportItemViews.swift:182-205`).
+#[gpui::test]
+fn the_record_items_name_their_controls_as_the_swift_bar(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    // The standard bar: Record after Play, and Replace/Overdub, which a
+    // new document reads as Overdub (on).
+    assert!(s.enabled("button", "Record"), "{:?}", s.tree());
+    assert!(!s.has("button", "Stop Recording"));
+    assert_eq!(s.value("button", "Record mode: Overdub"), "on");
+    let labels: Vec<String> = s
+        .tree()
+        .into_iter()
+        .filter(|n| n["role"] == "button")
+        .filter_map(|n| n["label"].as_str().map(String::from))
+        .collect();
+    let at = |l: &str| labels.iter().position(|x| x == l).unwrap();
+    assert_eq!(
+        at("Record"),
+        at("Play") + 1,
+        "Record follows Play: {labels:?}"
+    );
+    assert!(
+        !s.has("button", "More Transport Items"),
+        "the bar still fits"
+    );
+    s.set_bar(RECORD_BAR);
+    assert_eq!(s.value("button", "Count-in"), "off");
+    assert!(!s.has("text", "Count-in"), "no count-in readout while idle");
+    assert_eq!(s.text_starting("Step Entry"), None, "no summary while off");
+    assert_eq!(s.text_starting("Pass "), None);
+    // The texts the Swift views show and help.
+    use vizdaw_gpui::transport_bar as bar;
+    assert_eq!(bar::RECORD_HELP, "Record the armed tracks (R)");
+    assert_eq!(bar::STOP_RECORDING_HELP, "Stop recording (R)");
+    assert_eq!(
+        bar::REMAINING_HELP,
+        "Recording time left on the project's disk for the armed audio tracks"
+    );
+    assert_eq!(
+        bar::COUNT_IN_HELP,
+        "Count in before recording (the bars are in Record Options)"
+    );
+    assert_eq!(
+        vizdaw_app::record::MODE_HELP,
+        "Replace removes the notes in the recorded range; Overdub keeps them (transport.overdub)"
+    );
+}
+
+/// Separators are drawn between items (and never at an edge or next to
+/// »), and an absent summary takes no room.
+#[gpui::test]
+fn separators_are_drawn(_cx: &mut TestAppContext) {
+    use vizdaw_app::transport_bar::TransportLayout;
+    use vizdaw_gpui::transport_bar::{Piece, Plan, Shows};
+    let layout = TransportLayout::parse(RECORD_BAR).unwrap();
+    let plan = Plan::new(&layout, WIDE, Shows::default());
+    assert!(
+        plan.shown().contains(&Piece::Separator),
+        "{:?}",
+        plan.shown()
+    );
+    assert!(!plan.shown().contains(&Piece::Summary));
+    assert!(!plan.folded().contains(&Piece::Summary));
+    let shows = Shows {
+        summary: true,
+        ..Shows::default()
+    };
+    let plan = Plan::new(&layout, WIDE, shows);
+    assert!(plan.shown().contains(&Piece::Summary));
+    let lone = TransportLayout::parse("cluster,separator").unwrap();
+    assert_eq!(
+        Plan::new(&lone, WIDE, Shows::default()).shown(),
+        vec![Piece::Cluster],
+        "not at an edge"
+    );
+}
+
+/// Record stays enabled while a field types (a click is no keystroke),
+/// refuses into the status line, and with a punch draft open the field
+/// keeps the keyboard.
+#[gpui::test]
+fn record_is_enabled_while_a_field_types_and_refuses_into_the_status_line(cx: &mut TestAppContext) {
+    use vizdaw_app::transport_fields::TransportField;
+    let mut s = setup(cx, armed_fake());
+    s.click("textfield", "Position");
+    assert!(s.focused("Position") && !s.keys_enabled());
+    assert!(s.enabled("button", "Record"));
+    // A typed punch time (the bar's Punch In, slice 8b Task 4) refuses
+    // Record, and the press leaves the edit and its keyboard alone.
+    s.update_model(|d| d.bar_punch_typed(TransportField::PunchIn, "5"));
+    s.click("button", "Record");
+    assert_eq!(
+        s.status().as_deref(),
+        Some("Press Return to set the punch, or Esc to discard it.")
+    );
+    assert!(s.focused("Position"), "the field keeps the keyboard");
+    assert!(!s.keys_enabled());
+    assert_eq!(s.fake.count("record(3)"), 0);
+    s.update_model(|d| d.bar_punch_ended());
+    // Step entry on refuses Record, in Swift's words.
+    s.keys("escape");
+    s.update_model(|d| d.start_step_entry().unwrap());
+    s.click("button", "Record");
+    assert_eq!(
+        s.status().as_deref(),
+        Some("Step entry is on: turn it off to record.")
+    );
+    assert_eq!(s.fake.count("record(3)"), 0);
+    s.update_model(|d| d.stop_step_entry());
+    // With no draft, a press ends the edit, then records.
+    s.click("textfield", "Position");
+    s.keys("7");
+    s.click("button", "Record");
+    assert!(!s.focused("Position") && s.keys_enabled());
+    assert!(s.locates().is_empty(), "the typed position was cancelled");
+    assert_eq!(s.fake.count("record(3)"), 1);
+    assert!(s.recording());
+}
+
+/// Stop Recording shows while a pass records and stops it; the pass text
+/// and the time left come from the record state; Count-in shows while
+/// counting in (the transport reads `playing: false`).
+#[gpui::test]
+fn stop_recording_shows_the_pass_and_stops_it(cx: &mut TestAppContext) {
+    let mut s = setup(cx, armed_fake());
+    s.fake
+        .set_free_bytes(Some(STEREO_RATE * 600 + vizdaw_app::record::STOP_BYTES));
+    s.update_model(|d| {
+        d.refresh_project_info();
+        d.refresh_record(true);
+    });
+    assert_eq!(s.text_starting("10 min"), Some("10 min left".into()));
+    s.click("button", "Loop");
+    s.click("button", "Record");
+    assert!(s.recording());
+    assert!(s.has("button", "Stop Recording"), "{:?}", s.tree());
+    assert!(!s.has("button", "Record"));
+    assert_eq!(s.text_starting("Pass "), Some("Pass 1".into()));
+    s.fake.next_pass();
+    s.update_model(|d| d.press_pass(true).unwrap());
+    s.fake.next_pass();
+    s.update_model(|d| d.press_pass(false).unwrap());
+    assert_eq!(
+        s.text_starting("Pass "),
+        Some("Pass 3 \u{b7} 1 kept \u{b7} 1 discarded".into())
+    );
+    s.click("button", "Stop Recording");
+    assert!(!s.recording());
+    assert_eq!(s.fake.count("stop"), 1, "{:?}", s.fake.calls());
+    assert!(s.has("button", "Record"));
+    assert_eq!(s.text_starting("Pass "), None);
+    // Counting in: Count-in in the record colour, Stop Recording.
+    s.click("button", "Loop");
+    s.update_model(|d| d.record_mut().set_count_in(1));
+    s.click("button", "Record");
+    assert!(s.with_doc(|d| d.counting_in() && !d.is_playing()));
+    assert!(s.has("text", "Count-in"), "{:?}", s.tree());
+    assert!(s.has("button", "Stop Recording"));
+    s.fake.count_in_done();
+    s.poll_until("no count-in", |s| !s.has("text", "Count-in"));
+    assert!(s.has("button", "Stop Recording"));
+}
+
+/// Replace/Overdub runs `transport.overdub` and is disabled while
+/// recording; Count-in goes off and back to its last bars.
+#[gpui::test]
+fn replace_overdub_and_count_in_switch_the_record_modes(cx: &mut TestAppContext) {
+    let mut s = setup(cx, armed_fake());
+    s.set_bar(RECORD_BAR);
+    s.click("button", "Record mode: Overdub");
+    assert!(!s.with_doc(|d| d.layout().transport.overdub));
+    assert_eq!(s.value("button", "Record mode: Replace"), "off");
+    s.click("button", "Record mode: Replace");
+    assert!(s.with_doc(|d| d.layout().transport.overdub));
+    // Count-in: off, then its last bars.
+    s.update_model(|d| {
+        d.record_mut().set_count_in(3);
+        d.record_mut().set_count_in(0);
+    });
+    assert_eq!(s.value("button", "Count-in"), "off");
+    s.click("button", "Count-in");
+    assert_eq!(s.with_doc(|d| d.record().count_in_bars()), 3);
+    assert_eq!(s.value("button", "Count-in"), "on");
+    s.click("button", "Count-in");
+    assert_eq!(s.with_doc(|d| d.record().count_in_bars()), 0);
+    // Recording: both are disabled, and a press does nothing.
+    s.click("button", "Record");
+    assert!(s.recording());
+    assert!(!s.enabled("button", "Record mode: Overdub"));
+    assert!(!s.enabled("button", "Count-in"));
+    s.click("button", "Record mode: Overdub");
+    s.click("button", "Count-in");
+    assert!(s.with_doc(|d| d.layout().transport.overdub));
+    assert_eq!(s.with_doc(|d| d.record().count_in_bars()), 0);
+}
+
+/// The Step Entry summary follows step entry's value, dot and triplet.
+#[gpui::test]
+fn the_step_summary_follows_the_value(cx: &mut TestAppContext) {
+    use vizdaw_ffi::step::StepInputRow;
+    let mut s = setup(cx, demo_fake());
+    s.set_bar(RECORD_BAR);
+    s.update_model(|d| d.start_step_entry().unwrap());
+    let summary = s.text_starting("Step Entry").expect("a summary");
+    assert!(
+        summary.starts_with("Step Entry \u{b7} Groove \u{b7} "),
+        "{summary}"
+    );
+    let value = summary.rsplit(" \u{b7} ").next().unwrap().to_owned();
+    s.update_model(|d| d.step_input(StepInputRow::Dot).unwrap());
+    assert_eq!(
+        s.text_starting("Step Entry"),
+        Some(format!("Step Entry \u{b7} Groove \u{b7} {value} dotted"))
+    );
+    s.update_model(|d| d.step_input(StepInputRow::Triplet).unwrap());
+    assert_eq!(
+        s.text_starting("Step Entry"),
+        Some(format!(
+            "Step Entry \u{b7} Groove \u{b7} {value} dotted triplet"
+        ))
+    );
+    s.update_model(|d| d.stop_step_entry());
+    assert_eq!(s.text_starting("Step Entry"), None);
+}
+
+/// Folded, the items are Swift's » entries
+/// (`M/TransportItemEntries.swift:111-123`): Replace/Overdub and Count-in
+/// are check actions, disabled while recording; the summary is a text.
+#[gpui::test]
+fn folded_record_items_are_swifts_entries_in_more(cx: &mut TestAppContext) {
+    let mut s = setup(cx, armed_fake());
+    s.set_bar("cluster,loop,bar,time,tempo,signature,replace_overdub,count_in,summary");
+    s.update_model(|d| d.start_step_entry().unwrap());
+    let summary = s.text_starting("Step Entry").expect("a summary");
+    s.resize(600.);
+    assert!(!s.has("button", "Record mode: Overdub"), "folds");
+    assert!(s.has("button", "Record"), "the cluster never folds");
+    s.click("button", "More Transport Items");
+    let item = s.node("menuitem", "Replace/Overdub").expect("an entry");
+    assert_eq!(
+        (item["enabled"].clone(), item["selected"].clone()),
+        (true.into(), true.into())
+    );
+    let item = s.node("menuitem", "Count-in").expect("an entry");
+    assert_eq!(item["enabled"], true);
+    assert_eq!(item.get("selected"), None, "off");
+    let item = s.node("menuitem", "Step Entry").expect("an entry");
+    assert_eq!(item["enabled"], false, "a text");
+    assert_eq!(item["value"], format!("Step Entry: {summary}"));
+    // Choosing an entry acts as the button and closes the menu.
+    s.click("menuitem", "Replace/Overdub");
+    assert!(!s.has("menuitem", "Count-in"));
+    assert!(!s.with_doc(|d| d.layout().transport.overdub));
+    s.click("button", "More Transport Items");
+    s.click("menuitem", "Count-in");
+    assert!(s.with_doc(|d| d.record().count_in_bars() > 0));
+    // Recording: both are disabled.
+    s.update_model(|d| d.stop_step_entry());
+    s.click("button", "Record");
+    assert!(s.recording());
+    s.click("button", "More Transport Items");
+    assert_eq!(
+        s.node("menuitem", "Replace/Overdub").unwrap()["enabled"],
+        false
+    );
+    assert_eq!(s.node("menuitem", "Count-in").unwrap()["enabled"], false);
+}

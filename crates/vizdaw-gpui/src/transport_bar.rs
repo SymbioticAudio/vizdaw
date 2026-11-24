@@ -11,8 +11,9 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Context, Div, ElementId, Focusable, InteractiveElement, IntoElement, MouseButton,
     MouseDownEvent, ParentElement, Rgba, Stateful, StatefulInteractiveElement, Styled, Window,
-    anchored, deferred, div, point, px, rgb,
+    anchored, canvas, deferred, div, point, px, rgb,
 };
+use vizdaw_app::DocumentModel;
 use vizdaw_app::editor::{MainView, PaneSide};
 use vizdaw_app::transport::{ReadoutBox, TransportReadout};
 use vizdaw_app::transport_bar::{Fit, ItemKind, TransportItem, TransportLayout, fit};
@@ -41,6 +42,67 @@ pub struct BarState {
     pub panes: [bool; 3],
     /// Faults, while there are faults or a report (document window only).
     pub faults: Option<FaultsState>,
+    /// The cluster's Record part and the record items.
+    pub record: RecordBar,
+    /// The Step Entry summary, while step entry is on.
+    pub summary: Option<String>,
+}
+
+/// What the Record part of the cluster, Replace/Overdub and Count-in draw
+/// (Swift `RecordClusterPart`, `ReplaceOverdubButton`, `CountInItem`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecordBar {
+    /// A pass records (counting in too): Stop Recording, in red.
+    pub recording: bool,
+    /// Record is enabled (a field typing does not turn it off).
+    pub enabled: bool,
+    pub counting_in: bool,
+    /// The loop pass text (`Pass N · K kept · D discarded`).
+    pub pass: Option<String>,
+    /// The time left on the project's disk.
+    pub remaining: Option<String>,
+    /// `Replace` or `Overdub`.
+    pub mode_title: &'static str,
+    pub overdub: bool,
+    /// Count-in is on (bars > 0).
+    pub count_in: bool,
+}
+
+impl RecordBar {
+    pub fn of(d: &DocumentModel) -> RecordBar {
+        RecordBar {
+            recording: d.record().is_recording(),
+            enabled: d.record_button_enabled(),
+            counting_in: d.counting_in(),
+            pass: d.record_pass_text(),
+            remaining: d.record_remaining_text(),
+            mode_title: d.record_mode_title(),
+            overdub: !d.record_replaces(),
+            count_in: d.record().count_in_bars() > 0,
+        }
+    }
+
+    /// About the width the readouts after Record take, gaps included,
+    /// so what follows the cluster folds rather than being pushed out.
+    fn readouts_width(&self) -> f32 {
+        let text = |t: &str, per_char: f32| CLUSTER_GAP + per_char * t.chars().count() as f32;
+        let mut w = 0.;
+        if self.counting_in {
+            w += text(COUNTING_IN, READOUT_CHAR_SM);
+        }
+        if let Some(p) = &self.pass {
+            w += text(p, READOUT_CHAR_MONO);
+        }
+        if let Some(t) = &self.remaining {
+            w += text(t, READOUT_CHAR_XS);
+        }
+        w
+    }
+
+    /// The mode switch's accessibility label (Swift `modeLabel`).
+    fn mode_label(&self) -> String {
+        format!("Record mode: {}", self.mode_title)
+    }
 }
 
 /// What the Faults item draws (Swift `FaultsItem`).
@@ -54,6 +116,15 @@ pub struct FaultsState {
 }
 
 impl BarState {
+    /// Which of the now-and-then items are there.
+    pub fn shows(&self) -> Shows {
+        Shows {
+            faults: self.faults.is_some(),
+            summary: self.summary.is_some(),
+            cluster_readouts: self.record.readouts_width(),
+        }
+    }
+
     fn field_text(&self, f: TransportField) -> &str {
         self.field_texts
             .iter()
@@ -91,6 +162,17 @@ const LABEL_GAP: f32 = 4.;
 const HEIGHT: f32 = 36.;
 /// A Main View segment's width.
 const SEGMENT: f32 = 60.;
+/// Replace/Overdub's and Count-in's widths.
+const MODE: f32 = 72.;
+const COUNT_IN: f32 = 72.;
+/// The summary pill's widest ("Step Entry · <a long track name> · 1/16
+/// dotted triplet" in the caption size).
+const SUMMARY: f32 = 260.;
+/// About a character's width in the cluster's readouts (small, caption
+/// and the pass's monospaced caption).
+const READOUT_CHAR_SM: f32 = 8.;
+const READOUT_CHAR_XS: f32 = 7.;
+const READOUT_CHAR_MONO: f32 = 7.5;
 
 /// The Main View picker's label (Swift `MainViewItem`).
 pub const MAIN_VIEW: &str = "Main View";
@@ -135,7 +217,35 @@ pub enum Piece {
     MainView,
     Panes,
     Faults,
+    ReplaceOverdub,
+    CountIn,
+    Summary,
+    Separator,
 }
+
+/// What shows only now and then: an item that is absent takes no room
+/// (Swift: a zero-width item is neither shown nor folded).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Shows {
+    /// Faults: there are faults or a report.
+    pub faults: bool,
+    /// The Step Entry summary: step entry is on.
+    pub summary: bool,
+    /// The width the cluster's readouts after Record take (count-in, the
+    /// pass, the time left), gaps included.
+    pub cluster_readouts: f32,
+}
+
+/// The Record button's help (Swift `V/RecordControls.swift:27`).
+pub const RECORD_HELP: &str = "Record the armed tracks (R)";
+pub const STOP_RECORDING_HELP: &str = "Stop recording (R)";
+/// The time left's help (`V/RecordControls.swift:46`).
+pub const REMAINING_HELP: &str =
+    "Recording time left on the project's disk for the armed audio tracks";
+/// Count-in's help (`V/TransportItemViews.swift:188`).
+pub const COUNT_IN_HELP: &str = "Count in before recording (the bars are in Record Options)";
+/// The readout while counting in (`V/RecordControls.swift:37`).
+pub const COUNTING_IN: &str = "Count-in";
 
 impl Piece {
     fn of(item: &TransportItem) -> Option<Piece> {
@@ -152,6 +262,10 @@ impl Piece {
             TransportItem::MainView => Piece::MainView,
             TransportItem::Panes => Piece::Panes,
             TransportItem::Faults => Piece::Faults,
+            TransportItem::ReplaceOverdub => Piece::ReplaceOverdub,
+            TransportItem::CountIn => Piece::CountIn,
+            TransportItem::Summary => Piece::Summary,
+            TransportItem::Separator => Piece::Separator,
             _ => return None,
         })
     }
@@ -161,7 +275,8 @@ impl Piece {
     /// folds the same way whatever is playing.
     pub fn width(self) -> f32 {
         match self {
-            Piece::Cluster => 4. * CLUSTER_BUTTON + 3. * CLUSTER_GAP,
+            // Return to Start, Rewind, Fast Forward, Play/Stop and Record.
+            Piece::Cluster => 5. * CLUSTER_BUTTON + 4. * CLUSTER_GAP,
             Piece::Loop => LOOP,
             Piece::Readout(b) => readout_width(b),
             Piece::Position => label_width(TransportField::Position) + LABEL_GAP + FIELD,
@@ -175,6 +290,10 @@ impl Piece {
             Piece::MainView => 2. * SEGMENT + 1.,
             Piece::Panes => 3. * CLUSTER_BUTTON + 2. * CLUSTER_GAP,
             Piece::Faults => CLUSTER_BUTTON,
+            Piece::ReplaceOverdub => MODE,
+            Piece::CountIn => COUNT_IN,
+            Piece::Summary => SUMMARY,
+            Piece::Separator => 1.,
         }
     }
 
@@ -193,6 +312,10 @@ impl Piece {
             Piece::MainView => MAIN_VIEW,
             Piece::Panes => "Pane Toggles",
             Piece::Faults => FAULTS,
+            Piece::ReplaceOverdub => "Replace/Overdub",
+            Piece::CountIn => "Count-in",
+            Piece::Summary => "Step Entry",
+            Piece::Separator => "Separator",
         }
     }
 
@@ -232,8 +355,8 @@ pub struct Plan {
 impl Plan {
     /// A document window's bar; Faults takes room only while it shows
     /// (`faults`).
-    pub fn new(layout: &TransportLayout, width: f32, faults: bool) -> Plan {
-        Plan::for_window(layout, width, true, faults)
+    pub fn new(layout: &TransportLayout, width: f32, shows: Shows) -> Plan {
+        Plan::for_window(layout, width, true, shows)
     }
 
     /// The bar of a document window (`document_window`) or of a Mixer
@@ -242,23 +365,31 @@ impl Plan {
         layout: &TransportLayout,
         width: f32,
         document_window: bool,
-        faults: bool,
+        shows: Shows,
     ) -> Plan {
         let pieces: Vec<Piece> = layout
             .items_for(document_window)
             .into_iter()
             .filter_map(Piece::of)
-            .filter(|p| faults || *p != Piece::Faults)
+            .filter(|p| match p {
+                Piece::Faults => shows.faults,
+                Piece::Summary => shows.summary,
+                _ => true,
+            })
             .collect();
         let widths: Vec<(f32, bool, ItemKind)> = pieces
             .iter()
             .map(|p| {
-                let kind = if *p == Piece::Space {
-                    ItemKind::Space
-                } else {
-                    ItemKind::Content
+                let kind = match p {
+                    Piece::Space => ItemKind::Space,
+                    Piece::Separator => ItemKind::Separator,
+                    _ => ItemKind::Content,
                 };
-                (p.width(), *p == Piece::Cluster, kind)
+                let width = match p {
+                    Piece::Cluster => p.width() + shows.cluster_readouts,
+                    _ => p.width(),
+                };
+                (width, *p == Piece::Cluster, kind)
             })
             .collect();
         let fit = fit(&widths, width - 2. * PADDING, GAP, CHEVRON);
@@ -386,6 +517,7 @@ fn hold_button(
 
 fn cluster(
     state: &BarState,
+    fields: &TransportFields,
     scope: &mut RegistryScope,
     cx: &mut Context<DocumentWindow>,
 ) -> AnyElement {
@@ -424,15 +556,209 @@ fn cluster(
     .when(state.can_play, |b| {
         b.on_click(cx.listener(|this, _, window, cx| this.play_stop(&PlayStop, window, cx)))
     });
-    div()
+    let mut row = div()
         .flex()
         .flex_row()
         .flex_none()
+        .items_center()
         .gap(px(CLUSTER_GAP))
         .child(ret)
         .child(rewind)
         .child(forward)
         .child(play)
+        .child(record_button(&state.record, fields, scope, cx));
+    row = record_readouts(&state.record, row, scope);
+    row.into_any_element()
+}
+
+/// Record (Swift `RecordClusterPart`): `Stop Recording` in the record
+/// colour while a pass records (counting in too). Enabled while a field
+/// types; its mouse-down does not take the keyboard (with a punch draft
+/// open the field keeps it), and a press is the R key's `press_record`,
+/// a refusal in the status line.
+fn record_button(
+    r: &RecordBar,
+    fields: &TransportFields,
+    scope: &mut RegistryScope,
+    cx: &mut Context<DocumentWindow>,
+) -> AnyElement {
+    let tokens = crate::strip_palette::tokens();
+    let (label, help) = if r.recording {
+        ("Stop Recording", STOP_RECORDING_HELP)
+    } else {
+        ("Record", RECORD_HELP)
+    };
+    let enabled = r.enabled;
+    let bounds = fields.record_button.clone();
+    let mut button = face("record", "\u{25cf}", enabled, colors::BUTTON)
+        .w(px(CLUSTER_BUTTON))
+        .child(scope.control("button", label, enabled))
+        // Where it is, so a field's edit knows a press on it.
+        .child(
+            canvas(move |b, _, _| bounds.set(Some(b)), |_, _, _, _| {})
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+        );
+    if r.recording {
+        button = button
+            .bg(rgb(tokens.state_record))
+            .text_color(rgb(colors::TEXT));
+    } else if enabled {
+        button = button.text_color(rgb(tokens.state_record));
+    }
+    let button = button.when(enabled, |b| {
+        b.on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+            .on_click(cx.listener(|this, _, window, cx| this.press_record(window, cx)))
+    });
+    crate::sheet_host::with_help(button, help.to_owned()).into_any_element()
+}
+
+/// The cluster's readouts after Record: `Count-in` (record colour) while
+/// counting in, the loop pass, and the time left.
+fn record_readouts(r: &RecordBar, mut row: Div, scope: &mut RegistryScope) -> Div {
+    let tokens = crate::strip_palette::tokens();
+    if r.counting_in {
+        row = row.child(
+            div()
+                .relative()
+                .flex_none()
+                .whitespace_nowrap()
+                .text_sm()
+                .text_color(rgb(tokens.state_record))
+                .child(COUNTING_IN)
+                .child(scope.control("text", COUNTING_IN, true)),
+        );
+    }
+    if let Some(p) = &r.pass {
+        row = row.child(
+            div()
+                .relative()
+                .flex_none()
+                .whitespace_nowrap()
+                .text_xs()
+                .font_family("Menlo")
+                .text_color(rgb(colors::TEXT))
+                .child(p.clone())
+                .child(scope.control("text", p, true)),
+        );
+    }
+    if let Some(t) = &r.remaining {
+        let text = div()
+            .id("record-remaining")
+            .relative()
+            .flex_none()
+            .whitespace_nowrap()
+            .text_xs()
+            .text_color(rgb(colors::DIM))
+            .child(t.clone())
+            .child(scope.control("text", t, true));
+        row = row.child(crate::sheet_host::with_help(
+            text,
+            REMAINING_HELP.to_owned(),
+        ));
+    }
+    row
+}
+
+/// Replace/Overdub (Swift `ReplaceOverdubButton`): `Replace` or
+/// `Overdub`, on for overdub; disabled while recording; a press runs
+/// `transport.overdub` (a refusal in the status line).
+fn replace_overdub(
+    r: &RecordBar,
+    scope: &mut RegistryScope,
+    cx: &mut Context<DocumentWindow>,
+) -> AnyElement {
+    let enabled = !r.recording;
+    let button = face(
+        "replace-overdub",
+        r.mode_title,
+        enabled,
+        if r.overdub {
+            colors::ON
+        } else {
+            colors::BUTTON
+        },
+    )
+    .w(px(MODE))
+    .child(scope.control_with(
+        "button",
+        &r.mode_label(),
+        enabled,
+        Some(if r.overdub { "on" } else { "off" }),
+        false,
+    ))
+    .when(enabled, |b| {
+        b.on_click(cx.listener(|this, _, _, cx| this.press_record_mode(cx)))
+    });
+    crate::sheet_host::with_help(button, vizdaw_app::record::MODE_HELP.to_owned())
+        .into_any_element()
+}
+
+/// Count-in (Swift `CountInItem`): on while it counts bars in; disabled
+/// while recording; a press goes off and back to its last bars.
+fn count_in(
+    r: &RecordBar,
+    scope: &mut RegistryScope,
+    cx: &mut Context<DocumentWindow>,
+) -> AnyElement {
+    let enabled = !r.recording;
+    let button = face(
+        "count-in",
+        "Count-in",
+        enabled,
+        if r.count_in {
+            colors::ON
+        } else {
+            colors::BUTTON
+        },
+    )
+    .w(px(COUNT_IN))
+    .child(scope.control_with(
+        "button",
+        "Count-in",
+        enabled,
+        Some(if r.count_in { "on" } else { "off" }),
+        false,
+    ))
+    .when(enabled, |b| {
+        b.on_click(cx.listener(|this, _, _, cx| this.toggle_count_in(cx)))
+    });
+    crate::sheet_host::with_help(button, COUNT_IN_HELP.to_owned()).into_any_element()
+}
+
+/// The Step Entry summary (Swift `StepSummaryItem`): an accent pill; its
+/// accessibility label is the text.
+fn summary(text: &str, scope: &mut RegistryScope) -> AnyElement {
+    let tokens = crate::strip_palette::tokens();
+    let [r, g, b] = [16, 8, 0].map(|s| ((tokens.accent >> s) & 0xff) as f32 / 255.);
+    div()
+        .relative()
+        .flex_none()
+        .max_w(px(SUMMARY))
+        .overflow_hidden()
+        .text_ellipsis()
+        .whitespace_nowrap()
+        .px_2()
+        .py(px(2.))
+        .rounded_sm()
+        .bg(Rgba { r, g, b, a: 0.18 })
+        .text_xs()
+        .text_color(rgb(colors::TEXT))
+        .child(text.to_owned())
+        .child(scope.control("text", text, true))
+        .into_any_element()
+}
+
+/// A separator: a thin line in the theme's separator colour.
+fn separator() -> AnyElement {
+    let tokens = crate::strip_palette::tokens();
+    div()
+        .flex_none()
+        .w(px(1.))
+        .h(px(18.))
+        .bg(rgb(tokens.surface_separator))
         .into_any_element()
 }
 
@@ -507,13 +833,13 @@ fn field(
         .overflow_hidden()
         .text_color(rgb(0x000000));
     let boxed = if editing {
-        boxed
-            .child(input)
-            .on_mouse_down_out(cx.listener(move |this, _, window, cx| {
+        boxed.child(input).on_mouse_down_out(cx.listener(
+            move |this, e: &MouseDownEvent, window, cx| {
                 // A press elsewhere ends the edit, then goes on to what it
-                // hit.
-                this.end_field(f, false, window, cx)
-            }))
+                // hit (on Record with a punch draft open it keeps it).
+                this.press_outside_field(f, e.position, window, cx)
+            },
+        ))
     } else {
         boxed
             .bg(rgb(colors::FIELD))
@@ -726,6 +1052,10 @@ fn more_menu(
             }
             continue;
         }
+        // Swift's entry (`M/TransportItemEntries.swift:96-143`): a text
+        // shows its title and text; an action acts, a check action shows
+        // ✓ while on.
+        let r = &state.record;
         let detail = match piece {
             Piece::Loop => if state.looping { "On" } else { "Off" }.to_owned(),
             Piece::Readout(b) => state.readout.texts.text(b).to_owned(),
@@ -736,11 +1066,47 @@ fn more_menu(
                 .collect::<Vec<_>>()
                 .join(" \u{2013} "),
             Piece::MainView => panes::main_title(state.main).to_owned(),
-            Piece::Cluster | Piece::Space | Piece::Panes | Piece::Faults => String::new(),
+            Piece::Cluster
+            | Piece::Space
+            | Piece::Panes
+            | Piece::Faults
+            | Piece::ReplaceOverdub
+            | Piece::CountIn
+            | Piece::Summary
+            | Piece::Separator => String::new(),
         };
         // Faults is an action, enabled with faults or a report (Swift
         // `M/TransportItemEntries.swift:132-133`); it folds only then.
-        let acts = piece == Piece::Loop || (piece == Piece::Faults && state.faults.is_some());
+        // Replace/Overdub and Count-in are disabled while recording.
+        let acts = match piece {
+            Piece::Loop => true,
+            Piece::Faults => state.faults.is_some(),
+            Piece::ReplaceOverdub | Piece::CountIn => !r.recording,
+            _ => false,
+        };
+        let checked = match piece {
+            Piece::ReplaceOverdub => r.overdub,
+            Piece::CountIn => r.count_in,
+            _ => false,
+        };
+        let check = matches!(piece, Piece::ReplaceOverdub | Piece::CountIn);
+        // The summary is one text, `Step Entry: <summary or "off">`.
+        let text = (piece == Piece::Summary).then(|| {
+            format!(
+                "{}: {}",
+                piece.title(),
+                state.summary.as_deref().unwrap_or("off")
+            )
+        });
+        let shown = match (&text, check) {
+            (Some(t), _) => t.clone(),
+            (None, true) => format!(
+                "{}{}",
+                if checked { "\u{2713} " } else { "" },
+                piece.title()
+            ),
+            (None, false) => piece.title().to_owned(),
+        };
         let mut entry = div()
             .id(("more-item", row))
             .relative()
@@ -749,19 +1115,27 @@ fn more_menu(
             .gap_3()
             .px_3()
             .py_1()
-            .child(div().flex_1().child(piece.title()))
+            .when(check && !acts, |e| e.text_color(rgb(colors::DISABLED)))
+            .child(div().flex_1().child(shown))
             .child(div().text_color(rgb(colors::DIM)).child(detail))
-            .child(scope.control("menuitem", piece.title(), acts));
+            .child(scope.control_selected(
+                "menuitem",
+                piece.title(),
+                acts,
+                text.as_deref(),
+                checked,
+            ));
         if acts {
             entry = entry
                 .cursor_pointer()
                 .hover(|s| s.bg(rgb(colors::BUTTON)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.close_more(cx);
-                    if piece == Piece::Faults {
-                        this.toggle_faults(cx);
-                    } else {
-                        this.toggle_loop(cx);
+                    match piece {
+                        Piece::Faults => this.toggle_faults(cx),
+                        Piece::ReplaceOverdub => this.press_record_mode(cx),
+                        Piece::CountIn => this.toggle_count_in(cx),
+                        _ => this.toggle_loop(cx),
                     }
                 }));
         }
@@ -781,6 +1155,8 @@ pub fn render(
     window: &Window,
     cx: &mut Context<DocumentWindow>,
 ) -> impl IntoElement {
+    // Drawn again below, while the cluster shows.
+    fields.record_button.set(None);
     let mut row = div()
         .flex()
         .flex_row()
@@ -791,7 +1167,7 @@ pub fn render(
         .overflow_hidden();
     for piece in plan.shown() {
         let child = match piece {
-            Piece::Cluster => cluster(state, scope, cx),
+            Piece::Cluster => cluster(state, fields, scope, cx),
             Piece::Loop => loop_button(state.looping, scope, cx),
             Piece::Readout(b) => readout(b, state.readout.texts.text(b), scope),
             Piece::Position | Piece::EditFields => {
@@ -808,6 +1184,13 @@ pub fn render(
                 Some(f) => faults_button(f, scope, window, cx),
                 None => continue,
             },
+            Piece::ReplaceOverdub => replace_overdub(&state.record, scope, cx),
+            Piece::CountIn => count_in(&state.record, scope, cx),
+            Piece::Summary => match &state.summary {
+                Some(t) => summary(t, scope),
+                None => continue,
+            },
+            Piece::Separator => separator(),
         };
         row = row.child(child);
     }
