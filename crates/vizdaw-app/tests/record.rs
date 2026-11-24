@@ -141,12 +141,13 @@ fn record_needs_a_sequence_and_no_step_entry() {
         Some((ErrorCode::Unavailable, "Select a sequence first.".into()))
     );
     m.select(Some(3));
-    m.set_step_entry_on(true);
+    m.select_track(30, false);
+    m.start_step_entry().unwrap();
     assert_eq!(
         code(m.toggle_record()),
         Some((ErrorCode::Failed, STEP_ENTRY_ON.into()))
     );
-    m.set_step_entry_on(false);
+    m.stop_step_entry();
     f.set_lanes(3, vec![lane_row(30, "Groove", false)]);
     assert_eq!(
         code(m.toggle_record()),

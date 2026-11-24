@@ -64,6 +64,15 @@ impl RunCommand {
     }
 }
 
+/// A step entry key (`step.*`, T among them): runs as [`RunCommand`],
+/// but a held key runs it again only for rest, tie and Delete Last Step
+/// (the document window tells a repeat by the key not having come up).
+#[derive(Clone, Debug, PartialEq, Eq, gpui::Action)]
+#[action(namespace = vizdaw, no_json)]
+pub struct StepKey {
+    pub id: SharedString,
+}
+
 /// A File menu item on the window's document (Swift `AppCommands`):
 /// Import Audio…, Import MIDI File…, Open Co-Producer Copy…, Project
 /// Settings…, Bounce…, the Export items, the report and Relink Media….
@@ -142,6 +151,76 @@ pub fn routed(id: &str) -> bool {
 /// Where unmodified keys act: in a document window, but never while a text
 /// field has focus (typing a space must not start the transport).
 pub const UNMODIFIED_KEYS: &str = "DocumentWindow && !TextInput";
+
+/// The document window's key context identifier while step entry is on.
+pub const STEP_CONTEXT: &str = "StepEntry";
+/// The identifier while "reserve number row" keeps the row the locators'.
+pub const RESERVE_CONTEXT: &str = "ReserveNumberRow";
+/// Where step entry's keys act: in a document window with step entry on,
+/// never while a text field has focus. Bound after the global keys, they
+/// win the same keystroke (GPUI takes the later of two equally deep
+/// bindings).
+pub const STEP_KEYS: &str = "DocumentWindow && StepEntry && !TextInput";
+/// Where step entry's number row acts: as [`STEP_KEYS`], unless the row
+/// is reserved for the locators.
+pub const STEP_NUMBER_KEYS: &str = "DocumentWindow && StepEntry && !ReserveNumberRow && !TextInput";
+
+/// The key context of the document window's root: step entry on, the
+/// number row reserved.
+pub fn window_context(step_entry: bool, reserve_numbers: bool) -> String {
+    let mut c = WINDOW_CONTEXT.to_owned();
+    if step_entry {
+        c.push(' ');
+        c.push_str(STEP_CONTEXT);
+    }
+    if reserve_numbers {
+        c.push(' ');
+        c.push_str(RESERVE_CONTEXT);
+    }
+    c
+}
+
+/// The views that take Delete while they have the keyboard: during step
+/// entry Delete is Delete Last Step over them too (Swift's key monitor
+/// runs before the views).
+const STEP_OVER: &[&str] = &[crate::piano_roll::CONTEXT, crate::list_editor::CONTEXT];
+
+/// ⇧`digit` as macOS and Linux report it on a US layout: the shifted
+/// character with ⇧ folded in (⌥⇧2 arrives as `alt-@`). Other layouts
+/// shift the digits to other characters and are not covered.
+fn us_shifted_digit(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "1" => "!",
+        "2" => "@",
+        "3" => "#",
+        "4" => "$",
+        "5" => "%",
+        "6" => "^",
+        "7" => "&",
+        "8" => "*",
+        "9" => "(",
+        "0" => ")",
+        _ => return None,
+    })
+}
+
+/// `keystroke` (`alt-shift-2`) as the platforms deliver it, when that
+/// differs: ⇧ and a digit become the US shifted character.
+fn delivered(keystroke: &str, chord: &Chord) -> Option<String> {
+    if chord.mods & SHIFT == 0 || chord.mods & (COMMAND | CONTROL) != 0 {
+        return None;
+    }
+    let (head, key) = keystroke.rsplit_once('-')?;
+    let shifted = us_shifted_digit(key)?;
+    let head = head.replace("shift", "");
+    let head: Vec<&str> = head.split('-').filter(|p| !p.is_empty()).collect();
+    let mut out = head.join("-");
+    if !out.is_empty() {
+        out.push('-');
+    }
+    out.push_str(shifted);
+    Some(out)
+}
 
 /// The menus, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -745,11 +824,56 @@ pub fn bindings(keymap: &Keymap) -> Vec<KeyBinding> {
             } else {
                 WINDOW_CONTEXT
             };
+            if let Some(alias) = delivered(&k, &chord) {
+                keys.push(KeyBinding::new(
+                    interned(alias),
+                    RunCommand::new(id),
+                    Some(context),
+                ));
+            }
             keys.push(KeyBinding::new(
                 interned(k),
                 RunCommand::new(id),
                 Some(context),
             ));
+        }
+    }
+    keys.extend(step_bindings(keymap));
+    keys
+}
+
+/// Step entry's keys, after the global ones: T (Step Entry) wherever bare
+/// keys act, the rest only while step entry is on ([`STEP_KEYS`]; the
+/// number row [`STEP_NUMBER_KEYS`]), Delete also over the views that take
+/// it. Keypad twins are not bound: GPUI does not tell the keypad from the
+/// main keys.
+fn step_bindings(keymap: &Keymap) -> Vec<KeyBinding> {
+    let mut keys = Vec::new();
+    for &id in vizdaw_app::step_entry::STEP_COMMANDS {
+        let global = registry::find(id).is_some_and(|c| c.context == registry::KeyContext::Global);
+        for chord in keymap.chords(id) {
+            if bindings::key_name(chord.code).is_some_and(|n| n.starts_with("Keypad")) {
+                continue;
+            }
+            let Some(k) = keystroke(&chord) else { continue };
+            let step = || StepKey {
+                id: SharedString::new_static(id),
+            };
+            let bare = chord.mods & (COMMAND | CONTROL) == 0;
+            let context = match (global, bare) {
+                (true, true) => UNMODIFIED_KEYS.to_owned(),
+                (true, false) => WINDOW_CONTEXT.to_owned(),
+                (false, _) if chord.number_row() => STEP_NUMBER_KEYS.to_owned(),
+                (false, _) => STEP_KEYS.to_owned(),
+            };
+            let k = interned(k);
+            keys.push(KeyBinding::new(k, step(), Some(&context)));
+            if !global && k == "backspace" {
+                for over in STEP_OVER {
+                    let context = format!("{STEP_CONTEXT} > {over} && !TextInput");
+                    keys.push(KeyBinding::new(k, step(), Some(&context)));
+                }
+            }
         }
     }
     keys

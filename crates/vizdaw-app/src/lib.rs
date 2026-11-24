@@ -31,6 +31,7 @@ pub mod record;
 pub mod relink;
 pub mod report_text;
 pub mod session;
+pub mod step_entry;
 pub mod store;
 #[cfg(feature = "test-support")]
 pub mod testing;

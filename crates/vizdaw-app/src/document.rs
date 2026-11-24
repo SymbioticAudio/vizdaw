@@ -109,8 +109,8 @@ pub struct DocumentModel {
     recovery: recovery::RecoveryOffer,
     /// Recording: the options, the popover, the last record state.
     pub(crate) record: crate::record::RecordModel,
-    /// Step entry is on: Record is refused.
-    pub(crate) step_entry_on: bool,
+    /// Step entry: its state and target (off: none).
+    pub(crate) step: crate::step_entry::StepEntryModel,
     /// The Relink sheet's offer.
     pub(crate) relink: crate::relink::RelinkOffer,
     /// The Bounce sheet's state (slice 7b Task 6).
@@ -250,7 +250,7 @@ impl DocumentModel {
             midi_export: crate::interchange::MidiExport::default(),
             recovery: recovery::RecoveryOffer::default(),
             record: crate::record::RecordModel::default(),
-            step_entry_on: false,
+            step: crate::step_entry::StepEntryModel::default(),
             relink: crate::relink::RelinkOffer::default(),
             bounce: crate::bounce::Bounce::default(),
             for_daw: crate::for_daw::ForDaw::default(),
@@ -304,6 +304,8 @@ impl DocumentModel {
         }
         self.reset_infos();
         self.refresh_lanes();
+        // Step entry ends the moment its track is gone.
+        self.check_step_target();
         self.after_sync();
     }
 
@@ -386,6 +388,8 @@ impl DocumentModel {
         }
         self.selected_seq = seq;
         self.refresh_lanes();
+        // Step entry ends the moment another sequence is shown.
+        self.check_step_target();
     }
 
     /// The selection as the model holds it.

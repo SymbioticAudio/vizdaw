@@ -18,6 +18,7 @@ use crate::editor::{DetailEditorKind, GESTURE_OPEN};
 use crate::mixer::commands::{SELECTION_FILLED, SUSPEND, mode_of, suspend};
 use crate::mixer::strips_text;
 use crate::prefs::Prefs;
+use crate::step_entry::STEP_COMMANDS;
 use crate::transport_bar::TransportLayout;
 use crate::transport_fields::TransportField;
 
@@ -375,6 +376,9 @@ pub fn enabled(id: &str, doc: &DocumentModel) -> bool {
     if RECORD_COMMANDS.contains(&id) {
         return crate::record::record_command_enabled(id, doc);
     }
+    if STEP_COMMANDS.contains(&id) {
+        return crate::step_entry::step_enabled(id, doc);
+    }
     if EDITOR_COMMANDS.contains(&id) {
         return match id {
             "editors.close_detail" => doc.layout().detail.is_some(),
@@ -419,6 +423,9 @@ pub fn perform_from_menu(id: &str, doc: &mut DocumentModel) -> Result<Ran, Contr
     }
     if RECORD_COMMANDS.contains(&id) {
         return crate::record::run_record(id, &[], doc).map_err(|e| refused(doc, e));
+    }
+    if STEP_COMMANDS.contains(&id) {
+        return crate::step_entry::run_step(id, &[], doc).map_err(|e| refused(doc, e));
     }
     if EDITOR_COMMANDS.contains(&id) {
         return run_editor(id, &[], doc).map_err(|e| refused(doc, e));
@@ -490,6 +497,7 @@ pub fn is_on(id: &str, doc: &DocumentModel) -> bool {
         "transport.punch" => doc.layout().transport.punch,
         "transport.click" => doc.last_transport().click.is_some_and(|c| c.on),
         SUSPEND => automation_suspended(),
+        _ if STEP_COMMANDS.contains(&id) => crate::step_entry::step_is_on(id, doc),
         _ => crate::view::is_on(id, doc),
     }
 }
@@ -541,6 +549,9 @@ pub fn run(
     }
     if RECORD_COMMANDS.contains(&id) {
         return crate::record::run_record(id, args, doc);
+    }
+    if STEP_COMMANDS.contains(&id) {
+        return crate::step_entry::run_step(id, args, doc);
     }
     if EDITOR_COMMANDS.contains(&id) {
         return run_editor(id, args, doc);

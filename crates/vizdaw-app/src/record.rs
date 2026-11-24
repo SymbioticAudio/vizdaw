@@ -376,16 +376,6 @@ impl DocumentModel {
         }
     }
 
-    /// Step entry is on (Task 5's step entry model sets it).
-    pub fn step_entry_on(&self) -> bool {
-        self.step_entry_on
-    }
-
-    /// Turns the step-entry flag Record reads on or off.
-    pub fn set_step_entry_on(&mut self, on: bool) {
-        self.step_entry_on = on;
-    }
-
     /// `transport.record`: records the shown sequence, or, while
     /// recording, stops (which finishes the pass). The record state is
     /// read quietly first: a pass can end by itself with no poll since.
@@ -399,7 +389,7 @@ impl DocumentModel {
         let Some(seq) = self.selected_seq() else {
             return Err(unavailable(NO_SEQUENCE));
         };
-        if self.step_entry_on {
+        if self.step_entry_on() {
             return Err(refused(STEP_ENTRY_ON));
         }
         if self.gesture_open() {

@@ -92,8 +92,8 @@ const BLACK_KEY_WIDTH: f32 = 0.62;
 actions!(piano_roll, [DeleteNotes]);
 
 /// The key context of the note canvas: Delete and Forward Delete are its
-/// own while it has the keyboard (before the window's key bindings,
-/// which bind Delete to step entry).
+/// own while it has the keyboard, except Delete during step entry, which
+/// is Delete Last Step (`menus::step_bindings`).
 pub const CONTEXT: &str = "PianoRoll";
 
 /// The canvas's keys (only while it has the keyboard).
