@@ -77,8 +77,11 @@ jobs:
         run: |
           unset WAYLAND_DISPLAY
           xvfb-run -a -s "-screen 0 1280x800x24" cargo test -p core-host --test clap_gui_linux -- --nocapture
-          VIZDAW_REQUIRE_DISPLAY=1 VIZDAW_REQUIRE_VST3_SAMPLES=1 xvfb-run -a -s "-screen 0 1280x800x24" cargo test -p core-host --test vst3_gui_linux -- --nocapture
+          VIZDAW_REQUIRE_VST3_SAMPLES=1 xvfb-run -a -s "-screen 0 1280x800x24" cargo test -p core-host --test vst3_gui_linux -- --nocapture
           xvfb-run -a -s "-screen 0 1280x800x24" cargo test -p core-ffi --test editors_main
+        env:
+          # A missing X server fails these tests instead of skipping them.
+          VIZDAW_REQUIRE_DISPLAY: "1"
       - name: GPUI end to end (Linux, virtual X server)
         if: runner.os == 'Linux'
         timeout-minutes: 20
@@ -88,6 +91,7 @@ jobs:
           xvfb-run -a -s "-screen 0 1280x800x24" cargo test -p vizctl --test e2e_gpui -- --ignored --nocapture --test-threads 1
         env:
           VIZDAW_E2E_APP: target/debug/vizdaw-gpui
+          VIZDAW_REQUIRE_DISPLAY: "1"
       - name: Bundled Multi-Q tests
         if: runner.os == 'macOS'
         run: |

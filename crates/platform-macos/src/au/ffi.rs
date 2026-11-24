@@ -35,8 +35,8 @@ use objc2_core_audio_types::{
 };
 use objc2_core_foundation::{
     CFArray, CFBundle, CFData, CFPropertyList, CFPropertyListCreateData,
-    CFPropertyListCreateWithData, CFPropertyListFormat, CFRetained, CFRunLoop, CFString, CFURL,
-    CGPoint, CGRect, CGSize, kCFRunLoopDefaultMode,
+    CFPropertyListCreateWithData, CFPropertyListFormat, CFRetained, CFString, CFURL, CGPoint,
+    CGRect, CGSize,
 };
 use std::ffi::CString;
 use std::ffi::c_void;
@@ -44,7 +44,7 @@ use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Most channels of one bus VizDAW renders (the graph is stereo).
 pub(crate) const MAX_BUS_CHANNELS: usize = 2;
@@ -1466,17 +1466,147 @@ const PREFERRED: CGSize = CGSize {
     height: 300.0,
 };
 
+/// How an editor view starts: at once (Cocoa, generic) or once an AU v3's
+/// view controller arrives.
+pub(crate) enum ViewStart {
+    /// The view, ready to attach.
+    Now(View),
+    /// The view controller was requested; poll with
+    /// [`Unit::finish_editor_view`].
+    Requested(ViewRequest),
+}
+
+/// What an asynchronous view-controller request has heard so far (main
+/// thread and the unit's completion, under a lock).
+#[derive(Debug, Default)]
+pub(crate) struct Reply {
+    /// The completion ran (with a controller or with nil).
+    answered: bool,
+    /// A retained controller (`Retained::into_raw`), if given and not yet
+    /// taken.
+    vc: Option<usize>,
+    /// The host stopped waiting: a late controller is not kept.
+    abandoned: bool,
+}
+
+/// Where a request stands.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Poll {
+    /// No answer yet, and still in time.
+    Waiting,
+    /// Answered: the retained controller (taken out of the reply), or
+    /// `None` for a nil answer.
+    Answered(Option<usize>),
+    /// No answer in time: abandoned (a late one is dropped).
+    TimedOut,
+}
+
+impl Reply {
+    /// The completion's answer (any thread). A controller is kept only
+    /// while the host still waits; the return says whether it was.
+    pub(crate) fn answer(&mut self, vc: Option<usize>) -> bool {
+        self.answered = true;
+        if self.abandoned {
+            return false;
+        }
+        self.vc = vc;
+        true
+    }
+
+    /// Where the request stands at `now`, waiting until `until`.
+    pub(crate) fn poll(&mut self, now: Instant, until: Instant) -> Poll {
+        if self.answered {
+            return Poll::Answered(self.vc.take());
+        }
+        if now >= until {
+            self.abandoned = true;
+            return Poll::TimedOut;
+        }
+        Poll::Waiting
+    }
+
+    /// Stops waiting; hands back a controller delivered but not taken.
+    pub(crate) fn abandon(&mut self) -> Option<usize> {
+        self.abandoned = true;
+        self.vc.take()
+    }
+}
+
+/// An AU v3 view-controller request in flight
+/// (`kAudioUnitProperty_RequestViewController`): its completion fills the
+/// reply from the main queue (or any thread); nothing waits for it. Dropped
+/// (main thread), it abandons the request and releases a controller that
+/// came but was never taken.
+pub(crate) struct ViewRequest {
+    reply: Arc<Mutex<Reply>>,
+    until: Instant,
+}
+
+impl std::fmt::Debug for ViewRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ViewRequest")
+            .field("until", &self.until)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ViewRequest {
+    fn poll(&self) -> Poll {
+        self.reply
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .poll(Instant::now(), self.until)
+    }
+}
+
+impl Drop for ViewRequest {
+    fn drop(&mut self) {
+        let left = self
+            .reply
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .abandon();
+        if let Some(raw) = left {
+            // SAFETY: the reference the completion took and nobody adopted.
+            drop(unsafe { Retained::from_raw(raw as *mut AnyObject) });
+        }
+    }
+}
+
 impl Unit {
-    /// The unit's editor view: its Cocoa view, else its v3 view controller
-    /// (waited for up to `wait` while the main run loop runs), else the
-    /// generic view. Main thread only.
-    pub(crate) fn editor_view(&self, wait: Duration) -> Result<View, String> {
+    /// Starts the unit's editor view without waiting: its Cocoa view, else
+    /// a request for its v3 view controller (polled with
+    /// [`Unit::finish_editor_view`], given up after `wait`), else the
+    /// generic view. Never runs the main run loop (a nested loop would run
+    /// the app's main-queue work inside the plug-in call). Main thread
+    /// only.
+    pub(crate) fn start_editor_view(&self, wait: Duration) -> Result<ViewStart, String> {
         if MainThreadMarker::new().is_none() {
             return Err("plugin editors open on the main thread only".into());
         }
-        self.cocoa_view()
-            .or_else(|_| self.controller_view(wait))
-            .or_else(|_| self.generic_view())
+        if let Ok(v) = self.cocoa_view() {
+            return Ok(ViewStart::Now(v));
+        }
+        match self.request_view_controller(wait) {
+            Ok(r) => Ok(ViewStart::Requested(r)),
+            Err(_) => self.generic_view().map(ViewStart::Now),
+        }
+    }
+
+    /// The view of request `r` once it is answered: the controller's view,
+    /// or the generic view when the unit answered nil, gave a controller
+    /// without a view, or did not answer in time. `None` while it is still
+    /// waiting. Main thread only.
+    pub(crate) fn finish_editor_view(&self, r: &ViewRequest) -> Option<Result<View, String>> {
+        if MainThreadMarker::new().is_none() {
+            return Some(Err("plugin editors open on the main thread only".into()));
+        }
+        let view = match r.poll() {
+            Poll::Waiting => return None,
+            Poll::Answered(Some(raw)) => controller_view(raw),
+            Poll::Answered(None) | Poll::TimedOut => Err("no view controller".to_string()),
+        };
+        Some(view.or_else(|_| self.generic_view()))
     }
 
     fn cocoa_view(&self) -> Result<View, String> {
@@ -1552,30 +1682,24 @@ impl Unit {
         })
     }
 
-    fn controller_view(&self, wait: Duration) -> Result<View, String> {
-        /// What the completion handler reported.
-        #[derive(Default)]
-        struct Reply {
-            /// The handler ran (with a controller or with nil).
-            answered: bool,
-            /// A retained controller (`Retained::into_raw`), if given.
-            vc: Option<usize>,
-            /// The wait is over: a late controller is not kept.
-            abandoned: bool,
-        }
-        let slot: Arc<Mutex<Reply>> = Arc::new(Mutex::new(Reply::default()));
-        let fill = Arc::clone(&slot);
+    /// Asks the unit for its view controller; the completion fills the
+    /// request's reply.
+    fn request_view_controller(&self, wait: Duration) -> Result<ViewRequest, String> {
+        let reply: Arc<Mutex<Reply>> = Arc::new(Mutex::new(Reply::default()));
+        let fill = Arc::clone(&reply);
         let block = RcBlock::new(move |vc: *mut AnyObject| {
             let mut r = fill.lock().unwrap_or_else(PoisonError::into_inner);
-            r.answered = true;
-            if r.abandoned {
-                return;
-            }
-            // SAFETY: the unit hands over a valid view controller (or
-            // null); one reference is taken here and adopted below.
-            if let Some(vc) = unsafe { Retained::retain(vc) } {
-                r.vc = Some(Retained::into_raw(vc) as usize);
-            }
+            // Once the host stopped waiting, a late controller is not
+            // touched (the lock keeps the close from racing this).
+            let vc = if r.abandoned {
+                None
+            } else {
+                // SAFETY: the unit hands over a valid view controller (or
+                // null); one reference is taken here and adopted by
+                // `controller_view` or released by `ViewRequest`'s drop.
+                unsafe { Retained::retain(vc) }.map(|vc| Retained::into_raw(vc) as usize)
+            };
+            r.answer(vc);
         });
         let ptr_to_block: *const block2::Block<dyn Fn(*mut AnyObject)> = &*block;
         self.set(
@@ -1585,33 +1709,9 @@ impl Unit {
             0,
             &ptr_to_block,
         )?;
-        let until = std::time::Instant::now() + wait;
-        let raw = loop {
-            {
-                let mut r = slot.lock().unwrap_or_else(PoisonError::into_inner);
-                if r.answered {
-                    // A nil answer: no controller, no more waiting.
-                    break r.vc.take().ok_or("no view controller")?;
-                }
-                if std::time::Instant::now() >= until {
-                    r.abandoned = true;
-                    return Err("no view controller".into());
-                }
-            }
-            // SAFETY: the default mode is a valid static; the main run loop
-            // delivers the unit's completion.
-            let mode = unsafe { kCFRunLoopDefaultMode };
-            CFRunLoop::run_in_mode(mode, 0.02, true);
-        };
-        // SAFETY: `raw` is the reference taken in the block.
-        let vc =
-            unsafe { Retained::from_raw(raw as *mut AnyObject) }.ok_or("no view controller")?;
-        // SAFETY: an `NSViewController`'s `view` is a retained-by-it NSView.
-        let view: Option<Retained<AnyObject>> = unsafe { msg_send![&vc, view] };
-        Ok(View {
-            view: view.ok_or("the view controller has no view")?,
-            _controller: Some(vc),
-            kind: ViewKind::Controller,
+        Ok(ViewRequest {
+            reply,
+            until: Instant::now() + wait,
         })
     }
 
@@ -1629,6 +1729,21 @@ impl Unit {
             kind: ViewKind::Generic,
         })
     }
+}
+
+/// The view of the controller `raw` (a reference the completion took,
+/// adopted here).
+fn controller_view(raw: usize) -> Result<View, String> {
+    // SAFETY: `raw` is the reference taken in the completion, handed over
+    // once by `Reply::poll`.
+    let vc = unsafe { Retained::from_raw(raw as *mut AnyObject) }.ok_or("no view controller")?;
+    // SAFETY: an `NSViewController`'s `view` is a retained-by-it NSView.
+    let view: Option<Retained<AnyObject>> = unsafe { msg_send![&vc, view] };
+    Ok(View {
+        view: view.ok_or("the view controller has no view")?,
+        _controller: Some(vc),
+        kind: ViewKind::Controller,
+    })
 }
 
 impl View {
@@ -1693,6 +1808,37 @@ fn offline_answer(status: i32) -> OfflineRender {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The AU v3 view-controller request (D3): nothing waits; the reply is
+    /// polled until answered or out of time, and a late controller is not
+    /// kept.
+    #[test]
+    fn a_view_controller_reply_is_polled_not_waited_for() {
+        let t0 = Instant::now();
+        let until = t0 + Duration::from_secs(3);
+        let mut r = Reply::default();
+        assert_eq!(r.poll(t0, until), Poll::Waiting);
+        assert!(r.answer(Some(0x10)));
+        assert_eq!(r.poll(t0, until), Poll::Answered(Some(0x10)));
+        assert_eq!(r.poll(t0, until), Poll::Answered(None), "taken once");
+        // A nil answer.
+        let mut r = Reply::default();
+        assert!(r.answer(None));
+        assert_eq!(r.poll(t0, until), Poll::Answered(None));
+        // Out of time: abandoned, and a late controller is refused.
+        let mut r = Reply::default();
+        assert_eq!(r.poll(until, until), Poll::TimedOut);
+        assert!(!r.answer(Some(0x20)));
+        assert_eq!(r.abandon(), None);
+        // Closed while waiting, answered after: refused; answered before
+        // the close but never taken: handed back to release.
+        let mut r = Reply::default();
+        assert_eq!(r.abandon(), None);
+        assert!(!r.answer(Some(0x30)));
+        let mut r = Reply::default();
+        assert!(r.answer(Some(0x40)));
+        assert_eq!(r.abandon(), Some(0x40));
+    }
 
     /// Ruling T3-2: a read-only OfflineRender property is no offline mode,
     /// not a refusal.

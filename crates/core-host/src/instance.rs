@@ -110,7 +110,10 @@ pub trait PluginEditor {
         let _ = scale;
     }
     /// Attaches the editor to `parent` and shows it; returns its size in
-    /// points.
+    /// points. Never runs a nested run loop: an editor whose view arrives
+    /// asynchronously (AU v3) answers [`HostError::Opening`] until it is
+    /// there, and a later `open` (with the parent of that call) attaches
+    /// it; `close` abandons the wait.
     fn open(&mut self, parent: ParentView) -> Result<(u32, u32), HostError>;
     /// Asks for a new size in points; returns the size in points the
     /// plugin accepted.

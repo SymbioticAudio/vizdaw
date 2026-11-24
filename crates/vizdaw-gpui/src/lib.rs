@@ -257,6 +257,25 @@ pub fn quit_now(cx: &mut App) {
     cx.quit();
 }
 
+/// How often the plug-ins' run loop is pumped: plug-in timers are often
+/// 16-30 ms, so faster than the 50 ms document idle.
+pub const RUN_LOOP_EVERY: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// The plug-ins' main-thread run loop (CLAP timers and descriptors, VST3
+/// `Linux::IRunLoop`): one app-wide loop on the main thread, where every
+/// document's plug-ins and bounce copies load (the loop's table is per
+/// thread, so one pump serves every document). Each pass polls without
+/// waiting; nothing in it calls back into the app.
+pub fn pump_plugin_run_loop(cx: &mut App) {
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor().timer(RUN_LOOP_EVERY).await;
+            vizdaw_ffi::editor::run_loop_pump();
+        }
+    })
+    .detach();
+}
+
 /// Starts the app with one new document window (the demo with
 /// `--demo`), and the control channel with `--control PATH` (or
 /// `VIZDAW_CONTROL`). A control socket that cannot be made exits with
@@ -265,6 +284,7 @@ pub fn run() {
     let options = control::LaunchOptions::from_env();
     gpui_platform::application().run(move |cx: &mut App| {
         let state = install(DocumentStore::live(), cx);
+        pump_plugin_run_loop(cx);
         file_panels::use_native(cx);
         // Off macOS the platform has no prompt: GPUI's prompts are drawn
         // as the sheet card (with Return and Esc).

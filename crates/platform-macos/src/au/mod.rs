@@ -505,6 +505,7 @@ impl AuInstance {
             editor: AuEditor {
                 unit: Arc::clone(&unit),
                 view: None,
+                pending: None,
             },
             unit,
             kind: o.kind,
@@ -864,21 +865,31 @@ impl PluginInstance for AuInstance {
     }
 }
 
-/// How long opening an AU v3 editor waits for its view controller.
+/// How long an AU v3 editor's open keeps answering "opening" while its
+/// view controller is on its way; after that it falls back to the generic
+/// view.
 pub const V3_VIEW_WAIT: Duration = Duration::from_secs(3);
 
 /// An AU's editor (spec §9): the unit's own view (AU v2 Cocoa UI, AU v3
 /// view controller) or CoreAudioKit's generic view, added to the window's
 /// parent view. Fixed size: AU views size themselves.
+///
+/// The Cocoa and generic views open at once. An AU v3 view controller is
+/// requested asynchronously (ruling D3: no nested run loop under the app):
+/// `open` answers [`HostError::Opening`] until the unit's completion has
+/// delivered it on the main queue, and a later `open` attaches it to the
+/// parent given to that call. `close` abandons the request.
 pub struct AuEditor {
     unit: Arc<Unit>,
     view: Option<ffi::View>,
+    pending: Option<ffi::ViewRequest>,
 }
 
 impl std::fmt::Debug for AuEditor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AuEditor")
             .field("open", &self.view.is_some())
+            .field("opening", &self.pending.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -893,20 +904,41 @@ impl AuEditor {
             ffi::ViewKind::Generic => "generic",
         })
     }
-}
 
-impl PluginEditor for AuEditor {
-    fn open(&mut self, parent: ParentView) -> Result<(u32, u32), HostError> {
-        self.close();
-        let view = self
-            .unit
-            .editor_view(V3_VIEW_WAIT)
-            .map_err(HostError::EditorUnavailable)?;
+    fn attach(&mut self, view: ffi::View, parent: ParentView) -> Result<(u32, u32), HostError> {
         let size = view
             .attach(parent.as_ptr())
             .map_err(HostError::EditorUnavailable)?;
         self.view = Some(view);
         Ok(size)
+    }
+}
+
+impl PluginEditor for AuEditor {
+    fn open(&mut self, parent: ParentView) -> Result<(u32, u32), HostError> {
+        let request = match self.pending.take() {
+            Some(r) => r,
+            None => {
+                self.close();
+                match self
+                    .unit
+                    .start_editor_view(V3_VIEW_WAIT)
+                    .map_err(HostError::EditorUnavailable)?
+                {
+                    ffi::ViewStart::Now(v) => return self.attach(v, parent),
+                    // Polled at once too: a unit may answer inside the
+                    // request.
+                    ffi::ViewStart::Requested(r) => r,
+                }
+            }
+        };
+        match self.unit.finish_editor_view(&request) {
+            None => {
+                self.pending = Some(request);
+                Err(HostError::Opening)
+            }
+            Some(v) => self.attach(v.map_err(HostError::EditorUnavailable)?, parent),
+        }
     }
 
     fn resize(&mut self, _width: u32, _height: u32) -> Result<(u32, u32), HostError> {
@@ -922,6 +954,7 @@ impl PluginEditor for AuEditor {
 
     fn close(&mut self) {
         self.view = None;
+        self.pending = None;
     }
 }
 

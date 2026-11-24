@@ -47,4 +47,4 @@ pub use process::{
 };
 #[cfg(unix)]
 pub use run_loop::{FdFlags, run_loop_fds};
-pub use run_loop::{RunLoopCalls, run_loop_calls, run_loop_tick};
+pub use run_loop::{MAX_TIMERS, RunLoopCalls, run_loop_calls, run_loop_pump, run_loop_tick};

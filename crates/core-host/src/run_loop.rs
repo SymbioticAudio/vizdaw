@@ -18,11 +18,24 @@
 //! ready descriptor gets at most one callback per instance, and timers
 //! registered during the tick wait for the next one.
 //!
-//! The CLAP host offers the two extensions only off macOS for now
-//! (`clap::handlers`), and `Linux::IRunLoop` is a Linux interface: nothing
-//! drives the loop on macOS yet. Descriptors exist only on unix; elsewhere
-//! the loop has timers alone and [`run_loop_tick`] takes no ready list.
-//! [`run_loop_calls`] counts the callbacks made, for tests and diagnostics.
+//! The CLAP host offers timers everywhere and descriptors on every unix
+//! (`clap::handlers`); `Linux::IRunLoop` is a Linux interface. Descriptors
+//! exist only on unix; elsewhere the loop has timers alone and
+//! [`run_loop_tick`] takes no ready list. An instance holds at most
+//! [`MAX_TIMERS`] timers. A descriptor that [`run_loop_pump`] finds closed
+//! (`POLLNVAL`) gets one `ERROR` callback and is then left out of
+//! [`run_loop_fds`] and of later ticks until the plug-in modifies or
+//! registers it again (a plug-in that closes it before unregistering would
+//! otherwise get an error on every pump). [`run_loop_calls`] counts the
+//! callbacks made, for tests and diagnostics.
+//!
+//! Who pumps: every binary that loads plug-ins on a thread it keeps
+//! running. The GPUI app runs one app-wide main-thread loop every 10 ms
+//! (`vizdaw-gpui`, outside the 50 ms document idle: plug-in timers are
+//! often 16-30 ms); `vizdaw-play` pumps in its live loop (100 ms
+//! resolution, documented there). `vizctl`, `vizdaw-scan` and `vizdaw-mcp`
+//! need none: they load no plug-ins in process, or only for a one-block
+//! scan that needs no timers.
 
 #[cfg(unix)]
 pub use clack_extensions::posix_fd::FdFlags;
@@ -31,6 +44,11 @@ use std::cell::{Cell, RefCell};
 use std::os::unix::io::RawFd;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
+
+/// The most timers one instance (one VST3 run-loop host) may hold at once;
+/// a further registration is refused. A tick visits every timer, so a
+/// plug-in that leaks them would slow every tick.
+pub const MAX_TIMERS: usize = 256;
 
 /// One registered timer.
 #[derive(Debug)]
@@ -48,15 +66,27 @@ pub(crate) struct Registrations {
     next_timer: u32,
     timers: Vec<Timer>,
     #[cfg(unix)]
-    fds: Vec<(RawFd, FdFlags)>,
+    fds: Vec<Fd>,
+}
+
+/// One registered descriptor.
+#[cfg(unix)]
+#[derive(Debug)]
+struct Fd {
+    fd: RawFd,
+    flags: FdFlags,
+    /// Found closed (`POLLNVAL`) and told once: left out until modified or
+    /// registered again.
+    invalid: bool,
 }
 
 impl Registrations {
     /// A new timer's id, unique within the instance; `None` once the ids
-    /// run out (`u32::MAX` is CLAP's invalid id).
+    /// run out (`u32::MAX` is CLAP's invalid id) or the instance already
+    /// holds [`MAX_TIMERS`].
     pub(crate) fn register_timer(&mut self, period_ms: u32) -> Option<u32> {
         let id = self.next_timer;
-        if id == u32::MAX {
+        if id == u32::MAX || self.timers.len() >= MAX_TIMERS {
             return None;
         }
         self.next_timer += 1;
@@ -77,21 +107,39 @@ impl Registrations {
 
     #[cfg(unix)]
     /// Adds descriptor `fd`; false if it is invalid or already registered
-    /// (a change of flags goes through [`Registrations::modify_fd`]).
+    /// (a change of flags goes through [`Registrations::modify_fd`]). One
+    /// found closed (`POLLNVAL`) may be registered again: it takes the new
+    /// flags and is watched again.
     pub(crate) fn register_fd(&mut self, fd: RawFd, flags: FdFlags) -> bool {
-        if fd < 0 || self.fd_flags(fd).is_some() {
+        if fd < 0 {
             return false;
         }
-        self.fds.push((fd, flags));
-        true
+        match self.fds.iter_mut().find(|e| e.fd == fd) {
+            Some(e) if e.invalid => {
+                e.flags = flags;
+                e.invalid = false;
+                true
+            }
+            Some(_) => false,
+            None => {
+                self.fds.push(Fd {
+                    fd,
+                    flags,
+                    invalid: false,
+                });
+                true
+            }
+        }
     }
 
     #[cfg(unix)]
-    /// Changes the flags of descriptor `fd`; false if it is not registered.
+    /// Changes the flags of descriptor `fd` (and watches it again if it
+    /// was found closed); false if it is not registered.
     pub(crate) fn modify_fd(&mut self, fd: RawFd, flags: FdFlags) -> bool {
-        match self.fds.iter_mut().find(|(f, _)| *f == fd) {
-            Some(entry) => {
-                entry.1 = flags;
+        match self.fds.iter_mut().find(|e| e.fd == fd) {
+            Some(e) => {
+                e.flags = flags;
+                e.invalid = false;
                 true
             }
             None => false,
@@ -99,16 +147,37 @@ impl Registrations {
     }
 
     #[cfg(unix)]
+    /// Watches descriptor `fd` again if it was found closed (a VST3 handler
+    /// registered on a descriptor another handler already watches).
+    pub(crate) fn rewatch_fd(&mut self, fd: RawFd) {
+        if let Some(e) = self.fds.iter_mut().find(|e| e.fd == fd) {
+            e.invalid = false;
+        }
+    }
+
+    #[cfg(unix)]
     /// Removes descriptor `fd`; false if it is not registered.
     pub(crate) fn unregister_fd(&mut self, fd: RawFd) -> bool {
         let before = self.fds.len();
-        self.fds.retain(|(f, _)| *f != fd);
+        self.fds.retain(|e| e.fd != fd);
         self.fds.len() != before
     }
 
     #[cfg(unix)]
+    /// The flags `fd` waits for; `None` when it is not registered or was
+    /// found closed.
     fn fd_flags(&self, fd: RawFd) -> Option<FdFlags> {
-        self.fds.iter().find(|(f, _)| *f == fd).map(|(_, fl)| *fl)
+        self.fds
+            .iter()
+            .find(|e| e.fd == fd && !e.invalid)
+            .map(|e| e.flags)
+    }
+
+    #[cfg(unix)]
+    fn mark_invalid(&mut self, fd: RawFd) {
+        if let Some(e) = self.fds.iter_mut().find(|e| e.fd == fd) {
+            e.invalid = true;
+        }
     }
 
     fn has_timer(&self, id: u32) -> bool {
@@ -233,10 +302,10 @@ pub fn run_loop_fds() -> Vec<(RawFd, FdFlags)> {
         let Ok(t) = table.try_borrow() else {
             continue;
         };
-        for (fd, flags) in &t.fds {
-            match out.iter_mut().find(|(f, _)| f == fd) {
-                Some(entry) => entry.1 |= *flags,
-                None => out.push((*fd, *flags)),
+        for e in t.fds.iter().filter(|e| !e.invalid) {
+            match out.iter_mut().find(|(f, _)| *f == e.fd) {
+                Some(entry) => entry.1 |= e.flags,
+                None => out.push((e.fd, e.flags)),
             }
         }
     }
@@ -250,18 +319,105 @@ pub fn run_loop_fds() -> Vec<(RawFd, FdFlags)> {
 /// module docs. A nested call (from inside a callback) does nothing.
 #[cfg(unix)]
 pub fn run_loop_tick(now: Instant, ready: &[(RawFd, FdFlags)]) {
+    tick_fds(now, ready, &[]);
+}
+
+/// [`run_loop_tick`], where the descriptors in `invalid` (all in `ready`)
+/// were found closed: after this callback they are left out.
+#[cfg(unix)]
+fn tick_fds(now: Instant, ready: &[(RawFd, FdFlags)], invalid: &[RawFd]) {
     tick(now, |table, target| {
         for (fd, flags) in ready {
             let Some(want) = table.try_borrow().ok().and_then(|t| t.fd_flags(*fd)) else {
                 continue;
             };
             let got = *flags & (want | FdFlags::ERROR);
-            if !got.is_empty() {
-                count(|c| c.fds += 1);
-                target.on_fd(*fd, got);
+            if got.is_empty() {
+                continue;
             }
+            if invalid.contains(fd) {
+                // Before the callback: it may register the number again.
+                if let Ok(mut t) = table.try_borrow_mut() {
+                    t.mark_invalid(*fd);
+                }
+            }
+            count(|c| c.fds += 1);
+            target.on_fd(*fd, got);
         }
     });
+}
+
+/// One pass of the run loop without waiting (main thread): polls the
+/// registered descriptors ([`run_loop_fds`]) with a zero timeout, then
+/// ticks at the current time with the ready ones (due timers fire). A
+/// descriptor the poll finds closed (`POLLNVAL`) gets one `ERROR` callback
+/// and is left out until modified or registered again. An app that can
+/// wait on descriptors polls [`run_loop_fds`] itself and calls
+/// [`run_loop_tick`] instead.
+#[cfg(unix)]
+pub fn run_loop_pump() {
+    let fds = run_loop_fds();
+    let mut polled: Vec<libc::pollfd> = fds
+        .iter()
+        .map(|(fd, flags)| libc::pollfd {
+            fd: *fd,
+            events: poll_events(*flags),
+            revents: 0,
+        })
+        .collect();
+    let mut ready = Vec::new();
+    let mut invalid = Vec::new();
+    if !polled.is_empty() {
+        let n = libc::nfds_t::try_from(polled.len()).unwrap_or(libc::nfds_t::MAX);
+        // SAFETY: `polled` is a live array of at least `n` records, and a
+        // zero timeout never blocks.
+        let r = unsafe { libc::poll(polled.as_mut_ptr(), n, 0) };
+        if r > 0 {
+            for p in &polled {
+                let f = ready_flags(p.revents);
+                if !f.is_empty() {
+                    ready.push((p.fd, f));
+                }
+                if p.revents & libc::POLLNVAL != 0 {
+                    invalid.push(p.fd);
+                }
+            }
+        }
+    }
+    tick_fds(Instant::now(), &ready, &invalid);
+}
+
+/// One pass of the run loop (main thread): due timers fire.
+#[cfg(not(unix))]
+pub fn run_loop_pump() {
+    run_loop_tick(Instant::now());
+}
+
+#[cfg(unix)]
+fn poll_events(flags: FdFlags) -> std::ffi::c_short {
+    let mut e = 0;
+    if flags.contains(FdFlags::READ) {
+        e |= libc::POLLIN;
+    }
+    if flags.contains(FdFlags::WRITE) {
+        e |= libc::POLLOUT;
+    }
+    e
+}
+
+#[cfg(unix)]
+fn ready_flags(revents: std::ffi::c_short) -> FdFlags {
+    let mut f = FdFlags::empty();
+    if revents & libc::POLLIN != 0 {
+        f |= FdFlags::READ;
+    }
+    if revents & libc::POLLOUT != 0 {
+        f |= FdFlags::WRITE;
+    }
+    if revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+        f |= FdFlags::ERROR;
+    }
+    f
 }
 
 /// One pass of the run loop at `now` (main thread): fires the timers due.
@@ -306,8 +462,7 @@ impl Drop for Ticking {
 #[cfg(test)]
 mod tests {
     //! The loop with a fake plug-in side, so it is covered on every
-    //! platform (the host offers the extensions only off macOS; the
-    //! plug-in-driven tests are in `tests/run_loop.rs`).
+    //! platform (the plug-in-driven tests are in `tests/run_loop.rs`).
     use super::*;
 
     /// Records the callbacks it gets; optionally unregisters a timer from
@@ -413,5 +568,48 @@ mod tests {
         let all = FdFlags::READ | FdFlags::WRITE | FdFlags::ERROR;
         run_loop_tick(Instant::now(), &[(3, all), (4, all)]);
         assert_eq!(*fake.fds.borrow(), [(3, FdFlags::READ | FdFlags::ERROR)]);
+    }
+
+    #[test]
+    fn an_instance_holds_at_most_max_timers() {
+        let mut t = Registrations::default();
+        let ids: Vec<u32> = (0..MAX_TIMERS)
+            .map(|_| t.register_timer(10).unwrap())
+            .collect();
+        assert_eq!(t.register_timer(10), None);
+        assert!(t.unregister_timer(ids[0]));
+        assert!(t.register_timer(10).is_some());
+        assert_eq!(t.register_timer(10), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn poll_results_map_to_clap_flags() {
+        assert_eq!(poll_events(FdFlags::READ), libc::POLLIN);
+        assert_eq!(
+            poll_events(FdFlags::READ | FdFlags::WRITE | FdFlags::ERROR),
+            libc::POLLIN | libc::POLLOUT
+        );
+        assert_eq!(ready_flags(0), FdFlags::empty());
+        assert_eq!(ready_flags(libc::POLLIN), FdFlags::READ);
+        assert_eq!(
+            ready_flags(libc::POLLOUT | libc::POLLHUP),
+            FdFlags::WRITE | FdFlags::ERROR
+        );
+        assert_eq!(ready_flags(libc::POLLNVAL), FdFlags::ERROR);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_descriptor_found_closed_is_told_once() {
+        let (table, fake, _m) = joined();
+        assert!(table.borrow_mut().register_fd(950, FdFlags::READ));
+        // Nothing else has 950 open: POLLNVAL.
+        run_loop_pump();
+        run_loop_pump();
+        assert_eq!(*fake.fds.borrow(), [(950, FdFlags::ERROR)]);
+        assert!(run_loop_fds().is_empty());
+        table.borrow_mut().rewatch_fd(950);
+        assert_eq!(run_loop_fds()[0], (950, FdFlags::READ));
     }
 }

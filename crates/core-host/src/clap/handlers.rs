@@ -178,18 +178,14 @@ impl HostGuiImpl for Shared {
         // `can_resize` is read live when a request is applied.
     }
 
-    /// Off macOS, accepted while an editor is open, resizable or not (a fixed-size
-    /// editor asks too, for a zoom menu or a panel it shows). The main
+    /// Accepted while an editor is open, resizable or not (a fixed-size
+    /// editor asks too, for a zoom menu or a panel it shows), on every
+    /// platform (the app's windows follow `editor_resize`). The main
     /// thread applies it at the next idle (`InstanceEvents::editor_resize`);
     /// the last request wins.
     fn request_resize(&self, size: GuiSize) -> Result<(), HostError> {
         if size.width == 0 || size.height == 0 {
             return Err(HostError::Message("an empty size"));
-        }
-        // Refused on macOS until H2: the app there ignores
-        // `editor_resize`, so an editor that grew itself would be clipped.
-        if cfg!(target_os = "macos") {
-            return Err(HostError::Message("the host window decides its size"));
         }
         if !self.flags.gui_open.load(Ordering::Acquire) {
             return Err(HostError::Message("no editor is open"));
@@ -343,13 +339,11 @@ impl HostHandlers for VizHost {
             .register::<HostAudioPorts>()
             .register::<HostNotePorts>()
             .register::<HostTail>()
-            .register::<HostGui>();
-        // Timers and descriptors only off macOS for now: nothing drives the
-        // run loop there yet, and a plug-in that chose the host timer would
-        // never tick (H0 ruling; H2 decides once the app drives the loop).
-        #[cfg(not(target_os = "macos"))]
-        builder.register::<clack_extensions::timer::HostTimer>();
-        #[cfg(all(unix, not(target_os = "macos")))]
+            .register::<HostGui>()
+            // Every app that loads plug-ins pumps the run loop on the thread
+            // that creates them ([`crate::run_loop`]).
+            .register::<clack_extensions::timer::HostTimer>();
+        #[cfg(unix)]
         builder.register::<clack_extensions::posix_fd::HostPosixFd>();
     }
 }

@@ -72,8 +72,8 @@ pub struct BounceCopies {
 }
 
 thread_local! {
-    /// Re-entrancy contract: a nested run loop (an AU editor waiting, a
-    /// modal plugin UI) can call back into the FFI from inside [`with`]:
+    /// Re-entrancy contract: a nested run loop a plug-in runs itself (a
+    /// modal plugin UI; AU v3 editors no longer wait in one) can call back into the FFI from inside [`with`]:
     /// the 60 Hz ticker, other calls, a `Session` drop. Every registry
     /// access therefore uses `try_borrow*` and answers "busy" instead of
     /// panicking. Closes that cannot run at once are queued in `PENDING`

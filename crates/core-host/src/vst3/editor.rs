@@ -236,7 +236,12 @@ impl RunLoopHost {
         if fds.iter().any(|(f, x)| *f == fd && x.as_ptr() == handler) {
             return kResultTrue;
         }
-        if !fds.iter().any(|(f, _)| *f == fd) {
+        if fds.iter().any(|(f, _)| *f == fd) {
+            // A new registration watches a descriptor found closed again.
+            if let Ok(mut t) = self.table.try_borrow_mut() {
+                t.rewatch_fd(fd);
+            }
+        } else {
             let added = self
                 .table
                 .try_borrow_mut()

@@ -124,7 +124,7 @@ public final class PluginWindowModel {
         opening = true
         defer { opening = false }
         do {
-            editorSize = try session.openEditor(slot: slot, parent: parent)
+            editorSize = try session.openEditor(slot: slot, parent: parent, scale: 1.0)
             editorProblem = nil
             openOwed = false
             return true

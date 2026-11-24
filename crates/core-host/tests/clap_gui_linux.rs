@@ -5,7 +5,8 @@
 //! idle) and check the X window tree.
 //!
 //! They need an X server: without `DISPLAY` each test says so and passes
-//! (skipped). CI runs them under Xvfb.
+//! (skipped), unless `VIZDAW_REQUIRE_DISPLAY=1`, which makes a missing
+//! display a failure. CI runs them under Xvfb with it set.
 #![cfg(target_os = "linux")]
 
 use core_host::{FdFlags, InstanceEvents, ParentView, PluginInstance, run_loop_fds, run_loop_tick};
@@ -37,6 +38,8 @@ const WAIT: Duration = Duration::from_secs(5);
 /// The test's own X connection, or `None` (skipped) without a display.
 fn display() -> Option<RustConnection> {
     if std::env::var_os("DISPLAY").is_none() {
+        let required = std::env::var("VIZDAW_REQUIRE_DISPLAY").is_ok_and(|v| v == "1");
+        assert!(!required, "VIZDAW_REQUIRE_DISPLAY=1 but DISPLAY is not set");
         eprintln!("skipped: no DISPLAY (run under an X server, e.g. xvfb-run)");
         return None;
     }
