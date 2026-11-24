@@ -36,7 +36,7 @@ use vizdaw_app::editor::{MainView, PaneSide, PaneView, ViewLayouts};
 use vizdaw_app::mixer::MixerPlacement;
 use vizdaw_app::transport::Shuttle;
 use vizdaw_app::transport_fields::{self as fields_model, TransportField};
-use vizdaw_app::{DocId, DocumentModel, SaveAction, WindowToken};
+use vizdaw_app::{DocId, DocumentModel, SaveAction, SaveChoice, WindowToken};
 use vizdaw_ffi::snapshot::LaneRow;
 
 use crate::app_state::{AppState, WindowKind};
@@ -1084,12 +1084,28 @@ impl DocumentWindow {
 
     fn save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
         self.commit_rename(window, cx);
-        self.save_then_close(false, window, cx);
+        match self.save_choice(false, cx) {
+            SaveChoice::Save => self.save_then_close(false, window, cx),
+            SaveChoice::Panel => self.prompt_save_as(false, window, cx),
+            SaveChoice::Refused(_) => {}
+        }
     }
 
     fn save_as(&mut self, _: &SaveAs, window: &mut Window, cx: &mut Context<Self>) {
         self.commit_rename(window, cx);
-        self.prompt_save_as(false, window, cx);
+        if self.save_choice(true, cx) == SaveChoice::Panel {
+            self.prompt_save_as(false, window, cx);
+        }
+    }
+
+    /// What Save (or Save As) does now; a refusal (recording, a held
+    /// merge) shows in the status line and nothing opens.
+    fn save_choice(&mut self, force_as: bool, cx: &mut Context<Self>) -> SaveChoice {
+        let doc = self.doc;
+        self.app.update(cx, |s, cx| {
+            cx.notify();
+            s.save_choice(doc, force_as)
+        })
     }
 
     fn close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
@@ -1208,7 +1224,12 @@ impl DocumentWindow {
                 this.prompting = false;
                 match answer {
                     Ok(0) => this.save_then_close(true, window, cx),
-                    Ok(1) => window.remove_window(),
+                    Ok(1) => {
+                        // A close never saves a pass nobody asked to save.
+                        let doc = this.doc;
+                        this.app.update(cx, |s, _| s.cancel_save_after_pass(doc));
+                        window.remove_window();
+                    }
                     _ => {}
                 }
             })

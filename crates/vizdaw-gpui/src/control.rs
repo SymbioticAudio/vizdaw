@@ -683,7 +683,7 @@ fn run_command(
                 }) {
                     SaveAction::Saved => Ok(()),
                     SaveAction::NeedsSaveAs => return Err(ControlError::dialog("Save", &["path"])),
-                    SaveAction::Failed(m) => Err(m),
+                    SaveAction::Failed(m) | SaveAction::Refused(m) => Err(m),
                 },
                 _ => return Err(ControlError::dialog("Save", &["path"])),
             };

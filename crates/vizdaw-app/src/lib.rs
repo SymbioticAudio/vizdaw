@@ -26,6 +26,7 @@ pub mod piano_roll;
 pub mod position;
 pub mod prefs;
 pub mod project_settings;
+pub mod record;
 pub mod relink;
 pub mod report_text;
 pub mod session;
@@ -39,7 +40,7 @@ pub mod view;
 
 pub use alerts::AlertItem;
 pub use banners::{BannerAction, ProjectBanner};
-pub use document::{DocumentModel, SaveAction};
+pub use document::{DocumentModel, SaveAction, SaveChoice};
 pub use jobs::JobAnswer;
 pub use prefs::Prefs;
 pub use session::{CoreCalls, DocSession, LiveCore};

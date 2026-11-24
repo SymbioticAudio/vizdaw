@@ -33,6 +33,20 @@ pub enum SaveAction {
     /// Untitled: ask for a location; nothing was written.
     NeedsSaveAs,
     Failed(String),
+    /// Refused before anything was written (an untitled project while
+    /// recording); the status line says why.
+    Refused(String),
+}
+
+/// What File › Save (or Save As) does now (Swift `SaveAction`): save in
+/// place, ask for a location, or refuse with a reason. While recording it
+/// never asks for a location: Save As and an untitled project's Save wait
+/// for Stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaveChoice {
+    Save,
+    Panel,
+    Refused(String),
 }
 
 pub struct DocumentModel {
@@ -93,6 +107,10 @@ pub struct DocumentModel {
     pub(crate) midi_export: crate::interchange::MidiExport,
     /// The Recovered Recordings offer.
     recovery: recovery::RecoveryOffer,
+    /// Recording: the options, the popover, the last record state.
+    pub(crate) record: crate::record::RecordModel,
+    /// Step entry is on: Record is refused.
+    pub(crate) step_entry_on: bool,
     /// The Relink sheet's offer.
     pub(crate) relink: crate::relink::RelinkOffer,
     /// The Bounce sheet's state (slice 7b Task 6).
@@ -231,6 +249,8 @@ impl DocumentModel {
             midi_import: None,
             midi_export: crate::interchange::MidiExport::default(),
             recovery: recovery::RecoveryOffer::default(),
+            record: crate::record::RecordModel::default(),
+            step_entry_on: false,
             relink: crate::relink::RelinkOffer::default(),
             bounce: crate::bounce::Bounce::default(),
             for_daw: crate::for_daw::ForDaw::default(),
@@ -246,6 +266,8 @@ impl DocumentModel {
             copies_read: Mutex::new(None),
         };
         model.refresh_project_info();
+        // The time left reads the core's free space from the start.
+        model.refresh_record(true);
         model.reset_infos();
         model.refresh_lanes();
         Ok(model)
@@ -879,16 +901,53 @@ impl DocumentModel {
         }
     }
 
+    /// What File › Save (`force_as` false) or Save As does now. Reads the
+    /// recording first (a pass can end by itself) and sets no status (the
+    /// caller shows a refusal).
+    pub fn save_choice(&mut self, force_as: bool) -> SaveChoice {
+        self.refresh_record(true);
+        let untitled = self.path().is_none();
+        if self.record.is_recording() {
+            if force_as {
+                return SaveChoice::Refused(crate::record::SAVE_AS_WHILE_RECORDING.into());
+            }
+            if untitled {
+                return SaveChoice::Refused(crate::record::SAVE_UNTITLED_WHILE_RECORDING.into());
+            }
+            return SaveChoice::Save;
+        }
+        if !(force_as || untitled) {
+            return SaveChoice::Save;
+        }
+        // The core refuses Save As while a merge is held: the panel never
+        // opens for it.
+        match self.session.save_as_refusal() {
+            Ok(Some(why)) => SaveChoice::Refused(why),
+            _ => SaveChoice::Panel,
+        }
+    }
+
     /// Saves in place. An untitled document is never written: the caller
-    /// asks for a location and calls `save_as`.
+    /// asks for a location and calls `save_as` (refused while recording,
+    /// with the status line saying why). A Save while recording says the
+    /// take follows at Stop.
     pub fn save(&mut self) -> SaveAction {
         if self.path().is_none() {
+            self.refresh_record(true);
+            if self.record.is_recording() {
+                let why = crate::record::SAVE_UNTITLED_WHILE_RECORDING.to_owned();
+                self.status = Some(why.clone());
+                return SaveAction::Refused(why);
+            }
             return SaveAction::NeedsSaveAs;
         }
         self.store_layout();
         match self.session.save().and_then(|()| self.session.snapshot()) {
             Ok(snapshot) => {
                 self.apply(snapshot);
+                if self.save_after_pass_pending() {
+                    self.status = Some(crate::record::SAVED_DURING_PASS.into());
+                }
                 SaveAction::Saved
             }
             Err(e) => {
@@ -896,6 +955,18 @@ impl DocumentModel {
                 SaveAction::Failed(error_message(&e))
             }
         }
+    }
+
+    /// A Save made while recording lands with the pass: closing then saves
+    /// the song whatever the close prompt says.
+    pub fn save_after_pass_pending(&self) -> bool {
+        self.session.saves_after_pass().unwrap_or(false)
+    }
+
+    /// Don't Save: a Save made while recording is no longer owed, so the
+    /// close that ends the recording saves nothing. A no-op when none is.
+    pub fn cancel_save_after_pass(&self) {
+        let _ = self.session.cancel_save_after_pass();
     }
 
     pub fn save_as(&mut self, path: &Path) -> Result<(), String> {

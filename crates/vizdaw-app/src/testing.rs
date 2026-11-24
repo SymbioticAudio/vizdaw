@@ -157,6 +157,8 @@ struct Rec {
     injected: Vec<(String, Vec<u8>)>,
     /// What `inject_midi` answers: false is "nothing took them".
     inject_taken: bool,
+    /// The free space `record_state` reports (none: no reading).
+    free_bytes: Option<u64>,
 }
 
 /// How a scripted job ends.
@@ -1434,6 +1436,12 @@ impl FakeSession {
     /// What `inject_midi` answers (default false: nothing took them).
     pub fn set_inject_taken(&self, taken: bool) {
         self.st().rec.inject_taken = taken;
+    }
+
+    /// The free space on the project's volume that `record_state`
+    /// reports, idle or recording (default none: no reading).
+    pub fn set_free_bytes(&self, bytes: Option<u64>) {
+        self.st().rec.free_bytes = bytes;
     }
 
     /// The record state while idle, as the core answers it.
@@ -2718,6 +2726,7 @@ impl DocSession for FakeSession {
             }
             None => Self::idle_record(),
         };
+        row.free_bytes = s.rec.free_bytes;
         row.recovered_files = s.files.recovered.clone();
         row.recovered = row.recovered_files.iter().map(|r| r.path.clone()).collect();
         Ok(row)
