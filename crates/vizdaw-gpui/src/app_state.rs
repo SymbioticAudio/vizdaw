@@ -7,12 +7,14 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use core_control::bindings::Keymap;
-use gpui::{App, AppContext, Entity, Global, WindowHandle};
+use gpui::{AnyWindowHandle, App, AppContext, Entity, Global, WindowHandle};
 use vizdaw_app::alerts::AlertItem;
 use vizdaw_app::transport::{PollResult, TransportModel, TransportReadout};
 use vizdaw_app::transport_bar::TransportLayout;
 use vizdaw_app::{DocId, DocumentModel, DocumentStore, Prefs, SaveAction, SaveChoice, WindowToken};
 
+use crate::plugin_windows::PluginWindows;
+use crate::registry::SharedRegistry;
 use crate::shell::DocumentWindow;
 
 /// What a window is, as `state.get windows` names it.
@@ -24,26 +26,56 @@ pub enum WindowKind {
     /// A document's Mixer window: its own transport bar (without the
     /// document-only items) over the mixer. At most one per document.
     Mixer,
+    /// A plug-in window ([`crate::plugin_windows`]): one per (document,
+    /// slot), titled "‹strip› — ‹plug-in›".
+    Plugin,
+    /// Another window of a document: the Built-in Synth window, one per
+    /// (document, destination).
+    Other,
 }
 
 impl WindowKind {
-    /// The channel's name (`document`, `mixer`).
+    /// The channel's name (`document`, `mixer`, `plugin`, `other`).
     pub fn name(self) -> &'static str {
         match self {
             WindowKind::Document => "document",
             WindowKind::Mixer => "mixer",
+            WindowKind::Plugin => "plugin",
+            WindowKind::Other => "other",
         }
+    }
+
+    /// A document's own window or its Mixer window: a [`DocumentWindow`].
+    pub fn is_document_window(self) -> bool {
+        matches!(self, WindowKind::Document | WindowKind::Mixer)
     }
 }
 
-/// One open window: a document's own window, or its Mixer window. Both
-/// are [`DocumentWindow`]s; `kind` says which.
+/// One open window: a document's own window, its Mixer window (both
+/// [`DocumentWindow`]s), a plug-in window or a Built-in Synth window;
+/// `kind` says which.
 #[derive(Clone)]
 pub struct WindowEntry {
     pub doc: DocId,
     pub token: WindowToken,
-    pub handle: WindowHandle<DocumentWindow>,
+    pub handle: AnyWindowHandle,
     pub kind: WindowKind,
+}
+
+impl WindowEntry {
+    /// The window's [`DocumentWindow`] (a document or Mixer window);
+    /// `None` for the other kinds.
+    pub fn document_window(&self) -> Option<WindowHandle<DocumentWindow>> {
+        self.handle.downcast::<DocumentWindow>()
+    }
+
+    /// The elements the window drew last (`ui.tree`, `ui.click`).
+    pub fn registry(&self, cx: &App) -> Option<SharedRegistry> {
+        if let Some(h) = self.document_window() {
+            return h.read(cx).ok().map(|v| v.registry().clone());
+        }
+        crate::plugin_windows::registry(self.handle, cx)
+    }
 }
 
 pub struct AppState {
@@ -64,6 +96,9 @@ pub struct AppState {
     next_token: u64,
     /// When each document's session last had its idle tick.
     last_idle: HashMap<DocId, Instant>,
+    /// The plug-in and Built-in Synth windows, with their models and
+    /// native editor hosts.
+    pub(crate) plugin_windows: PluginWindows,
 }
 
 /// The poll's interval while a retry waits on Busy (Swift's 60 Hz tick).
@@ -87,6 +122,7 @@ impl AppState {
             windows: Vec::new(),
             next_token: 1,
             last_idle: HashMap::new(),
+            plugin_windows: PluginWindows::default(),
         }
     }
 
@@ -144,6 +180,11 @@ impl AppState {
             .find(|w| w.doc == doc && w.kind == WindowKind::Mixer)
     }
 
+    /// The plug-in and Built-in Synth windows' registry.
+    pub fn plugin_windows(&self) -> &PluginWindows {
+        &self.plugin_windows
+    }
+
     /// The document windows (not the Mixer windows), one per document.
     pub fn document_windows(&self) -> impl Iterator<Item = &WindowEntry> {
         self.windows
@@ -152,11 +193,13 @@ impl AppState {
     }
 
     /// What window `w`'s title bar says: the document's title (the
-    /// window marks an edit itself), or "Mixer — <title>".
+    /// window marks an edit itself), "Mixer — <title>", a plug-in
+    /// window's "‹strip› — ‹plug-in›" or "Built-in Synth".
     pub fn window_title(&self, w: &WindowEntry) -> Option<String> {
         match w.kind {
             WindowKind::Document => self.title(w.doc),
             WindowKind::Mixer => self.store.document(w.doc).map(mixer_title),
+            WindowKind::Plugin | WindowKind::Other => self.plugin_windows.title(w.token),
         }
     }
 
@@ -204,13 +247,13 @@ impl AppState {
         &mut self,
         doc: DocId,
         token: WindowToken,
-        handle: WindowHandle<DocumentWindow>,
+        handle: impl Into<AnyWindowHandle>,
         kind: WindowKind,
     ) {
         self.windows.push(WindowEntry {
             doc,
             token,
-            handle,
+            handle: handle.into(),
             kind,
         });
     }
@@ -231,17 +274,33 @@ impl AppState {
         }
     }
 
-    /// `doc`'s window went: the document and its transport go too, and
-    /// its Mixer window's entry (the window closes itself when it sees
-    /// its document gone).
+    /// `doc`'s window went: its plug-in windows close their editors
+    /// first (before the session drops), then the document and its
+    /// transport go too, and its other windows' entries (each window
+    /// closes itself when it sees its entry or document gone).
     pub fn close_document(&mut self, doc: DocId) {
+        self.plugin_windows.close_document(doc, &mut self.store);
         self.windows.retain(|w| w.doc != doc);
         self.transports.remove(&doc);
         self.store.close(doc);
     }
 
-    /// Every document closes, with its transport and window entry.
+    /// Every plug-in window's editor closes (the windows close themselves
+    /// when they see their entries gone): quit does this before any
+    /// session drops.
+    pub fn close_plugin_windows(&mut self) {
+        let docs = self.plugin_windows.documents();
+        for doc in docs {
+            self.plugin_windows.close_document(doc, &mut self.store);
+        }
+        let windows = &mut self.windows;
+        windows.retain(|w| w.kind.is_document_window());
+    }
+
+    /// Every document closes, with its transport and window entry; every
+    /// plug-in editor first.
     pub fn close_all(&mut self) {
+        self.close_plugin_windows();
         let docs: Vec<DocId> = self.document_windows().map(|w| w.doc).collect();
         for doc in docs {
             self.close_document(doc);
@@ -450,6 +509,11 @@ pub fn with_extension(path: &Path) -> PathBuf {
     let (path, _) =
         vizdaw_app::formats::with_extension(&path.to_string_lossy(), "vizdaw", &["vizdaw"]);
     PathBuf::from(path)
+}
+
+/// The app's state, once [`crate::install`] made it.
+pub(crate) fn try_global(cx: &App) -> Option<Entity<AppState>> {
+    cx.try_global::<GlobalAppState>().map(|g| g.0.clone())
 }
 
 /// Creates the app state and makes it reachable through [`AppState::global`].

@@ -148,10 +148,8 @@ fn a_new_scale_applies_at_the_next_open() {
     }
 }
 
-/// Editor resize requests are followed only off macOS until the app's
-/// windows follow them there (H2): the macOS app ignores `editor_resize`,
-/// so an editor that grew itself would be clipped.
-#[cfg(not(target_os = "macos"))]
+/// Editor resize requests, followed on every platform (H2: the app's
+/// windows follow `editor_resize` on macOS too).
 mod requests {
     use super::*;
     use test_plugins::PARAM_GUI_REFUSE_SET_SIZE;
@@ -251,24 +249,24 @@ mod requests {
     }
 }
 
+/// Since H2 the macOS host accepts resize requests too (Cocoa sizes are
+/// points): reported once at the next idle.
 #[cfg(target_os = "macos")]
 #[test]
-fn on_macos_resize_requests_are_refused_and_nothing_changes() {
+fn on_macos_resize_requests_are_accepted_and_reported_in_points() {
     for resizable in [true, false] {
         let (mut p, _) = opened(resizable, SCALE);
         let p = p.as_mut();
-        let before = plugin_size(p);
-        assert_eq!(request(p, 800, 600), 0.0, "refused ({resizable})");
-        assert_eq!(p.idle().editor_resize, None);
-        assert_eq!(plugin_size(p), before);
-        assert_eq!(read(p, PARAM_GUI_SET_SIZES), 0.0, "no set_size");
+        assert_eq!(request(p, 420, 310), 1.0, "accepted ({resizable})");
+        assert_eq!(p.idle().editor_resize, Some((420, 310)), "{resizable}");
+        assert_eq!(p.idle().editor_resize, None, "reported once");
+        assert_eq!(plugin_size(p), (420, 310));
     }
 }
 
 /// The plug-in's own unregister calls while its editor and then the
 /// plug-in are destroyed are accepted: the instance leaves the run loop
-/// only after both (the host offers timers only off macOS).
-#[cfg(not(target_os = "macos"))]
+/// only after both.
 #[test]
 fn unregister_calls_during_destroy_are_accepted() {
     use test_plugins::{

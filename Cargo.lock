@@ -6393,6 +6393,8 @@ dependencies = [
  "image",
  "serde_json",
  "tempfile",
+ "test-plugins",
+ "x11rb",
 ]
 
 [[package]]

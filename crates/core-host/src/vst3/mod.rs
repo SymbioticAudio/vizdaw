@@ -9,8 +9,10 @@
 //! [`Vst3Format`] makes them and shares one loaded module between the
 //! instances of a bundle. An active instance's real-time half is a
 //! [`Vst3Processor`]. A plug-in's state is kept in the `.vstpreset`
-//! layout (`state.rs`).
+//! layout (`state.rs`). Its editor is the controller's `IPlugView`
+//! (`editor.rs`).
 
+mod editor;
 mod ffi;
 mod instance;
 mod module;

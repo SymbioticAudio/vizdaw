@@ -15,12 +15,12 @@ The original design (2026-10-15) aimed for "a native modern Mac UI" and listed W
 2. **One interface in GPUI** (https://gpui.rs/, Apache-2.0), all in Rust, calling the core directly. **(owner: "let's try with GPUI")**
 3. **Platforms at 27.1.0: macOS and Linux.** (controller's call; owner did not object) Windows follows as soon as both are solid, on the same interface.
 4. **Plug-in formats:** AU on macOS only (existing host in `platform-macos`); CLAP and VST3 on every platform. VST3 is new (backlog row "VST3 hosting"). (controller's call, from the backlog's existing 27.1.0 schedule)
-5. **Linux audio and MIDI through PipeWire; plug-in windows on X11 and Wayland.** (owner, 2026-11-03, backlog row "Linux app")
+5. **Linux audio and MIDI through PipeWire; plug-in windows on X11, and in Wayland sessions through XWayland (the app runs as X11 when `DISPLAY` is set); native-Wayland plug-in windows are a 27.x item.** (owner, 2026-11-03, backlog row "Linux app"; amended (owner, 2026-11-24, D2))
 6. **Song format compatibility:** a project saved by the Swift test build opens in 27.1.0 unchanged (format v11 at the time of writing; any bump follows the usual migration rules).
 
 ## 2a. Owner rulings (2026-11-20)
 
-- **Linux may ship with known gaps, but each gap gets an answer.** **(owner)** Every parity row that does not pass on Linux is listed with its answer: the workaround Linux users get at 27.1.0, or the 27.x release that closes it. No gap is left as "unknown". The Mac has full parity. Known gaps today: the bundled Multi-Q default EQ is AU-only (answer: CLAP build, or a built-in EQ default on Linux); Co-Producer approvals are stored in the Mac Keychain (answer: the Secret Service password store on Linux); AU inserts in Mac projects (answer: placeholders, §10).
+- **Linux may ship with known gaps, but each gap gets an answer.** **(owner)** Every parity row that does not pass on Linux is listed with its answer: the workaround Linux users get at 27.1.0, or the 27.x release that closes it. No gap is left as "unknown". The Mac has full parity. Known gaps today: the bundled Multi-Q default EQ is AU-only (answer: CLAP build, or a built-in EQ default on Linux); Co-Producer approvals are stored in the Mac Keychain (answer: the Secret Service password store on Linux); AU inserts in Mac projects (answer: placeholders, §10); plug-in editor windows in a native-Wayland session (answer: the app runs as X11 through XWayland whenever `DISPLAY` is set, so every editor embeds; native-Wayland editor windows are a 27.x item; owner, 2026-11-24, D2).
 - **Screen-reader support moves to 27.2.** **(owner)** 27.1.0 keeps labels, roles and keyboard navigation wherever GPUI gives them (the control channel needs the labels anyway), but VoiceOver and Orca support is not a release requirement. Spike check 2 is reported, not a hard fail.
 
 ## 2b. Owner rulings (2026-11-23, host track)

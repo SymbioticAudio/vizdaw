@@ -89,6 +89,8 @@ pub struct DocumentModel {
     pub(crate) list_focused: bool,
     /// The mixer, made when first asked, and its strip selection.
     pub(crate) mixer: crate::mixer::DocMixer,
+    /// The plug-in tick's news for the plug-in windows (host H2).
+    pub(crate) plugin_news: crate::plugin_window::PluginNews,
     /// The jobs this document's UI started, as last read (slice 7a).
     pub(crate) jobs: Vec<vizdaw_ffi::JobRow>,
     /// A finished job's problems (the Problems banner).
@@ -249,6 +251,7 @@ impl DocumentModel {
             list_prefs: crate::list::ListPrefs::default(),
             list_focused: false,
             mixer: crate::mixer::DocMixer::default(),
+            plugin_news: crate::plugin_window::PluginNews::default(),
             jobs: vec![],
             job_problems: vec![],
             problems: vec![],
@@ -382,6 +385,12 @@ impl DocumentModel {
         }
         if let Some(s) = news.snapshot {
             self.apply(s);
+            arrived = true;
+        }
+        if self
+            .plugin_news
+            .take(news.params_changed, news.editor_resize)
+        {
             arrived = true;
         }
         if news.media_changed {

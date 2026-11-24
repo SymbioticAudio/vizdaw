@@ -393,7 +393,8 @@ pub(crate) fn close_windows(doc: DocId, cx: &mut App) {
         .read(cx)
         .windows()
         .iter()
-        .filter(|w| w.doc == doc)
+        // Its plug-in windows close with it (before its session drops).
+        .filter(|w| w.doc == doc && w.kind.is_document_window())
         .map(|w| w.handle)
         .collect();
     for h in handles {
@@ -818,7 +819,7 @@ fn shown(id: &str, doc: DocId, cx: &mut App) -> Result<Value, ControlError> {
         .read(cx)
         .windows()
         .iter()
-        .find(|w| w.handle == h)
+        .find(|w| w.handle == h.into())
         .cloned()
         .ok_or_else(super::gone)?;
     Ok(ran_json(id, doc, &entry, None, None))
@@ -827,8 +828,12 @@ fn shown(id: &str, doc: DocId, cx: &mut App) -> Result<Value, ControlError> {
 /// Opens `doc`'s window (a failure is the alert it raised).
 fn show(doc: DocId, cx: &mut App) -> Result<gpui::WindowHandle<DocumentWindow>, ControlError> {
     let app = AppState::global(cx);
-    if let Some(w) = app.read(cx).window_of(doc) {
-        return Ok(w.handle);
+    if let Some(h) = app
+        .read(cx)
+        .window_of(doc)
+        .and_then(|w| w.document_window())
+    {
+        return Ok(h);
     }
     let before = super::alert_id(cx);
     DocumentWindow::open(&app, doc, cx).map_err(|m| {

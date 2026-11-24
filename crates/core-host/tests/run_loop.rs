@@ -2,8 +2,8 @@
 //! `posix-fd-support`, driven through the timer test plug-in with a
 //! deterministic clock. Each test runs on its own thread, and the run loop
 //! belongs to the thread that creates the instances, so tests never see
-//! each other's registrations. The host offers both extensions only off
-//! macOS for now, so the loop is driven only there.
+//! each other's registrations. The host offers both extensions on every
+//! unix (macOS included since H2, where the app pumps the loop too).
 #![cfg(unix)]
 
 use core_host::{FdFlags, PluginInstance};
@@ -30,28 +30,19 @@ fn fd_value(fd: i32, flags: FdFlags) -> f64 {
 }
 
 #[test]
-fn the_host_offers_timer_and_fd_support_only_off_macos() {
+fn the_host_offers_timer_and_fd_support_on_every_unix() {
     let mut p = common::load(TIMER);
     let p = p.as_mut();
     let timer = cmd(p, PARAM_TIMER_REGISTER, 10.0);
     let fd = cmd(p, PARAM_FD_REGISTER, fd_value(5, R));
-    if cfg!(target_os = "macos") {
-        assert_eq!(
-            (timer, fd),
-            (-1.0, 0.0),
-            "nothing drives the loop on macOS yet"
-        );
-    } else {
-        assert!(timer >= 0.0, "a timer id");
-        assert_eq!(fd, 1.0);
-    }
+    assert!(timer >= 0.0, "a timer id");
+    assert_eq!(fd, 1.0);
 }
 
-/// The loop driven through the plug-in (off macOS, where the host offers it).
-#[cfg(not(target_os = "macos"))]
+/// The loop driven through the plug-in.
 mod driven {
     use super::*;
-    use core_host::{run_loop_fds, run_loop_tick};
+    use core_host::{run_loop_fds, run_loop_pump, run_loop_tick};
     use std::time::{Duration, Instant};
     use test_plugins::{
         PARAM_FD_CALLS, PARAM_FD_FLAGS, PARAM_FD_MODIFY, PARAM_FD_SELF_UNREGISTER,
@@ -230,5 +221,77 @@ mod driven {
         assert_ne!(first, second);
         assert_eq!((fires(p, first), fires(p, second)), (1, 0));
         assert_eq!(fires(p, zero), 8);
+    }
+
+    /// The app's call: polls the registered descriptors without waiting,
+    /// then ticks at the real clock. On macOS too (H2).
+    #[test]
+    fn the_timer_kind_ticks_through_the_pump() {
+        let mut p = common::load(TIMER);
+        let p = p.as_mut();
+        let t = register_timer(p, 0);
+        for _ in 0..3 {
+            run_loop_pump();
+        }
+        assert_eq!(fires(p, t), 3, "a period-0 timer fires once per pump");
+    }
+
+    /// A plug-in that closes a descriptor before unregistering it gets one
+    /// error callback (POLLNVAL), not one per pump; the descriptor is left
+    /// out of `run_loop_fds` until it is modified or registered again.
+    #[test]
+    fn a_closed_fd_gets_one_error_until_it_is_modified_or_registered_again() {
+        // A high number nothing else in this process opens meanwhile (the
+        // lowest free number is always taken first).
+        const FD: i32 = 900;
+        let mut fds = [0; 2];
+        // SAFETY: `fds` has room for the two ends; `dup2` onto an unused
+        // number and closing what we opened touch no memory of ours.
+        unsafe {
+            assert_eq!(libc::pipe(fds.as_mut_ptr()), 0);
+            assert_eq!(libc::dup2(fds[0], FD), FD);
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+        let mut p = common::load(TIMER);
+        let p = p.as_mut();
+        assert_eq!(cmd(p, PARAM_FD_REGISTER, fd_value(FD, R)), 1.0);
+        // SAFETY: closing our own descriptor.
+        unsafe { libc::close(FD) };
+        for _ in 0..5 {
+            run_loop_pump();
+        }
+        assert_eq!((fd_calls(p, FD), fd_flags(p, FD)), (1, E), "once");
+        assert!(run_loop_fds().is_empty(), "left out after its error");
+        // Not even a caller's own ready list reaches it.
+        run_loop_tick(Instant::now(), &[(FD, R | E)]);
+        assert_eq!(fd_calls(p, FD), 1);
+        // Modified: watched again (still closed: one more error).
+        assert_eq!(cmd(p, PARAM_FD_MODIFY, fd_value(FD, R)), 1.0);
+        assert_eq!(run_loop_fds(), vec![(FD, R)]);
+        run_loop_pump();
+        run_loop_pump();
+        assert_eq!(fd_calls(p, FD), 2);
+        // Registered again without an unregister: taken, watched again.
+        assert_eq!(cmd(p, PARAM_FD_REGISTER, fd_value(FD, R)), 1.0);
+        assert_eq!(run_loop_fds(), vec![(FD, R)]);
+        run_loop_pump();
+        assert_eq!(fd_calls(p, FD), 3);
+        assert_eq!(cmd(p, PARAM_FD_UNREGISTER, f64::from(FD)), 1.0);
+        assert!(run_loop_fds().is_empty());
+    }
+
+    /// At most 256 timers per instance (a plug-in that leaks them would
+    /// make every tick slower).
+    #[test]
+    fn the_257th_timer_is_refused() {
+        let mut p = common::load(TIMER);
+        let p = p.as_mut();
+        let ids: Vec<u32> = (0..256).map(|_| register_timer(p, 1000)).collect();
+        assert_eq!(cmd(p, PARAM_TIMER_REGISTER, 1000.0), -1.0, "refused");
+        // One gone: room for one more.
+        assert_eq!(cmd(p, PARAM_TIMER_UNREGISTER, f64::from(ids[7])), 1.0);
+        register_timer(p, 1000);
+        assert_eq!(cmd(p, PARAM_TIMER_REGISTER, 1000.0), -1.0);
     }
 }

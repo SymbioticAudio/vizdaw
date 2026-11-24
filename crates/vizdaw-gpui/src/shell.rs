@@ -224,6 +224,9 @@ impl DocumentWindow {
                 window.activate_window();
             })
             .ok();
+        // The plug-in windows open when the project was saved open again,
+        // once this window is registered.
+        cx.defer(move |cx| crate::plugin_windows::reopen_saved(doc, cx));
         Ok(handle)
     }
 
@@ -236,12 +239,15 @@ impl DocumentWindow {
         doc: DocId,
         cx: &mut App,
     ) -> Result<WindowHandle<DocumentWindow>, String> {
-        if let Some(entry) = app.read(cx).mixer_window_of(doc).cloned() {
-            entry
-                .handle
+        if let Some(handle) = app
+            .read(cx)
+            .mixer_window_of(doc)
+            .and_then(|w| w.document_window())
+        {
+            handle
                 .update(cx, |_, window, _| window.activate_window())
                 .map_err(|e| e.to_string())?;
-            return Ok(entry.handle);
+            return Ok(handle);
         }
         if app.read(cx).store.document(doc).is_none() {
             return Err("the document is closed".into());
@@ -374,10 +380,11 @@ impl DocumentWindow {
                     // Its record popover goes with it: a draft left open
                     // would refuse Record with nothing on screen.
                     let host = match kind {
-                        WindowKind::Document => PopoverHost::Document,
-                        WindowKind::Mixer => PopoverHost::MixerWindow,
+                        WindowKind::Document => Some(PopoverHost::Document),
+                        WindowKind::Mixer => Some(PopoverHost::MixerWindow),
+                        WindowKind::Plugin | WindowKind::Other => None,
                     };
-                    if d.record().shows_popover_in(host) {
+                    if host.is_some_and(|h| d.record().shows_popover_in(h)) {
                         d.set_record_popover(false);
                     }
                     if kind == WindowKind::Document {
@@ -389,7 +396,9 @@ impl DocumentWindow {
                     WindowKind::Document => s.close_document(doc),
                     // Only the window goes; its placement released its
                     // own drags as it went.
-                    WindowKind::Mixer => s.remove_window(token),
+                    WindowKind::Mixer | WindowKind::Plugin | WindowKind::Other => {
+                        s.remove_window(token)
+                    }
                 }
                 cx.notify();
             });
@@ -407,7 +416,7 @@ impl DocumentWindow {
             // window polls it.
             _poll: match kind {
                 WindowKind::Document => Self::start_polling(doc, window, cx),
-                WindowKind::Mixer => Task::ready(()),
+                _ => Task::ready(()),
             },
             app,
             doc,
@@ -1311,7 +1320,11 @@ impl DocumentWindow {
     fn restart_polling(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.kind == WindowKind::Mixer {
             // The document's own window polls the transport.
-            let own = self.app.read(cx).window_of(self.doc).map(|w| w.handle);
+            let own = self
+                .app
+                .read(cx)
+                .window_of(self.doc)
+                .and_then(|w| w.document_window());
             if let Some(own) = own {
                 own.update(cx, |v, window, cx| v.restart_polling(window, cx))
                     .ok();

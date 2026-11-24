@@ -16,4 +16,11 @@ core-host = { path = "../core-host" }
 core-engine = { path = "../core-engine", features = ["fixtures"] }
 core-media = { path = "../core-media" }
 core-model = { path = "../core-model" }
+# The GPUI end to end's plug-in windows: the test CLAP and VST3 bundles.
+test-plugins = { path = "../test-plugins" }
 tempfile = "3"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# The GPUI end to end's X11 checks (the plug-in window's container and
+# the plug-in's child window, WM_TRANSIENT_FOR).
+x11rb = "0.13"

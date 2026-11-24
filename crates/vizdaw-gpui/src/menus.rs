@@ -159,6 +159,8 @@ pub enum MixerOp {
 
 /// The key context of a document window's root.
 pub const WINDOW_CONTEXT: &str = "DocumentWindow";
+/// The key context of a plug-in or Built-in Synth window's root.
+pub const PLUGIN_WINDOW_CONTEXT: &str = "PluginWindow";
 /// The editor commands (`commands::EDITOR_COMMANDS`) the GPUI app routes
 /// to its menus, keys and control channel: the grid, the Piano Roll, the
 /// List, closing the detail and Insert Event (the List's).
@@ -867,6 +869,7 @@ pub fn bindings(keymap: &Keymap) -> Vec<KeyBinding> {
         KeyBinding::new(secondary!("s"), Save, Some(WINDOW_CONTEXT)),
         KeyBinding::new(secondary!("shift-s"), SaveAs, Some(WINDOW_CONTEXT)),
         KeyBinding::new(secondary!("w"), CloseWindow, Some(WINDOW_CONTEXT)),
+        KeyBinding::new(secondary!("w"), CloseWindow, Some(PLUGIN_WINDOW_CONTEXT)),
         // As the command registry binds them: `transport.play_stop` Space,
         // `transport.stop` (stop and return) S.
         KeyBinding::new("space", PlayStop, Some(UNMODIFIED_KEYS)),

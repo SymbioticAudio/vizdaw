@@ -152,6 +152,10 @@ pub fn run(args: &Args, doc: &Document, seq: SeqId, catalog: &mut Catalog) -> Re
     let mut s = open(args, doc, seq, catalog, Tick::ZERO, true)?;
     loop {
         std::thread::sleep(Duration::from_millis(100));
+        // The plug-ins' run loop (CLAP timers and descriptors), on this
+        // thread, where they were created. No editors show here, so 100 ms
+        // resolution is enough: a timer due sooner fires late, once.
+        core_host::run_loop_pump();
         // `host_idle`: plugin callbacks, restarts (a latency change
         // recompiles), processors coming back.
         // An error is reported and playback goes on: the host keeps a

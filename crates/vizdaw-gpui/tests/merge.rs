@@ -397,7 +397,7 @@ fn no_match_asks_for_the_project(cx: &mut TestAppContext) {
         AppState::global(cx)
             .read(cx)
             .document_windows()
-            .map(|w| w.handle)
+            .filter_map(|w| w.document_window())
             .find(|h| *h != s.window)
     });
     let w = w.expect("its window opened");

@@ -21,6 +21,7 @@ mod midi_strip;
 pub mod mixer_view;
 pub mod panes;
 pub mod piano_roll;
+pub mod plugin_windows;
 pub mod record_popover;
 pub mod registry;
 pub mod screenshot;
@@ -59,6 +60,8 @@ pub fn install(store: DocumentStore, cx: &mut App) -> gpui::Entity<AppState> {
     sheet_host::install(cx);
     // Alerts and questions show as prompts when the state changes.
     alerts::install(&state, cx);
+    // Any quit closes every plug-in editor before a session drops.
+    plugin_windows::install(cx);
     // The store's file reads (DAWproject and AAF opens) run off the UI
     // thread from now on.
     control::files::install_spawner(cx);
@@ -128,12 +131,15 @@ pub fn open_path(path: &Path, cx: &mut App) -> Option<WindowHandle<DocumentWindo
 /// `doc`'s window brought to the front, or opened.
 pub(crate) fn show_or_front(doc: DocId, cx: &mut App) -> Option<WindowHandle<DocumentWindow>> {
     let app = AppState::global(cx);
-    if let Some(entry) = app.read(cx).window_of(doc).cloned() {
-        entry
-            .handle
+    if let Some(handle) = app
+        .read(cx)
+        .window_of(doc)
+        .and_then(|w| w.document_window())
+    {
+        handle
             .update(cx, |_, window, _| window.activate_window())
             .ok();
-        return Some(entry.handle);
+        return Some(handle);
     }
     show(Some(doc), cx)
 }
@@ -210,7 +216,7 @@ fn quit_or_ask(cx: &mut App) {
             .store
             .front()
             .and_then(|d| s.window_of(d))
-            .or_else(|| s.windows().first())
+            .or_else(|| s.document_windows().next())
             .map(|w| w.handle);
         (dirty, front, waiting)
     };
@@ -225,7 +231,7 @@ fn quit_or_ask(cx: &mut App) {
         return;
     };
     let answer = alerts::ask(
-        front.into(),
+        front,
         sheet_host::Ask::with_labels(
             PromptLevel::Warning,
             "Quit without saving?",
@@ -250,7 +256,7 @@ pub fn commit_renames(cx: &mut App) {
         .read(cx)
         .windows()
         .iter()
-        .map(|w| w.handle)
+        .filter_map(|w| w.document_window())
         .collect();
     for handle in handles {
         handle
@@ -259,15 +265,49 @@ pub fn commit_renames(cx: &mut App) {
     }
 }
 
-/// Closes every document (stopping its transport, dropping it so no poll
-/// reads a closed session) and quits.
+/// Closes every plug-in editor, then every document (stopping its
+/// transport, dropping it so no poll reads a closed session), and quits.
 pub fn quit_now(cx: &mut App) {
     let app = AppState::global(cx);
     app.update(cx, |s, cx| {
+        // Before any session drops: no plug-in outlives its parent view.
+        s.close_plugin_windows();
         s.close_all();
         cx.notify();
     });
     cx.quit();
+}
+
+/// How often the plug-ins' run loop is pumped: plug-in timers are often
+/// 16-30 ms, so faster than the 50 ms document idle.
+pub const RUN_LOOP_EVERY: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// The plug-ins' main-thread run loop (CLAP timers and descriptors, VST3
+/// `Linux::IRunLoop`): one app-wide loop on the main thread, where every
+/// document's plug-ins and bounce copies load (the loop's table is per
+/// thread, so one pump serves every document). Each pass polls without
+/// waiting, under the plug-in registry's busy mark (a nested loop a
+/// plug-in callback runs gets `Busy` from every registry call); nothing in
+/// it calls back into the app.
+pub fn pump_plugin_run_loop(cx: &mut App) {
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor().timer(RUN_LOOP_EVERY).await;
+            vizdaw_ffi::editor::run_loop_pump();
+        }
+    })
+    .detach();
+}
+
+/// The platform the app runs on. On Linux with `DISPLAY` set it is X11
+/// (XWayland in a Wayland session; ruling D2), so every plug-in editor
+/// embeds; native-Wayland editor windows are a 27.x item.
+fn platform_application() -> gpui::Application {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty()) {
+        return gpui_platform::linux(gpui::WindowingModes::X11);
+    }
+    gpui_platform::application()
 }
 
 /// Starts the app with one new document window (the demo with
@@ -276,8 +316,9 @@ pub fn quit_now(cx: &mut App) {
 /// status 2, so a launching agent learns at once.
 pub fn run() {
     let options = control::LaunchOptions::from_env();
-    gpui_platform::application().run(move |cx: &mut App| {
+    platform_application().run(move |cx: &mut App| {
         let state = install(DocumentStore::live(), cx);
+        pump_plugin_run_loop(cx);
         file_panels::use_native(cx);
         // Off macOS the platform has no prompt: GPUI's prompts are drawn
         // as the sheet card (with Return and Esc).
@@ -287,6 +328,10 @@ pub fn run() {
         // The preferences under the launch home (a throwaway e2e home
         // keeps its own).
         state.update(cx, |s, _| s.set_prefs(vizdaw_app::Prefs::open()));
+        // Before any document opens, so their plug-ins load.
+        if let Some(problem) = vizdaw_app::session::open_plugin_catalog() {
+            eprintln!("{problem}");
+        }
         // Before any document opens.
         if let Some(path) = &options.control
             && let Err(e) = control::start(path, cx)

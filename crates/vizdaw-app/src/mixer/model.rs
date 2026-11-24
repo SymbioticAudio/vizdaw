@@ -354,6 +354,12 @@ impl MixerModel {
         self.touches.contains(&t) || self.core_touched.contains(&t) || self.pending.contains_key(&t)
     }
 
+    /// The core took this view's touch of `t` and it is not released yet
+    /// (a refused touch, or one a refused value released, is not held).
+    pub fn holds_touch(&self, t: Target) -> bool {
+        self.touches.contains(&t)
+    }
+
     /// A release met Busy and waits for a retry.
     pub fn release_pending(&self) -> bool {
         !self.pending.is_empty()
@@ -622,21 +628,23 @@ impl MixerModel {
 
     /// Touch at `v`, value and release at once (mute, solo, a reset, a
     /// typed value). Ignored while the target is touched here. A refused
-    /// touch sends nothing else; a later failure still releases it.
-    pub fn click(&mut self, doc: &mut DocumentModel, t: Target, v: f64, now: Instant) {
+    /// touch sends nothing else; a later failure still releases it. True
+    /// when the value was heard.
+    pub fn click(&mut self, doc: &mut DocumentModel, t: Target, v: f64, now: Instant) -> bool {
         if self.touches.contains(&t) {
-            return;
+            return false;
         }
         // This click's own release closes a waiting one.
         self.pending.remove(&t);
         let session = doc.session().clone();
         if let Err(e) = session.gesture(t, GesturePhaseRow::Touch { value: Some(v) }) {
             raise(doc, AlertItem::from_error(&e, failure_title(t)));
-            return;
+            return false;
         }
-        match session.gesture(t, GesturePhaseRow::Value { value: v }) {
+        let heard = match session.gesture(t, GesturePhaseRow::Value { value: v }) {
             Ok(()) => {
                 self.send_release(doc, t, false, now);
+                true
             }
             Err(e) => {
                 // The touch was taken: close it, and report the value's
@@ -645,9 +653,11 @@ impl MixerModel {
                     self.pend(t, false, now);
                 }
                 raise(doc, AlertItem::from_error(&e, failure_title(t)));
+                false
             }
-        }
+        };
         self.gesture_landed(doc);
+        heard
     }
 
     /// Releases every touch still open here (the last placement or the
@@ -673,6 +683,21 @@ impl MixerModel {
         self.alone.clear();
         if landed {
             self.gesture_landed(doc);
+        }
+    }
+
+    /// The control of `t` went (a plug-in parameter or slot the mixer does
+    /// not list): its drag ends and a held touch is released once,
+    /// quietly, as a refetch does for the mixer's own
+    /// controls. A release waiting on Busy goes with it.
+    pub fn drop_touch(&mut self, doc: &DocumentModel, t: Target) {
+        self.editing.remove(&t);
+        self.pending.remove(&t);
+        self.live.remove(&t);
+        self.core_touched.remove(&t);
+        let alone = self.alone.remove(&t);
+        if self.touches.remove(&t) {
+            let _ = send(doc.session(), t, GesturePhaseRow::Release, alone);
         }
     }
 

@@ -27,6 +27,7 @@
 //! - host values while active: through the processor's context, as
 //!   plain values it converts.
 
+use super::editor::Vst3Editor;
 use super::ffi::{ComponentHandler, EDIT_QUEUE, Edit, Module, Plugin};
 use super::process_ffi::RtData;
 use super::processor::{ParamMap, ProcessorSetup, Vst3Processor};
@@ -92,8 +93,11 @@ struct Active {
 /// A loaded VST3 plug-in (main-thread half). Not `Send`: the VST3 SDK
 /// ties a component and controller to the thread that made them.
 pub struct Vst3Instance {
-    /// Declared first: dropped (disconnected, terminated, released)
-    /// before the module it came from.
+    /// Declared first: its view is closed and released before the
+    /// controller is terminated (also closed explicitly in `drop`).
+    editor: Vst3Editor,
+    /// Dropped (disconnected, terminated, released) before the module it
+    /// came from.
     plugin: Plugin,
     handler: ComWrapper<ComponentHandler>,
     /// The plug-in's class ID (its state blobs carry it).
@@ -149,6 +153,7 @@ impl Vst3Instance {
         let handler = ComWrapper::new(ComponentHandler::new());
         let plugin = Plugin::create(&module, &cid, &handler)?;
         let mut me = Vst3Instance {
+            editor: Vst3Editor::new(plugin.controller()),
             plugin,
             handler,
             class_id: cid,
@@ -491,7 +496,11 @@ impl PluginInstance for Vst3Instance {
     }
 
     fn editor(&mut self) -> Option<&mut dyn PluginEditor> {
-        None
+        if self.editor.available() {
+            Some(&mut self.editor)
+        } else {
+            None
+        }
     }
 
     fn idle(&mut self) -> InstanceEvents {
@@ -515,7 +524,7 @@ impl PluginInstance for Vst3Instance {
                 || has(restart::PARAM_TITLES_CHANGED)
                 || has(restart::PARAM_ID_MAPPING_CHANGED),
             state_dirty: self.handler.take_dirty(),
-            editor_resize: None,
+            editor_resize: self.editor.take_resize(),
         }
     }
 
@@ -581,6 +590,9 @@ impl PluginInstance for Vst3Instance {
 
 impl Drop for Vst3Instance {
     fn drop(&mut self) {
+        // The editor's view goes first: removed and released before the
+        // controller is terminated (H1 Review Focus 1).
+        PluginEditor::close(&mut self.editor);
         // An instance dropped while active is deactivated first (the
         // host deactivates before dropping; this covers the rest).
         if self.active.take().is_some() {

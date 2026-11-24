@@ -16,7 +16,9 @@
 //! | [`VST3_PROCESS_CRASHER_ID`] | Test Process Crasher | `Fx` | Test Gain that crashes (SIGSEGV) in `process` |
 //! | [`VST3_NAN_ID`] | Test NaN | `Fx` | Test Gain whose first output sample of every block is NaN |
 //! | [`VST3_BANK_ID`] | Test Bank | `Fx` | single component: Test Gain's buses and parameters plus [`VST3_BANK_SIZE`] more (IDs from [`VST3_BANK_BASE`], plain = normalised), all in its component state |
+//! | [`VST3_VIEW_ID`] | Test View | `Fx` | Test Gain's component with the [`VST3_VIEW_CONTROLLER_ID`] controller, whose `createView("editor")` makes the test editor (`vst3_view`) |
 //! | [`VST3_CONTROLLER_ID`] | Test Controller | (controller class) | Test Gain's controller; not a plug-in |
+//! | [`VST3_VIEW_CONTROLLER_ID`] | Test View Controller | (controller class) | Test View's: Test Controller with an editor; not a plug-in |
 //!
 //! Like a plug-in built with the SDK, the factory is only handed out after
 //! the module entry (`bundleEntry` on macOS, `ModuleEntry` on Linux) ran.
@@ -59,8 +61,9 @@ use std::ffi::{CStr, c_char, c_void};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::thread::ThreadId;
-// The bindings' module (named after the SDK's vendor) is only named here.
-use vst3::Steinberg as sdk;
+// The bindings' module (named after the SDK's vendor) is only named here
+// (`vst3_view` uses this re-export).
+pub(crate) use vst3::Steinberg as sdk;
 use vst3::com_scrape_types::Unknown;
 use vst3::{Class, ComPtr, ComRef, ComWrapper, Interface, uid};
 
@@ -108,6 +111,10 @@ pub const VST3_BANK_BASE: u32 = 1000;
 pub const VST3_BANK_SIZE: usize = 256;
 /// Class ID of the controller class (not a plug-in, never listed).
 pub const VST3_CONTROLLER_ID: &str = "56495A44565354337E570000ABCD00FF";
+/// Class ID of "Test View" (Test Gain with an editor, `vst3_view`).
+pub const VST3_VIEW_ID: &str = "56495A44565354337E570000ABCD0008";
+/// Class ID of Test View's controller class (not a plug-in, never listed).
+pub const VST3_VIEW_CONTROLLER_ID: &str = "56495A44565354337E570000ABCD00FE";
 
 const GAIN: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_0001);
 const SYNTH: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_0002);
@@ -117,6 +124,8 @@ const PROCESS_CRASHER: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_
 const NAN: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_0006);
 const BANK: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_0007);
 const CONTROLLER: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_00FF);
+const VIEW: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_0008);
+const VIEW_CONTROLLER: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_00FE);
 
 const AUDIO_MODULE: &str = "Audio Module Class";
 const CONTROLLER_CLASS: &str = "Component Controller Class";
@@ -270,7 +279,7 @@ struct ClassDef {
     sub_categories: &'static str,
 }
 
-const CLASSES: [ClassDef; 8] = [
+const CLASSES: [ClassDef; 10] = [
     ClassDef {
         cid: GAIN,
         category: AUDIO_MODULE,
@@ -318,6 +327,18 @@ const CLASSES: [ClassDef; 8] = [
         category: AUDIO_MODULE,
         name: "Test Bank",
         sub_categories: "Fx",
+    },
+    ClassDef {
+        cid: VIEW,
+        category: AUDIO_MODULE,
+        name: "Test View",
+        sub_categories: "Fx",
+    },
+    ClassDef {
+        cid: VIEW_CONTROLLER,
+        category: CONTROLLER_CLASS,
+        name: "Test View Controller",
+        sub_categories: "",
     },
 ];
 
@@ -436,8 +457,13 @@ fn bump(i: usize) {
     }
 }
 
+/// The next sequence number (the view counters share the clock).
+pub(crate) fn next_seq() -> u64 {
+    SEQ.fetch_add(1, Ordering::SeqCst) + 1
+}
+
 fn stamp(i: usize) {
-    let t = SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    let t = next_seq();
     if let Some(c) = COUNTERS.get(i) {
         c.store(t, Ordering::SeqCst);
     }
@@ -761,11 +787,14 @@ struct Ctl {
     memo: AtomicU64,
     handler: Mutex<Option<ComPtr<IComponentHandler>>>,
     creator: ThreadId,
+    /// `createView("editor")` makes a `vst3_view` view (Test View).
+    view: bool,
 }
 
 impl Ctl {
     fn new(bank: bool) -> Ctl {
         Ctl {
+            view: false,
             values: VST3_PARAMS.map(|p| AtomicU64::new(p.default.to_bits())),
             bank: bank_cells(bank),
             memo: AtomicU64::new(NEXT_MEMO.load(Ordering::SeqCst)),
@@ -1023,9 +1052,15 @@ macro_rules! edit_controller {
                 kResultOk
             }
 
-            unsafe fn createView(&self, _name: FIDString) -> *mut IPlugView {
+            unsafe fn createView(&self, name: FIDString) -> *mut IPlugView {
                 self.ctl.check();
-                std::ptr::null_mut()
+                // SAFETY: the host's view type, a NUL-terminated string.
+                let editor = !name.is_null() && unsafe { CStr::from_ptr(name) } == c"editor";
+                if self.ctl.view && editor {
+                    crate::vst3_view::create()
+                } else {
+                    std::ptr::null_mut()
+                }
             }
         }
     };
@@ -1549,6 +1584,8 @@ fn component_terminate() {
 /// Test Gain's component: buses and a processor; its controller is the
 /// separate [`Controller`] class, connected through `IConnectionPoint`.
 struct Component {
+    /// The controller class it names (Test Gain's, or Test View's).
+    controller: TUID,
     host: Mutex<Option<ComPtr<IHostApplication>>>,
     peer: Mutex<Option<ComPtr<IConnectionPoint>>>,
     proc: Proc,
@@ -1589,7 +1626,7 @@ impl IComponentTrait for Component {
             return kInvalidArgument;
         }
         // SAFETY: the host passes room for one TUID.
-        unsafe { *class_id = CONTROLLER };
+        unsafe { *class_id = self.controller };
         kResultOk
     }
 
@@ -1932,8 +1969,13 @@ impl IPluginFactoryTrait for Factory {
             }
         }
         mark_thread();
-        let made = if cid == GAIN || cid == PROCESS_CRASHER || cid == NAN {
+        let made = if cid == GAIN || cid == PROCESS_CRASHER || cid == NAN || cid == VIEW {
             ComWrapper::new(Component {
+                controller: if cid == VIEW {
+                    VIEW_CONTROLLER
+                } else {
+                    CONTROLLER
+                },
                 host: Mutex::new(None),
                 peer: Mutex::new(None),
                 proc: Proc::new(false, cid == PROCESS_CRASHER, cid == NAN, false),
@@ -1953,9 +1995,12 @@ impl IPluginFactoryTrait for Factory {
                 buses: &GAIN_BUSES,
             })
             .to_com_ptr::<FUnknown>()
-        } else if cid == CONTROLLER {
+        } else if cid == CONTROLLER || cid == VIEW_CONTROLLER {
             ComWrapper::new(Controller {
-                ctl: Ctl::new(false),
+                ctl: Ctl {
+                    view: cid == VIEW_CONTROLLER,
+                    ..Ctl::new(false)
+                },
                 peer: Mutex::new(None),
             })
             .to_com_ptr::<FUnknown>()
@@ -2009,6 +2054,7 @@ impl IPluginFactory3Trait for Factory {
         if host.is_some() {
             bump(ix::HOST_CONTEXTS);
         }
+        crate::vst3_view::note_host_context(context);
         kResultOk
     }
 }
@@ -2282,7 +2328,7 @@ impl Vst3Counters {
 /// counters outlive the host's own load and unload. Open it on a private
 /// copy of the bundle (`copy_vst3_bundle`) so parallel tests do not share
 /// an image; open it before the host loads the bundle.
-pub struct Vst3Probe(libloading::Library);
+pub struct Vst3Probe(pub(crate) libloading::Library);
 
 impl Vst3Probe {
     /// Opens the binary of the VST3 bundle at `bundle`. Does not run the

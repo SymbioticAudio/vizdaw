@@ -526,7 +526,7 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var openBusy = 0
     /// mixer() and params() throw Busy while true.
     var readBusy = false
-    func openEditor(slot: UInt64, parent: UInt64) throws -> EditorSize {
+    func openEditor(slot: UInt64, parent: UInt64, scale: Double) throws -> EditorSize {
         if openBusy > 0 {
             openBusy -= 1
             throw VizError.Busy(message: "plugin host is busy")

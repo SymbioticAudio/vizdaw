@@ -419,7 +419,7 @@ fn present_recovery(cx: &mut App) {
         s.document_windows()
             .filter_map(|w| {
                 let message = s.store.document(w.doc)?.recovery_offer()?;
-                Some((w.doc, w.handle.into(), message))
+                Some((w.doc, w.handle, message))
             })
             .collect()
     };
@@ -475,7 +475,7 @@ fn presenter(cx: &mut App) -> &mut Presenter {
 fn target(doc: Option<DocId>, cx: &App) -> Target {
     let s = AppState::global(cx).read(cx);
     if let Some(w) = doc.and_then(|d| s.window_of(d)) {
-        return Target::Window(w.handle.into());
+        return Target::Window(w.handle);
     }
     // A window whose document the store closed is about to go.
     let open = |w: &&crate::app_state::WindowEntry| s.store.document(w.doc).is_some();
@@ -485,8 +485,8 @@ fn target(doc: Option<DocId>, cx: &App) -> Target {
         .and_then(|(_, token)| s.windows().iter().find(|w| w.token == token))
         .filter(open);
     let front = s.store.front().and_then(|d| s.window_of(d));
-    match key.or(front).or_else(|| s.windows().iter().find(open)) {
-        Some(w) => Target::Window(w.handle.into()),
+    match key.or(front).or_else(|| s.document_windows().find(open)) {
+        Some(w) => Target::Window(w.handle),
         None => Target::Dialog,
     }
 }

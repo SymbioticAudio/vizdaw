@@ -161,8 +161,10 @@ impl DocumentWindow {
     /// The record popover's host in this window.
     pub(crate) fn popover_host(&self) -> PopoverHost {
         match self.kind() {
-            WindowKind::Document => PopoverHost::Document,
             WindowKind::Mixer => PopoverHost::MixerWindow,
+            // A document window; plug-in and Built-in Synth windows are
+            // not `DocumentWindow`s and have no bar.
+            WindowKind::Document | WindowKind::Plugin | WindowKind::Other => PopoverHost::Document,
         }
     }
 

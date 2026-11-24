@@ -1082,6 +1082,28 @@ impl Session {
         self.lock_inner().mpe_owed.insert(LaneId(lane), mpe);
     }
 
+    /// Owes the next `idle` a resize slot `slot`'s editor asked for, as one
+    /// the plug-in host reported at a pump without an `idle` (test hook).
+    /// Not exported to Swift.
+    pub fn debug_owe_editor_resize(&self, slot: u64, width: u32, height: u32) {
+        self.lock_inner()
+            .news
+            .editor_resize
+            .push(crate::editor::EditorResize {
+                slot,
+                width,
+                height,
+            });
+    }
+
+    /// The next `opens` [`Session::open_editor`] calls for `slot` answer
+    /// as an editor whose view has not arrived yet (an AU v3 view
+    /// controller still on its way; test hook): `Busy` "editor opening",
+    /// with the plug-in untouched. Not exported to Swift.
+    pub fn debug_editor_opening(&self, slot: u64, opens: u32) {
+        editor::debug_opening(self.id, slot, opens);
+    }
+
     /// Owes the composer a finished plug-in gesture on `slot`, as one the
     /// audio side's ring delivered and the next pump commits (test hook;
     /// plan 8a Task 4 fix round 1). Not exported to Swift.
@@ -3792,43 +3814,6 @@ fn write_windows(
     }
 }
 
-/// Editors for the Rust app (not exported: the Swift app's
-/// `SessionProtocol` stays as it is).
-impl Session {
-    /// [`Session::open_editor`] at window scale `scale` (physical pixels per
-    /// point; non-finite or non-positive counts as 1): where the window API
-    /// works in pixels (X11) the editor's pixel size follows it, set before
-    /// the editor is parented (CLAP gui order). Sizes in and out are points
-    /// everywhere, so on macOS the scale changes nothing. Same contracts as
-    /// [`Session::open_editor`].
-    pub fn open_editor_scaled(
-        &self,
-        slot: u64,
-        parent: u64,
-        scale: f64,
-    ) -> Result<EditorSize, VizError> {
-        ffi_guard(|| {
-            let parent = editor::parent(parent)?;
-            plugins::with(self.id, |p| {
-                let ed = p
-                    .and_then(|p| p.instance(PluginInstanceId(slot)))
-                    .and_then(|i| i.editor())
-                    .ok_or_else(|| unavailable("the plugin has no editor"))?;
-                // Applied at `open`, between the plug-in's create and its
-                // parent.
-                ed.set_scale(scale);
-                let (width, height) = ed.open(parent).map_err(|e| unavailable(&e.to_string()))?;
-                Ok(EditorSize {
-                    width,
-                    height,
-                    resizable: ed.can_resize(),
-                })
-            })
-            .and_then(|r| r)
-        })
-    }
-}
-
 #[derive(serde::Serialize, serde::Deserialize)]
 struct UiState {
     open_plugin_windows: Vec<u64>,
@@ -3843,21 +3828,50 @@ struct UiState {
 impl Session {
     /// Shows slot `slot`'s editor inside the view at address `parent` (an
     /// `NSView *` on macOS, an X11 window id on Linux; main thread; the view
-    /// lives until `close_editor`) at window scale 1: the Swift app's call,
-    /// on macOS, where editor sizes are points already.
-    /// [`Session::open_editor_scaled`] is the same with the window's scale.
+    /// lives until `close_editor`) at window scale `scale` (physical pixels
+    /// per point; non-finite or non-positive counts as 1). Where the window
+    /// API works in pixels (X11) the editor's pixel size follows the scale,
+    /// set before the editor is parented (CLAP gui order); sizes in and out
+    /// are points everywhere, so on macOS the scale changes nothing.
     /// Fails with "editor unavailable" when the plugin has none (the app
     /// then shows its parameters) or when called off the main thread.
     ///
-    /// RE-ENTRANCY CONTRACT: an AU v3 editor spins the main run loop (up to
-    /// about 3 s) inside the plugin while it opens, so the app's 60 Hz timer
-    /// and other main-queue work call back into core-ffi meanwhile. This
-    /// function therefore holds NO session `inner` lock (nor any other mutex
-    /// a nested FFI call could take) across the open. Only the plugin
-    /// registry borrow of `plugins::with` is held; nested calls get
-    /// `VizError::Busy` and idle skips.
-    pub fn open_editor(&self, slot: u64, parent: u64) -> Result<EditorSize, VizError> {
-        self.open_editor_scaled(slot, parent, 1.0)
+    /// `Busy` "editor opening" while the editor's view is still on its way
+    /// (an AU v3 view controller, requested asynchronously): nothing is
+    /// attached yet; the window calls again on its tick (with the same
+    /// parent, which stays alive meanwhile) until it attaches or fails.
+    /// `Busy` "plugin host is busy" when called from inside a plug-in call.
+    ///
+    /// RE-ENTRANCY CONTRACT: no nested run loop runs inside this call (the
+    /// AU v3 wait is asynchronous), and it holds NO session `inner` lock
+    /// (nor any other mutex a nested FFI call could take) across the open,
+    /// should a plug-in run one anyway. Only the plugin registry borrow of
+    /// `plugins::with` is held; nested calls get `VizError::Busy` and idle
+    /// skips.
+    pub fn open_editor(&self, slot: u64, parent: u64, scale: f64) -> Result<EditorSize, VizError> {
+        ffi_guard(|| {
+            let parent = editor::parent(parent)?;
+            #[cfg(feature = "test-hooks")]
+            if editor::take_debug_opening(self.id, slot) {
+                return Err(editor_error(core_host::HostError::Opening));
+            }
+            plugins::with(self.id, |p| {
+                let ed = p
+                    .and_then(|p| p.instance(PluginInstanceId(slot)))
+                    .and_then(|i| i.editor())
+                    .ok_or_else(|| unavailable("the plugin has no editor"))?;
+                // Applied at `open`, between the plug-in's create and its
+                // parent.
+                ed.set_scale(scale);
+                let (width, height) = ed.open(parent).map_err(editor_error)?;
+                Ok(EditorSize {
+                    width,
+                    height,
+                    resizable: ed.can_resize(),
+                })
+            })
+            .and_then(|r| r)
+        })
     }
 
     /// Asks slot `slot`'s editor for a new size; returns what it took.
@@ -3886,13 +3900,14 @@ impl Session {
         })
     }
 
-    /// Hides slot `slot`'s editor (its window is closing) and ends any
-    /// gesture it left open. Like `open_editor`, holds no session lock
-    /// while the plugin runs (closing may also run the main loop).
+    /// Hides slot `slot`'s editor (its window is closing; an editor still
+    /// opening stops waiting), ends any gesture it left open, and drops a
+    /// resize it asked for that `idle` has not reported yet. Like
+    /// `open_editor`, holds no session lock while the plugin runs.
     ///
-    /// Returns VizError::Busy while another editor is opening (nested run
-    /// loop); the caller must keep the parent view alive and retry until
-    /// this returns Ok.
+    /// Returns VizError::Busy when called from inside a plug-in call (the
+    /// registry is borrowed); the caller must keep the parent view alive
+    /// and retry until this returns Ok.
     pub fn close_editor(&self, slot: u64) -> Result<(), VizError> {
         ffi_guard(|| {
             plugins::with(self.id, |p| {
@@ -3902,7 +3917,12 @@ impl Session {
                     }
                     p.end_gestures(PluginInstanceId(slot));
                 }
-            })
+            })?;
+            self.lock_inner()
+                .news
+                .editor_resize
+                .retain(|e| e.slot != slot);
+            Ok(())
         })
     }
 
@@ -3933,6 +3953,17 @@ impl Session {
                 .filter(|w| slots.contains(&PluginInstanceId(*w)))
                 .collect())
         })
+    }
+}
+
+/// An editor's failure: "editor opening" (`Busy`, retried on the window's
+/// tick) or "editor unavailable: …".
+fn editor_error(e: core_host::HostError) -> VizError {
+    match e {
+        core_host::HostError::Opening => VizError::Busy {
+            message: editor::OPENING.into(),
+        },
+        e => unavailable(&e.to_string()),
     }
 }
 

@@ -8,10 +8,11 @@
 //! step (`Bypass Plugin`, `Remove Plugin`, `Move Plugin`, `Set Sidechain`,
 //! `Remove EQ`), a refusal is the Swift alert title.
 //!
-//! Out of this slice (no new strings): "Open" and a double-click (plugin
-//! editor windows and the Built-in Synth's sound window), and everything
-//! that picks a plugin: "+", "EQ ＋", "Replace…" and the instrument menu.
-//! Their items show disabled.
+//! "Open" (and a slot's double-click, the EQ slot's click) opens the
+//! slot's plug-in window, and the Built-in Synth slot's double-click its
+//! sound window; the GPUI crate makes those windows. Out of this slice (no
+//! new strings): everything that picks a plugin: "+", "EQ ＋", "Replace…"
+//! and the instrument menu. Their items show disabled.
 
 use vizdaw_ffi::mixer::{StripKindRow, StripRow};
 use vizdaw_ffi::snapshot::{SlotRow, SlotStatus};
@@ -72,7 +73,7 @@ pub struct SidechainChoice {
 /// One item of a slot's menu, in Swift's order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlotMenuItem {
-    /// The plugin's window: out of this slice, disabled.
+    /// The plugin's window.
     Open,
     /// Safe mode held it off.
     Load,
@@ -103,13 +104,9 @@ impl SlotMenuItem {
         }
     }
 
-    /// The window and the catalogue are later slices: their items stay
-    /// disabled.
+    /// The catalogue is a later slice: its item stays disabled.
     pub fn enabled(&self) -> bool {
-        !matches!(
-            self,
-            SlotMenuItem::Open | SlotMenuItem::Replace | SlotMenuItem::Divider
-        )
+        !matches!(self, SlotMenuItem::Replace | SlotMenuItem::Divider)
     }
 }
 
