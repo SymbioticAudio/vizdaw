@@ -236,7 +236,7 @@ impl RegistryScope {
     /// one: its children show only inside its bounds. Add it as a child of
     /// the clipping (`overflow_hidden`, `.relative()`) element. It takes no
     /// index.
-    pub fn clip(&self) -> impl IntoElement {
+    pub fn clip(&self) -> impl IntoElement + use<> {
         let registry = self.registry.clone();
         let path = self.path.clone();
         canvas(

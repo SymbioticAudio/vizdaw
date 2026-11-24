@@ -57,6 +57,10 @@ use crate::transport_fields::TransportFields;
 
 /// How long a status text shows (Swift `StatusLine`).
 pub const STATUS_TIMEOUT: Duration = Duration::from_secs(6);
+/// How many frames [`DocumentWindow::fit_log`] keeps.
+const FIT_LOG_KEPT: usize = 32;
+/// One frame's pane host area and the centre's bounds in it.
+pub type FitFrame = (Bounds<gpui::Pixels>, Option<Bounds<gpui::Pixels>>);
 
 pub struct DocumentWindow {
     app: Entity<AppState>,
@@ -101,6 +105,9 @@ pub struct DocumentWindow {
     /// The size of the pane host's area (under the transport bar, above
     /// the status line), at the last draw (zero before the first).
     regions: Rc<Cell<gpui::Size<gpui::Pixels>>>,
+    /// Each frame's pane host area and the centre drawn in it, the last
+    /// [`FIT_LOG_KEPT`] frames.
+    fit_log: Rc<std::cell::RefCell<Vec<FitFrame>>>,
     /// The mixer's placements here: the Mix view's centre and the bottom
     /// pane's Mixer view, each while it shows.
     mix_view: Option<Placed>,
@@ -346,6 +353,7 @@ impl DocumentWindow {
             list_editor,
             piano_roll: PianoRoll::new(cx),
             regions: Rc::default(),
+            fit_log: Rc::default(),
             mix_view: None,
             pane_mixer: None,
             window_mixer: None,
@@ -899,6 +907,12 @@ impl DocumentWindow {
         }
     }
 
+    /// The last frames' pane host areas and the centre laid out in each
+    /// (`None` when the centre was not drawn), oldest first.
+    pub fn fit_log(&self) -> Vec<FitFrame> {
+        self.fit_log.borrow().clone()
+    }
+
     /// The pane host's area, as last measured: (width, height).
     pub(crate) fn regions_area(&self) -> (f64, f64) {
         let s = self.regions.get();
@@ -913,8 +927,15 @@ impl DocumentWindow {
     fn measure_regions(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let regions = self.regions.clone();
         let weak = cx.entity().downgrade();
+        let log = self.fit_log.clone();
         canvas(
             move |bounds, window, cx| {
+                let mut log = log.borrow_mut();
+                log.push((bounds, None));
+                if log.len() > FIT_LOG_KEPT {
+                    log.remove(0);
+                }
+                drop(log);
                 if regions.get() != bounds.size {
                     regions.set(bounds.size);
                     window.request_animation_frame();
@@ -1247,7 +1268,27 @@ impl DocumentWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let centre = panes::place(frames.centre).flex().flex_col();
+        // The centre keeps its distance from the area's edges, so it fits
+        // the area laid out this frame, not the one measured last frame.
+        let fitted = self.fit_log.clone();
+        let centre = panes::place_in(frames.centre, area, (true, true))
+            .flex()
+            .flex_col()
+            .child(
+                canvas(
+                    move |bounds, _, _| {
+                        let mut log = fitted.borrow_mut();
+                        if let Some(last) = log.last_mut() {
+                            last.1 = Some(bounds);
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            );
         let mix = self.place_mixer(MixerPlacement::View, host.main == MainView::Mix, window, cx);
         let pane_mixer = self.place_mixer(
             MixerPlacement::Pane,
@@ -1305,6 +1346,7 @@ impl DocumentWindow {
             sides.push(panes::frame(
                 side,
                 Some(rect),
+                area,
                 host,
                 self.pane_menu == Some(side),
                 content,
@@ -1367,6 +1409,7 @@ impl DocumentWindow {
             panes::frame(
                 PaneSide::Bottom,
                 frames.bottom,
+                area,
                 host,
                 self.pane_menu == Some(PaneSide::Bottom),
                 content,

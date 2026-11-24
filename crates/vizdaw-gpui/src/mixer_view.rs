@@ -84,6 +84,8 @@ pub const ADD_BUS: &str = "Add Bus";
 pub const PADDING: f64 = 8.;
 /// The bar's height.
 pub const BAR_HEIGHT: f64 = 32.;
+/// How many frames [`MixerView::fits`] keeps.
+const FITS_KEPT: usize = 32;
 /// The rename field's label.
 pub const NAME: &str = "Name";
 /// The header's parts: the colour bar, the name and the kind, 2 apart.
@@ -262,6 +264,9 @@ pub struct MixerView {
     /// ends, which draws a frame.
     hold: Option<Task<()>>,
     drawn: Vec<StripLook>,
+    /// Each frame's strips' height (padding included) and the height of
+    /// the area they were made for, the last [`FITS_KEPT`] frames.
+    fits: Vec<(f64, f64)>,
     /// The MIDI strips drawn last frame: each destination and the note
     /// activity its meter showed.
     midi_drawn: Vec<(u64, f64)>,
@@ -327,6 +332,7 @@ impl MixerView {
             appeared: false,
             hold: None,
             drawn: vec![],
+            fits: vec![],
             midi_drawn: vec![],
         };
         // Now, so the frame that shows the placement has its strips; a
@@ -436,6 +442,12 @@ impl MixerView {
     /// The strips drawn last frame, left to right.
     pub fn drawn(&self) -> &[StripLook] {
         &self.drawn
+    }
+
+    /// The last frames' strips: each one's height (padding included) and
+    /// the height of the area it was made for, oldest first.
+    pub fn fits(&self) -> &[(f64, f64)] {
+        &self.fits
     }
 
     /// The MIDI strips drawn last frame, left to right: each destination
@@ -856,7 +868,6 @@ impl ColumnParts {
 
 /// What the placement draws this frame.
 struct Gathered {
-    load: String,
     grid: StripGrid,
     columns: usize,
     divider_before: Option<usize>,
@@ -870,20 +881,6 @@ struct Gathered {
     renaming_vca: Option<(u64, MixerPlacement)>,
 }
 
-/// The view's area: its measured size, else the window's.
-fn viewport(area: Bounds<Pixels>, window: &Window) -> (f64, f64) {
-    let s = if area.size.width > Pixels::ZERO {
-        area.size
-    } else {
-        let v = window.viewport_size();
-        gpui::size(v.width, v.height - px(BAR_HEIGHT as f32))
-    };
-    (
-        f64::from(f32::from(s.width)),
-        f64::from(f32::from(s.height)),
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 fn gather(
     m: &MixerModel,
@@ -891,7 +888,6 @@ fn gather(
     mixer: &MixerRef,
     view: (f64, f64),
     scroll: (f64, f64),
-    sample_rate: f64,
     now: Instant,
 ) -> Gathered {
     // The columns (strips, MIDI strips before the first bus, VCAs), then
@@ -952,7 +948,6 @@ fn gather(
         strips.extend(part);
     }
     Gathered {
-        load: m.load_text(sample_rate),
         grid,
         columns: all.len(),
         divider_before,
@@ -1188,17 +1183,16 @@ fn dot(state: SlotState) -> Rgba {
 pub fn render(
     view: &Entity<MixerView>,
     scope: &mut RegistryScope,
-    window: &mut Window,
+    _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let (mixer, scroll, area, appeared) = {
+    let (mixer, appeared) = {
         let v = view.read(cx);
-        (v.mixer.clone(), v.scroll, v.area.clone(), v.appeared)
+        (v.mixer.clone(), v.appeared)
     };
     // The poll's clock (the test platform's is its own).
     let now = cx.background_executor().now();
     let doc = mixer.doc;
-    let size = viewport(area.get(), window);
     let sample_rate = mixer
         .app
         .read(cx)
@@ -1221,9 +1215,7 @@ pub fn render(
             again.with(cx, |m, d| m.refresh_if_needed(d));
         });
     }
-    let Some(g) = mixer.read(cx, |m, d| {
-        gather(m, d, &mixer, size, scroll, sample_rate, now)
-    }) else {
+    let Some(load) = mixer.read(cx, |m, _| m.load_text(sample_rate)) else {
         view.update(cx, |v, _| v.drawn.clear());
         // A busy core is quiet (asked again); a refusal says so.
         let refused = mixer
@@ -1235,10 +1227,112 @@ pub fn render(
         return unavailable(refused, scope);
     };
     let weak = view.downgrade();
+    let bar = bar(&load, &mixer, &mut scope.container());
+    let area_scope = scope.container();
+    let clip = area_scope.clip();
+    let t = tokens();
+    let dragging = weak.clone();
+    // An insert's drag follows the pointer anywhere in the window: these
+    // listeners are registered on every paint and see at the event whether
+    // an insert is pressed (the mouse-up may come before the frame after
+    // the press). They listen in the capture phase, so no element that
+    // stops the event can keep the drop from them; and a press while a drag
+    // is still open (its mouse-up was lost) ends that drag first, moving
+    // nothing.
+    let listeners = canvas(
+        |_, _, _| {},
+        move |_, _, window, _| {
+            let pressed = dragging.clone();
+            window.on_mouse_event(move |_: &MouseDownEvent, phase, _, cx| {
+                if phase == DispatchPhase::Capture {
+                    pressed.update(cx, |v, cx| v.cancel_insert_drag(cx)).ok();
+                }
+            });
+            let moved = dragging.clone();
+            window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
+                if phase == DispatchPhase::Capture {
+                    moved.update(cx, |v, cx| v.drag_insert(e, cx)).ok();
+                }
+            });
+            let dropped = dragging.clone();
+            window.on_mouse_event(move |e: &MouseUpEvent, phase, _, cx| {
+                if phase == DispatchPhase::Capture && e.button == MouseButton::Left {
+                    dropped.update(cx, |v, cx| v.drop_insert(cx)).ok();
+                }
+            });
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full();
+    // The strips are made once the area's bounds are known, in this frame:
+    // they never fit an area measured a frame before (a status line that
+    // came or went, a pane resized, a placement just made).
+    let shown = view.clone();
+    let strips = crate::fit::fitted(move |bounds, window, cx| {
+        strips_in(&shown, bounds, area_scope, now, window, cx)
+    });
+    let wheel = weak.clone();
+    let strips_area = div()
+        .id("mixer-strips")
+        .relative()
+        .flex_1()
+        .min_h_0()
+        .overflow_hidden()
+        .child(listeners)
+        .child(strips)
+        .child(clip)
+        .on_scroll(move |e, _, cx| {
+            wheel.update(cx, |v, cx| v.wheel(e, cx)).ok();
+            cx.stop_propagation();
+        });
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .size_full()
+        .bg(rgb(t.surface_panel))
+        .text_color(rgb(t.text_primary))
+        .child(bar)
+        .child(div().h(px(1.)).flex_none().bg(rgb(t.surface_separator)))
+        .child(strips_area)
+        .into_any_element()
+}
+
+/// The strips of `view` for its area's `bounds` this frame (made while
+/// the area is laid out): the columns in view and master's divider, as
+/// large as the area.
+fn strips_in(
+    view: &Entity<MixerView>,
+    bounds: Bounds<Pixels>,
+    mut area_scope: RegistryScope,
+    now: Instant,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let (mixer, scroll, area) = {
+        let v = view.read(cx);
+        (v.mixer.clone(), v.scroll, v.area.clone())
+    };
+    area.set(bounds);
+    let size = (
+        f64::from(f32::from(bounds.size.width)),
+        f64::from(f32::from(bounds.size.height)),
+    );
+    let Some(g) = mixer.read(cx, |m, d| gather(m, d, &mixer, size, scroll, now)) else {
+        return div().into_any_element();
+    };
+    let weak = view.downgrade();
     // Boxes of strips that went are dropped (an edit in one ends).
     view.update(cx, |v, cx| {
         v.scroll = g.scroll;
         v.room = g.room;
+        let drawn_in = f64::from(f32::from(bounds.size.height));
+        v.fits.push((g.grid.total + 2. * PADDING, drawn_in));
+        if v.fits.len() > FITS_KEPT {
+            v.fits.remove(0);
+        }
         v.boxes.retain(|(key, _), _| g.keys.contains(key));
         v.drawn = g
             .strips
@@ -1289,8 +1383,6 @@ pub fn render(
             });
         }
     });
-    let bar = bar(&g.load, &mixer, &mut scope.container());
-    let mut area_scope = scope.container();
     let mut strips = vec![];
     let mut parts = g.strips.into_iter().peekable();
     for index in 0..g.columns {
@@ -1325,80 +1417,12 @@ pub fn render(
             .h(px(g.grid.total as f32))
             .bg(rgb(t.surface_separator))
     });
-    let measured = area.clone();
-    let remeasure = weak.clone();
-    let dragging = weak.clone();
-    let measure = canvas(
-        move |bounds, window, cx| {
-            if measured.get().size != bounds.size {
-                // Drawn for the old size: the next frame is drawn for this
-                // one (the platform's frame, not only the notify chain, so
-                // a stopped mixer does not keep a stale layout).
-                window.request_animation_frame();
-                let w = remeasure.clone();
-                cx.defer(move |cx| {
-                    w.update(cx, |_, cx| cx.notify()).ok();
-                });
-            }
-            measured.set(bounds);
-        },
-        // An insert's drag follows the pointer anywhere in the window:
-        // these listeners are registered on every paint and see at the
-        // event whether an insert is pressed (the mouse-up may come before
-        // the frame after the press). They listen in the capture phase,
-        // so no element that stops the event can keep the drop from them;
-        // and a press while a drag is still open (its mouse-up was lost)
-        // ends that drag first, moving nothing.
-        move |_, _, window, _| {
-            let pressed = dragging.clone();
-            window.on_mouse_event(move |_: &MouseDownEvent, phase, _, cx| {
-                if phase == DispatchPhase::Capture {
-                    pressed.update(cx, |v, cx| v.cancel_insert_drag(cx)).ok();
-                }
-            });
-            let moved = dragging.clone();
-            window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
-                if phase == DispatchPhase::Capture {
-                    moved.update(cx, |v, cx| v.drag_insert(e, cx)).ok();
-                }
-            });
-            let dropped = dragging.clone();
-            window.on_mouse_event(move |e: &MouseUpEvent, phase, _, cx| {
-                if phase == DispatchPhase::Capture && e.button == MouseButton::Left {
-                    dropped.update(cx, |v, cx| v.drop_insert(cx)).ok();
-                }
-            });
-        },
-    )
-    .absolute()
-    .top_0()
-    .left_0()
-    .size_full();
-    let wheel = weak.clone();
-    let strips_area = div()
-        .id("mixer-strips")
-        .relative()
-        .flex_1()
-        .min_h_0()
-        .overflow_hidden()
-        .child(measure)
-        .children(divider)
-        .children(strips)
-        .child(area_scope.clip())
-        .on_scroll(move |e, _, cx| {
-            wheel.update(cx, |v, cx| v.wheel(e, cx)).ok();
-            cx.stop_propagation();
-        });
     div()
         .relative()
-        .flex()
-        .flex_col()
-        .size_full()
-        .bg(rgb(t.surface_panel))
-        .text_color(rgb(t.text_primary))
-        .child(bar)
-        .child(div().h(px(1.)).flex_none().bg(rgb(t.surface_separator)))
-        .child(strips_area)
+        .w(bounds.size.width)
+        .h(bounds.size.height)
+        .children(divider)
+        .children(strips)
         .into_any_element()
 }
 

@@ -534,6 +534,31 @@ pub(crate) fn place(r: Rect) -> Div {
         .overflow_hidden()
 }
 
+/// `div` placed at `r` in an area measured `area` (w, h) last frame,
+/// anchored so it follows the area as it is laid out this frame (a status
+/// line that came or went): an axis in `stretch` keeps `r`'s distance
+/// from both edges; any other keeps its size, on the area's far edge when
+/// `r` ends there, else from the near edge. What does not fit is cut.
+pub(crate) fn place_in(r: Rect, area: (f64, f64), stretch: (bool, bool)) -> Div {
+    let near = |a: f64| a.abs() < 0.5;
+    let (right, bottom) = (area.0 - r.x - r.w, area.1 - r.y - r.h);
+    let mut d = div().absolute().overflow_hidden();
+    d = if stretch.0 || (near(r.x) && near(right)) {
+        d.left(px(r.x as f32)).right(px(right as f32))
+    } else if near(right) {
+        d.right(px(0.)).w(px(r.w.max(0.) as f32))
+    } else {
+        d.left(px(r.x as f32)).w(px(r.w.max(0.) as f32))
+    };
+    if stretch.1 || (near(r.y) && near(bottom)) {
+        d.top(px(r.y as f32)).bottom(px(bottom as f32))
+    } else if near(bottom) {
+        d.bottom(px(0.)).h(px(r.h.max(0.) as f32))
+    } else {
+        d.top(px(r.y as f32)).h(px(r.h.max(0.) as f32))
+    }
+}
+
 /// A pane at `rect` (`None`: the bottom pane hidden, kept mounted at zero
 /// size and out of sight): its picker, a divider, then `content`. `scope`
 /// is the pane's own container (a scratch one when hidden).
@@ -541,6 +566,7 @@ pub(crate) fn place(r: Rect) -> Div {
 pub(crate) fn frame(
     side: PaneSide,
     rect: Option<Rect>,
+    area: (f64, f64),
     state: &HostState,
     menu_open: bool,
     content: AnyElement,
@@ -550,7 +576,13 @@ pub(crate) fn frame(
 ) -> AnyElement {
     let shown = rect.is_some();
     let picker = picker(side, state, menu_open && shown, scope, window, cx);
-    place(rect.unwrap_or(Rect::ZERO))
+    // The bottom pane spans the centre's column; the others keep their
+    // width. A hidden pane has no size.
+    let placed = match rect {
+        Some(r) => place_in(r, area, (side == PaneSide::Bottom, false)),
+        None => place(Rect::ZERO),
+    };
+    placed
         .flex()
         .flex_col()
         .when(!shown, |d| d.invisible())

@@ -303,3 +303,119 @@ fn groups_vcas_and_midi_strips_still_fit_the_default_window(cx: &mut TestAppCont
     assert_eq!(s.view().read_with(&s.cx, |v, _| v.room()).1, 0.0);
     s.faders_line_up();
 }
+
+/// The review's scene: the demo's strips, two buses (Bus 2 sends to Bus
+/// 1), Group 1 on Synth and Bus 1, VCA 1 on the buses at −3 dB.
+fn review_scene() -> vizdaw_app::testing::FakeSession {
+    use vizdaw_ffi::mixer::{BusRow, SendRow, StripKindRow};
+    let f = vizdaw_app::testing::mixer_fake();
+    f.edit_mixer(|m| {
+        let mut b2 = vizdaw_app::testing::strip_row(3, "Bus 2", StripKindRow::Bus);
+        b2.sends = vec![SendRow {
+            target: 2,
+            level_db: 0.0,
+            pre_fader: false,
+            enabled: true,
+        }];
+        m.strips.insert(2, b2);
+        m.buses.push(BusRow {
+            id: 3,
+            name: "Bus 2".into(),
+        });
+        m.groups = vec![group_row(1, "Group 1", &[1, 2])];
+        m.vcas = vec![vca_row(9, "VCA 1", &[2, 3], -3.0)];
+        for s in &mut m.strips {
+            if [1, 2].contains(&s.id) {
+                s.group = Some(1);
+            }
+            if [2, 3].contains(&s.id) {
+                s.vcas = vec![9];
+                s.vca_offset_db = -3.0;
+            }
+        }
+    });
+    f
+}
+
+/// Every frame logged from `from` on: the centre inside the pane host's
+/// area, and the strips made for the very area they were drawn in (the
+/// strips fill it exactly, or scroll).
+fn every_frame_fits(s: &mut Setup, from: (usize, usize)) {
+    let shell = s.window.read_with(&s.cx, |v, _| v.fit_log()).unwrap();
+    assert!(shell.len() > from.0, "a frame was drawn");
+    for (area, centre) in &shell[from.0..] {
+        let centre = centre.expect("the centre drawn");
+        assert!(
+            centre.bottom() <= area.bottom() + px(0.5),
+            "the centre {centre:?} runs past the area {area:?}"
+        );
+    }
+    let fits = s.view().read_with(&s.cx, |v, _| v.fits().to_vec());
+    assert!(fits.len() > from.1, "the strips were drawn");
+    for (strips, area) in &fits[from.1..] {
+        assert!(
+            (strips - area).abs() < 0.5,
+            "strips {strips} tall made for an area {area} tall"
+        );
+    }
+}
+
+fn logged(s: &mut Setup) -> (usize, usize) {
+    let shell = s.window.read_with(&s.cx, |v, _| v.fit_log().len()).unwrap();
+    let fits = s.view().read_with(&s.cx, |v, _| v.fits().len());
+    (shell, fits)
+}
+
+/// Review fix round 1: the strips fit the area of the frame they are drawn
+/// in, on the very frame a status line comes or goes, and on the first
+/// frame of a Mix view made again; never the area measured a frame
+/// before.
+#[gpui::test]
+fn the_strips_fit_the_area_of_every_frame(cx: &mut TestAppContext) {
+    let mut s = setup(cx, review_scene());
+    assert!(s.find("menu", "Group Group 1").is_some());
+    let before = logged(&mut s);
+    s.show_status("Nothing is playing.");
+    every_frame_fits(&mut s, before);
+    let gap = 18.;
+    let all = s.elements();
+    modes_fill(&all, s.area(), gap);
+    // The status line goes.
+    let before = logged(&mut s);
+    s.show_status_cleared();
+    every_frame_fits(&mut s, before);
+    // Arrange, then Mix again with the status line: a new placement fits
+    // from its first frame.
+    s.show_status("Nothing is playing.");
+    s.cx.dispatch_action(vizdaw_gpui::RunCommand::new("ui.view_arrange"));
+    s.cx.run_until_parked();
+    let shell = s.window.read_with(&s.cx, |v, _| v.fit_log().len()).unwrap();
+    s.cx.dispatch_action(vizdaw_gpui::RunCommand::new("ui.view_mix"));
+    s.cx.run_until_parked();
+    every_frame_fits(&mut s, (shell, 0));
+    let all = s.elements();
+    modes_fill(&all, s.area(), gap);
+}
+
+/// Review fix round 1: a press inside the rename popover (the field, its
+/// padding) keeps the rename; what is typed there is the new name.
+#[gpui::test]
+fn a_click_into_the_rename_popover_keeps_the_rename(cx: &mut TestAppContext) {
+    let mut s = with_vca(cx);
+    s.double_click("text", "VCA Drums");
+    s.click("textfield", VcaStripLabels::RENAME_FIELD);
+    assert!(s.find("textfield", VcaStripLabels::RENAME_FIELD).is_some());
+    // The padding beside the field.
+    let field = s.element("textfield", VcaStripLabels::RENAME_FIELD).bounds;
+    s.click_at(point(field.left() + px(2.), field.bottom() + px(4.)));
+    assert!(s.find("textfield", VcaStripLabels::RENAME_FIELD).is_some());
+    s.click("textfield", VcaStripLabels::RENAME_FIELD);
+    s.cx.simulate_keystrokes("cmd-a");
+    s.cx.simulate_input("Kit");
+    s.cx.simulate_keystrokes("enter");
+    s.cx.run_until_parked();
+    assert_eq!(
+        s.mixer_calls(),
+        [call("mixer.rename_vca", &["vca=9", "name=Kit"])]
+    );
+}

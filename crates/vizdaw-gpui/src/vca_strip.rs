@@ -229,7 +229,11 @@ fn rename_popover(
     )
     .with_priority(1)
     .into_any_element();
+    // A press inside the popover (the field, its padding) is the
+    // popover's: the backdrop under it never sees it.
     let panel = div()
+        .id("mixer-vca-rename-popover")
+        .occlude()
         .relative()
         .w(px(FIELD_WIDTH as f32))
         .p(px(8.))

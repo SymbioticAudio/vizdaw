@@ -312,3 +312,15 @@ impl Setup {
         self.cx.run_until_parked();
     }
 }
+
+impl Setup {
+    /// Clears the status line.
+    pub fn show_status_cleared(&mut self) {
+        let doc = self.doc();
+        self.app.update(&mut self.cx, |a, cx| {
+            a.store.with_document(doc, |d, _| d.set_status(None));
+            cx.notify();
+        });
+        self.cx.run_until_parked();
+    }
+}
