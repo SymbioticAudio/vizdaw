@@ -1537,9 +1537,15 @@ impl Reply {
 /// reply from the main queue (or any thread); nothing waits for it. Dropped
 /// (main thread), it abandons the request and releases a controller that
 /// came but was never taken.
+///
+/// It holds a reference to the completion block for as long as it lives
+/// (final review M3): a unit that keeps the block without copying it (an
+/// ABI breach, but a crash if it happens) still calls a live block, since
+/// the request lives until the completion ran or the host gave up.
 pub(crate) struct ViewRequest {
     reply: Arc<Mutex<Reply>>,
     until: Instant,
+    _completion: RcBlock<dyn Fn(*mut AnyObject)>,
 }
 
 impl std::fmt::Debug for ViewRequest {
@@ -1551,6 +1557,18 @@ impl std::fmt::Debug for ViewRequest {
 }
 
 impl ViewRequest {
+    fn new(
+        reply: Arc<Mutex<Reply>>,
+        until: Instant,
+        completion: RcBlock<dyn Fn(*mut AnyObject)>,
+    ) -> ViewRequest {
+        ViewRequest {
+            reply,
+            until,
+            _completion: completion,
+        }
+    }
+
     fn poll(&self) -> Poll {
         self.reply
             .lock()
@@ -1709,10 +1727,7 @@ impl Unit {
             0,
             &ptr_to_block,
         )?;
-        Ok(ViewRequest {
-            reply,
-            until: Instant::now() + wait,
-        })
+        Ok(ViewRequest::new(reply, Instant::now() + wait, block))
     }
 
     fn generic_view(&self) -> Result<View, String> {
@@ -1838,6 +1853,27 @@ mod tests {
         let mut r = Reply::default();
         assert!(r.answer(Some(0x40)));
         assert_eq!(r.abandon(), Some(0x40));
+    }
+
+    /// Final review M3: the request keeps its completion block alive (one
+    /// reference of ours) until it is dropped, whether or not the unit
+    /// copied the block.
+    #[test]
+    fn a_view_request_keeps_its_completion_until_dropped() {
+        let held = Arc::new(());
+        let inside = Arc::clone(&held);
+        let block = RcBlock::new(move |_vc: *mut AnyObject| {
+            let _ = &inside;
+        });
+        let reply = Arc::new(Mutex::new(Reply::default()));
+        let r = ViewRequest::new(reply, Instant::now(), block);
+        assert_eq!(
+            Arc::strong_count(&held),
+            2,
+            "the block lives with the request"
+        );
+        drop(r);
+        assert_eq!(Arc::strong_count(&held), 1, "released with the request");
     }
 
     /// Ruling T3-2: a read-only OfflineRender property is no offline mode,

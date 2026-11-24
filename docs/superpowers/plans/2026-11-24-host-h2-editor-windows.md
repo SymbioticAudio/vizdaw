@@ -97,6 +97,10 @@ All six tasks done (commits on `host` from 4f267133 to the Task 6 commit `host H
 
 **Not yet seen on screen or on a real device:** every real editor (AU Cocoa, AU v3, Multi-Q, the SDK `again`, Linux plug-ins), a real AU v3's asynchronous open, the keys rule, ⌘W with a focused native editor, 2× scale, and the Linux X11 tree outside Xvfb. All are rows in `docs/testing/manual-checks.md` ("Plug-in editor windows (host track H2)").
 
+- Final review fixes: I1 — on Linux the X11 editor container is made unmapped and mapped (at the editor's frame) only while an editor is open; a failed or Busy open, a close, a Busy park, a plug-in turned off and every parameter-list window leave it unmapped, so the list, "Loading…" and the problem text show and take the mouse (registry test `the_container_shows_only_while_an_editor_is_open`, Xvfb test `plugin_windows::x11::tests::the_container_is_mapped_only_while_an_editor_is_open`, a no-mapped-child step in the Linux `gpui_plugin_window_without_an_editor_lists_parameters`, and a Linux owner row in `docs/testing/manual-checks.md`)
+- Final review fixes: M1 — core-ffi's `run_loop_pump` and `run_loop_tick` run the plug-ins' run-loop callbacks under the plug-in registry's busy mark, so a nested loop a callback runs gets `Busy` from `open_editor`, `close_editor`, `resize_editor` and `idle` (test `the_pump_runs_under_the_busy_mark`)
+- Final review fixes: M3 — the AU v3 `ViewRequest` holds the completion `RcBlock` until it is dropped (after the completion ran, the wait timed out or the editor closed), so a unit that keeps the block without copying it still calls a live block (test `a_view_request_keeps_its_completion_until_dropped`)
+
 ### Plan amendments
 
 - Task 1: Ruling R1 (implementer, accepted; plan amendment): the module's host context also offers Linux::IRunLoop — VSTGUI's X11 frame registers through the factory-wide run loop set from setHostContext (x11frame.cpp:646, x11platform.cpp:131), else a null call — cost: host-context registrations live until the plug-in unregisters them or the module exits; Review Focus 3 "gone at close" holds for frame registrations only

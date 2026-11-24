@@ -285,7 +285,9 @@ pub const RUN_LOOP_EVERY: std::time::Duration = std::time::Duration::from_millis
 /// `Linux::IRunLoop`): one app-wide loop on the main thread, where every
 /// document's plug-ins and bounce copies load (the loop's table is per
 /// thread, so one pump serves every document). Each pass polls without
-/// waiting; nothing in it calls back into the app.
+/// waiting, under the plug-in registry's busy mark (a nested loop a
+/// plug-in callback runs gets `Busy` from every registry call); nothing in
+/// it calls back into the app.
 pub fn pump_plugin_run_loop(cx: &mut App) {
     cx.spawn(async move |cx| {
         loop {

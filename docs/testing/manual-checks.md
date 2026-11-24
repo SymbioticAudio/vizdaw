@@ -160,3 +160,4 @@ screen control; **owner** rows need the owner's Linux desktop.
 | Linux | owner | 2× scale: the container sits under the header and the editor reopens at the new scale | open |
 | Linux | owner | Close and quit with editors open: no BadWindow exit (also after a Busy close) | open |
 | Linux | owner | No transparency or garbage in the editor area (the 24-bit container inside the 32-bit GPUI window) | open |
+| Linux | owner | A plug-in with no editor shows its parameter list, not a black box, and its sliders take the mouse; Loading… is visible while a reopened project's plug-ins load; a plug-in turned off shows its reason, not the old editor's black area | open |

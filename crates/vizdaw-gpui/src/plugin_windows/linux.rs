@@ -1,7 +1,11 @@
 //! The Linux editor host (X11, or XWayland: ruling D2 runs the app as X11
 //! whenever `DISPLAY` is set). The plug-in window is a GPUI window; the
 //! editor's parent is a container X window we make inside it, at (0,
-//! header × scale), editor points × scale in size. Close order: the
+//! header × scale), editor points × scale in size. The container is made
+//! unmapped and mapped only while an editor is open: an X child is drawn
+//! over its parent's content and takes the pointer, so a mapped one would
+//! hide the parameter list, "Loading…" and the problem text under a black
+//! box (final review I1). Close order: the
 //! editor closes, then the container is destroyed, then GPUI destroys its
 //! window, so no plug-in ever draws into a destroyed parent (the
 //! BadWindow exit). A close that meets `Busy` reparents the container to
@@ -48,8 +52,8 @@ pub struct Parked {
 }
 
 impl EditorHost {
-    /// A container under the header of `window`, filling the rest of it
-    /// until the editor's size is known.
+    /// A hidden (unmapped) container under the header of `window`,
+    /// filling the rest of it until the editor's size is known.
     pub fn create(window: &mut Window, _cx: &mut App) -> Result<EditorHost, HostError> {
         let parent = x11_id(window)?;
         let scale = f64::from(window.scale_factor());
@@ -78,19 +82,28 @@ impl EditorHost {
         None
     }
 
-    /// Puts the container at (0, `header` points) at the editor's size in
-    /// points, in `window`'s device pixels.
-    pub fn set_frame(&self, window: &Window, header: f64, editor: (f64, f64)) {
+    /// Shows (maps) the container at (0, `header` points) at the editor's
+    /// size in points, in `window`'s device pixels: an editor is open.
+    pub fn show(&self, window: &Window, header: f64, editor: (f64, f64)) {
         let scale = f64::from(window.scale_factor());
         let (w, h) = (px(editor.0, scale), px(editor.1, scale));
-        if let Err(e) = x11::set_frame(
+        if let Err(e) = x11::show(
             self.container,
             0,
             px(header, scale),
             u32::try_from(w.max(1)).unwrap_or(1),
             u32::try_from(h.max(1)).unwrap_or(1),
         ) {
-            eprintln!("plug-in window: the container could not move: {e}");
+            eprintln!("plug-in window: the container could not show: {e}");
+        }
+    }
+
+    /// Hides (unmaps) the container: no editor is open, and what GPUI
+    /// draws under it (the parameter list, the loading or problem text)
+    /// shows and takes the clicks.
+    pub fn hide(&self) {
+        if let Err(e) = x11::hide(self.container) {
+            eprintln!("plug-in window: the container could not hide: {e}");
         }
     }
 

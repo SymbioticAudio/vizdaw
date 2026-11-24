@@ -40,7 +40,9 @@
 //! - **Platforms:** macOS shows a container `NSView` through a
 //!   `gpui::NativeView` (`macos.rs`); Linux makes a container X window
 //!   inside the GPUI window and sets `WM_TRANSIENT_FOR` to the document's
-//!   window (`linux.rs`). The GPUI test platform has no native window:
+//!   window (`linux.rs`); the container is mapped only while an editor is
+//!   open, as an X child hides and takes the clicks of what GPUI draws
+//!   under it. The GPUI test platform has no native window:
 //!   there the editor opens with no parent view (the scripted session
 //!   takes it; the real core refuses it as "no parent view").
 //!
@@ -144,7 +146,23 @@ struct Entry {
     content: Option<(f64, f64)>,
     /// The content size (points, capped) the window was last given.
     applied: Option<(f64, f64)>,
+    /// The editor area (points) the container was last shown at; `None`
+    /// while it is hidden (no editor open).
+    shown: Option<(f64, f64)>,
     title: String,
+}
+
+impl Entry {
+    /// The editor area (points) the container should show at: the open
+    /// editor's size, or `None` (hidden) with no editor open.
+    fn editor_area(&self) -> Option<(f64, f64)> {
+        match &self.model {
+            Model::Plugin(m) => m
+                .editor_size()
+                .map(|ed| (f64::from(ed.width), f64::from(ed.height))),
+            Model::Synth(_) => None,
+        }
+    }
 }
 
 /// A plug-in window that closed while its editor could not detach
@@ -234,6 +252,13 @@ impl PluginWindows {
     /// detach yet: a new window waits until it has.
     pub fn is_close_pending(&self, doc: DocId, slot: u64) -> bool {
         self.pending.iter().any(|p| p.doc == doc && p.slot == slot)
+    }
+
+    /// The editor area (points) (`doc`, `slot`)'s container was last
+    /// shown at; `None` while it is hidden (on Linux an X child over the
+    /// window, so it shows only while an editor is open).
+    pub fn container_shown(&self, doc: DocId, slot: u64) -> Option<(f64, f64)> {
+        self.find(doc, Subject::Plugin(slot))?.shown
     }
 
     /// The closes still retried.
@@ -344,6 +369,7 @@ impl PluginWindows {
             opened_scale: None,
             content: None,
             applied: None,
+            shown: None,
             title,
         });
         true
@@ -487,9 +513,13 @@ impl PluginWindows {
                 }
             }
         }
-        step.resize = self
-            .wanted(token)
-            .is_some_and(|(content, _)| Some(content) != self.entry(token).and_then(|e| e.content));
+        let shown_wrong = self
+            .entry(token)
+            .is_some_and(|e| e.shown != e.editor_area());
+        step.resize = shown_wrong
+            || self.wanted(token).is_some_and(|(content, _)| {
+                Some(content) != self.entry(token).and_then(|e| e.content)
+            });
         step
     }
 
@@ -801,8 +831,9 @@ fn open_now(token: WindowToken, cx: &mut App) {
 }
 
 /// Gives window `token` the content size its model wants, capped to the
-/// screen, places the container at the editor's size, and lets the user
-/// resize it only while a resizable editor shows.
+/// screen, shows the container at the editor's size while an editor is
+/// open (hides it otherwise), and lets the user resize it only while a
+/// resizable editor shows.
 fn apply_size(token: WindowToken, window: &mut Window, cx: &mut App) {
     let app = AppState::global(cx);
     let Some((content, resizable)) = app.read(cx).plugin_windows.wanted(token) else {
@@ -820,15 +851,17 @@ fn apply_size(token: WindowToken, window: &mut Window, cx: &mut App) {
         if let Some(e) = s.plugin_windows.entry_mut(token) {
             e.content = Some(content);
             e.applied = Some(shown);
-            if let (Some(host), Model::Plugin(m)) = (&e.host, &e.model)
-                && let Some(ed) = m.editor_size()
-            {
-                host.set_frame(
-                    window,
-                    HEADER_HEIGHT,
-                    (f64::from(ed.width), f64::from(ed.height)),
-                );
+            // The container shows only while an editor is open: on Linux
+            // it is an X child that would hide the parameter list and the
+            // loading or problem text, and take their clicks.
+            let area = e.editor_area();
+            if let Some(host) = &e.host {
+                match area {
+                    Some(ed) => host.show(window, HEADER_HEIGHT, ed),
+                    None => host.hide(),
+                }
             }
+            e.shown = area;
         }
     });
     platform::set_resizable(window, resizable, shown);

@@ -22,7 +22,9 @@ impl EditorHost {
         None
     }
 
-    pub fn set_frame(&self, _window: &Window, _header: f64, _editor: (f64, f64)) {}
+    pub fn show(&self, _window: &Window, _header: f64, _editor: (f64, f64)) {}
+
+    pub fn hide(&self) {}
 
     pub fn park(self) -> Parked {
         Parked

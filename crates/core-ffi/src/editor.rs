@@ -86,7 +86,33 @@ fn on_main_thread() -> bool {
 
 #[cfg(unix)]
 pub use core_host::{FdFlags, run_loop_fds};
-pub use core_host::{run_loop_pump, run_loop_tick};
+
+/// Runs `f` under the plug-in registry's busy mark (final review M1): the
+/// run loop's callbacks are plug-in code, and a nested loop one runs must
+/// not get an `open_editor`, `close_editor` or `idle` in.
+fn under_busy_mark<T>(f: impl FnOnce() -> T) -> T {
+    crate::plugins::while_busy(f)
+}
+
+/// One pass of the plug-ins' run loop without waiting
+/// ([`core_host::run_loop_pump`]), under the registry's busy mark.
+pub fn run_loop_pump() {
+    under_busy_mark(core_host::run_loop_pump);
+}
+
+/// One tick of the plug-ins' run loop with the descriptors found ready
+/// ([`core_host::run_loop_tick`]), under the registry's busy mark.
+#[cfg(unix)]
+pub fn run_loop_tick(now: std::time::Instant, ready: &[(std::os::fd::RawFd, FdFlags)]) {
+    under_busy_mark(|| core_host::run_loop_tick(now, ready));
+}
+
+/// One tick of the plug-ins' run loop ([`core_host::run_loop_tick`]),
+/// under the registry's busy mark.
+#[cfg(not(unix))]
+pub fn run_loop_tick(now: std::time::Instant) {
+    under_busy_mark(|| core_host::run_loop_tick(now));
+}
 
 /// `open_editor`'s `Busy` message while an editor's view is still on its
 /// way (an AU v3 view controller): the window retries on its tick.
@@ -126,5 +152,22 @@ mod tests {
     fn a_pump_with_nothing_registered_does_nothing() {
         assert!(run_loop_fds().is_empty());
         run_loop_pump();
+    }
+
+    /// Final review M1: plug-in run-loop callbacks run under the
+    /// registry's busy mark, so one that runs a nested loop cannot get a
+    /// registry call in (it answers `Busy`); a pump inside a plug-in call
+    /// (already busy) still runs.
+    #[test]
+    fn the_pump_runs_under_the_busy_mark() {
+        assert!(!crate::plugins::is_busy());
+        let mut seen = None;
+        under_busy_mark(|| seen = Some(crate::plugins::is_busy()));
+        assert_eq!(seen, Some(true));
+        assert!(!crate::plugins::is_busy(), "the mark is lifted after");
+        let mut nested = None;
+        under_busy_mark(|| under_busy_mark(|| nested = Some(crate::plugins::is_busy())));
+        assert_eq!(nested, Some(true), "a nested pump still runs");
+        assert!(!crate::plugins::is_busy());
     }
 }

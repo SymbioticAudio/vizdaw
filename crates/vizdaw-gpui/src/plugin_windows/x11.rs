@@ -12,7 +12,8 @@ use std::cell::OnceCell;
 use x11rb::connection::Connection;
 use x11rb::properties::WmSizeHints;
 use x11rb::protocol::xproto::{
-    AtomEnum, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, PropMode, WindowClass,
+    AtomEnum, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, PropMode, Screen,
+    WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
@@ -50,8 +51,10 @@ fn msg(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
-/// A mapped container window inside `parent` at (`x`, `y`), `width` ×
-/// `height`; its id.
+/// An unmapped container window inside `parent` at (`x`, `y`), `width` ×
+/// `height`; its id. It shows only once [`show`] maps it (an editor is
+/// open): a mapped X child hides its parent's content and takes the
+/// pointer.
 pub fn create_container(
     parent: u32,
     x: i16,
@@ -59,44 +62,74 @@ pub fn create_container(
     width: u16,
     height: u16,
 ) -> Result<u32, String> {
-    with(|c, screen| {
-        let id = c.generate_id().map_err(msg)?;
-        let aux = CreateWindowAux::new()
-            .background_pixel(screen.black_pixel)
-            .border_pixel(screen.black_pixel)
-            .colormap(screen.default_colormap);
-        c.create_window(
-            screen.root_depth,
-            id,
-            parent,
-            x,
-            y,
-            width.max(1),
-            height.max(1),
-            0,
-            WindowClass::INPUT_OUTPUT,
-            screen.root_visual,
-            &aux,
-        )
-        .map_err(msg)?
-        .check()
-        .map_err(msg)?;
-        c.map_window(id).map_err(msg)?;
-        Ok(id)
-    })
+    with(|c, screen| create_on(c, screen, parent, (x, y), (width, height)))
 }
 
-/// Moves and sizes `window` inside its parent.
-pub fn set_frame(window: u32, x: i32, y: i32, width: u32, height: u32) -> Result<(), String> {
-    with(|c, _| {
-        let aux = ConfigureWindowAux::new()
-            .x(x)
-            .y(y)
-            .width(width.max(1))
-            .height(height.max(1));
-        c.configure_window(window, &aux).map_err(msg)?;
-        Ok(())
-    })
+/// [`create_container`] on connection `c`.
+fn create_on(
+    c: &impl Connection,
+    screen: &Screen,
+    parent: u32,
+    (x, y): (i16, i16),
+    (width, height): (u16, u16),
+) -> Result<u32, String> {
+    let id = c.generate_id().map_err(msg)?;
+    let aux = CreateWindowAux::new()
+        .background_pixel(screen.black_pixel)
+        .border_pixel(screen.black_pixel)
+        .colormap(screen.default_colormap);
+    c.create_window(
+        screen.root_depth,
+        id,
+        parent,
+        x,
+        y,
+        width.max(1),
+        height.max(1),
+        0,
+        WindowClass::INPUT_OUTPUT,
+        screen.root_visual,
+        &aux,
+    )
+    .map_err(msg)?
+    .check()
+    .map_err(msg)?;
+    Ok(id)
+}
+
+/// Moves and sizes `window` inside its parent, then maps it (an editor is
+/// open in it).
+pub fn show(window: u32, x: i32, y: i32, width: u32, height: u32) -> Result<(), String> {
+    with(|c, _| show_on(c, window, (x, y), (width, height)))
+}
+
+/// [`show`] on connection `c`.
+fn show_on(
+    c: &impl Connection,
+    window: u32,
+    (x, y): (i32, i32),
+    (width, height): (u32, u32),
+) -> Result<(), String> {
+    let aux = ConfigureWindowAux::new()
+        .x(x)
+        .y(y)
+        .width(width.max(1))
+        .height(height.max(1));
+    c.configure_window(window, &aux).map_err(msg)?;
+    c.map_window(window).map_err(msg)?;
+    Ok(())
+}
+
+/// Unmaps `window` (no editor is open in it): its parent's content shows
+/// and gets the pointer again.
+pub fn hide(window: u32) -> Result<(), String> {
+    with(|c, _| hide_on(c, window))
+}
+
+/// [`hide`] on connection `c`.
+fn hide_on(c: &impl Connection, window: u32) -> Result<(), String> {
+    c.unmap_window(window).map_err(msg)?;
+    Ok(())
 }
 
 /// Takes `window` out of its parent (to the root) and hides it: it
@@ -169,7 +202,7 @@ pub fn set_size_hints(
 #[cfg(test)]
 mod tests {
     use x11rb::connection::Connection;
-    use x11rb::protocol::xproto::{ConnectionExt as _, CreateWindowAux, WindowClass};
+    use x11rb::protocol::xproto::{ConnectionExt as _, CreateWindowAux, MapState, WindowClass};
 
     /// A display to test on: `None` (skipped) without one, unless
     /// `VIZDAW_REQUIRE_DISPLAY` is set.
@@ -241,5 +274,69 @@ mod tests {
         let tree = ours.query_tree(container).unwrap().reply();
         assert_eq!(tree.expect("the container is alive").parent, root);
         ours.destroy_window(container).unwrap().check().unwrap();
+    }
+
+    /// Final review I1: the container is made unmapped (the parameter
+    /// list and the loading text under it show and take the clicks), is
+    /// mapped at the editor's frame once an editor opens, and is unmapped
+    /// again when it closes.
+    #[test]
+    fn the_container_is_mapped_only_while_an_editor_is_open() {
+        let Some((ours, n)) = connect() else {
+            return;
+        };
+        let Some((gpui, _)) = connect() else {
+            return;
+        };
+        let screen = ours.setup().roots[n].clone();
+        let parent = gpui.generate_id().unwrap();
+        gpui.create_window(
+            screen.root_depth,
+            parent,
+            screen.root,
+            0,
+            0,
+            420,
+            360,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            screen.root_visual,
+            &CreateWindowAux::new(),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+        gpui.map_window(parent).unwrap();
+        gpui.flush().unwrap();
+        gpui.get_input_focus().unwrap().reply().unwrap();
+        let state = |w: u32| {
+            ours.get_window_attributes(w)
+                .unwrap()
+                .reply()
+                .unwrap()
+                .map_state
+        };
+        let container = super::create_on(&ours, &screen, parent, (0, 37), (420, 323)).unwrap();
+        assert_eq!(
+            state(container),
+            MapState::UNMAPPED,
+            "hidden until an editor opens"
+        );
+        super::show_on(&ours, container, (0, 37), (300, 200)).unwrap();
+        assert_ne!(
+            state(container),
+            MapState::UNMAPPED,
+            "shown with the editor"
+        );
+        let g = ours.get_geometry(container).unwrap().reply().unwrap();
+        assert_eq!((g.x, g.y, g.width, g.height), (0, 37, 300, 200));
+        super::hide_on(&ours, container).unwrap();
+        assert_eq!(
+            state(container),
+            MapState::UNMAPPED,
+            "hidden after the close"
+        );
+        ours.destroy_window(container).unwrap().check().unwrap();
+        gpui.destroy_window(parent).unwrap().check().unwrap();
     }
 }

@@ -15,6 +15,7 @@ use vizdaw_app::DocSession;
 use vizdaw_app::plugin_window::HEADER_HEIGHT;
 use vizdaw_app::testing::{FakeSession, dest_row, mixer_fake, slot_row};
 use vizdaw_ffi::mixer::DestRow;
+use vizdaw_ffi::snapshot::SlotStatus;
 use vizdaw_ffi::{BuiltinSound, EditorResize, EditorSize, VizError};
 use vizdaw_gpui::plugin_windows::{self, Subject, capped};
 use vizdaw_gpui::{AppState, WindowKind, control};
@@ -63,6 +64,13 @@ fn tick(s: &mut Setup) {
         s.cx.executor().advance_clock(Duration::from_millis(300));
         s.cx.run_until_parked();
     }
+}
+
+/// [`tick`] once the document idle is due again: it runs at most every
+/// 50 ms of real time, which the test clock does not move.
+fn idle_tick(s: &mut Setup) {
+    std::thread::sleep(Duration::from_millis(60));
+    tick(s);
 }
 
 fn kinds(s: &mut Setup, kind: WindowKind) -> usize {
@@ -289,6 +297,56 @@ fn the_window_is_the_editor_under_the_header(cx: &mut TestAppContext) {
     }]);
     tick(&mut s);
     assert_eq!(content(&mut s, h), (500.0, 400.0 + HEADER_HEIGHT as f32));
+}
+
+/// Final review I1: the editor's container (an X child over the window on
+/// Linux, which hides what GPUI draws under it and takes the mouse) shows
+/// only while an editor is open, at the editor's size: never for the
+/// parameter list, nor while the open waits or after the plug-in went.
+#[gpui::test]
+fn the_container_shows_only_while_an_editor_is_open(cx: &mut TestAppContext) {
+    let f = fake();
+    f.edit_mixer(|m| m.strips[0].inserts.push(slot_row(11, "Delay")));
+    let mut s = setup(cx, f);
+    let doc = s.doc();
+    let shown = |s: &mut Setup, slot: u64| {
+        s.app
+            .read_with(&s.cx, |a, _| a.plugin_windows().container_shown(doc, slot))
+    };
+    // No editor: the parameter list, with no container over it.
+    show(&mut s, 11).unwrap();
+    tick(&mut s);
+    assert_eq!(shown(&mut s, 11), None);
+    // An open that meets `Busy` shows nothing until the retry opens it.
+    s.fake.fail_next("open_editor", busy());
+    show(&mut s, 10).unwrap();
+    assert_eq!(shown(&mut s, 10), None);
+    tick(&mut s);
+    assert_eq!(shown(&mut s, 10), Some((300.0, 200.0)));
+    // It follows the editor's own resize. (The document idle is held to
+    // every 50 ms of real time, which the test clock does not move.)
+    s.fake.set_idle_editor_resize(vec![EditorResize {
+        slot: 10,
+        width: 500,
+        height: 400,
+    }]);
+    idle_tick(&mut s);
+    assert_eq!(shown(&mut s, 10), Some((500.0, 400.0)));
+    // The plug-in was turned off: hidden.
+    s.fake.edit_mixer(|m| {
+        m.strips[0].inserts[0].status = SlotStatus::Placeholder {
+            reason: "Off".into(),
+        }
+    });
+    s.fake.set_idle_slots_changed();
+    idle_tick(&mut s);
+    assert_eq!(shown(&mut s, 10), None);
+    // Back on: the editor opens again and the container shows.
+    s.fake
+        .edit_mixer(|m| m.strips[0].inserts[0].status = SlotStatus::Live);
+    s.fake.set_idle_slots_changed();
+    idle_tick(&mut s);
+    assert_eq!(shown(&mut s, 10), Some((300.0, 200.0)));
 }
 
 #[gpui::test]

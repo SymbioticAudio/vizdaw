@@ -4125,6 +4125,20 @@ fn gpui_plugin_window_without_an_editor_lists_parameters() {
         find_role(&tree["nodes"], "checkbox", "Bypass").is_some(),
         "the header: {tree}"
     );
+    // Linux (final review I1): no editor container is mapped over the
+    // list (an X child would hide it and take its clicks).
+    #[cfg(target_os = "linux")]
+    if let Some(conn) = x_display() {
+        let title = "Built-in Synth \u{2014} Test Gain";
+        let window = x_wait("the plug-in window's X window", || {
+            x_top_level(&conn, title)
+        });
+        let mapped: Vec<u32> = x_children(&conn, window)
+            .into_iter()
+            .filter(|&c| x_mapped(&conn, c))
+            .collect();
+        assert!(mapped.is_empty(), "mapped over the list: {mapped:?}");
+    }
     app.quit();
 }
 
@@ -4228,6 +4242,16 @@ fn x_exists(conn: &impl x11rb::connection::Connection, w: u32) -> bool {
     conn.get_window_attributes(w)
         .ok()
         .is_some_and(|c| c.reply().is_ok())
+}
+
+/// Whether X window `w` is mapped.
+#[cfg(target_os = "linux")]
+fn x_mapped(conn: &impl x11rb::connection::Connection, w: u32) -> bool {
+    use x11rb::protocol::xproto::{ConnectionExt as _, MapState};
+    conn.get_window_attributes(w)
+        .ok()
+        .and_then(|c| c.reply().ok())
+        .is_some_and(|a| a.map_state != MapState::UNMAPPED)
 }
 
 /// Window `w`'s `_NET_WM_NAME`, else its `WM_NAME`.

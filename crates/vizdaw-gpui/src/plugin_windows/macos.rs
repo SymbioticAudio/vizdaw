@@ -73,7 +73,11 @@ impl EditorHost {
 
     /// The editor's area: GPUI's layout sizes the container (the element
     /// is drawn at the editor's points), so nothing to do here.
-    pub fn set_frame(&self, _window: &Window, _header: f64, _editor: (f64, f64)) {}
+    pub fn show(&self, _window: &Window, _header: f64, _editor: (f64, f64)) {}
+
+    /// No editor is open: GPUI hides a `NativeView` it does not paint, and
+    /// the view paints it only for an open editor, so nothing to do here.
+    pub fn hide(&self) {}
 
     /// The editor could not detach: the container leaves the window and
     /// stays alive.
