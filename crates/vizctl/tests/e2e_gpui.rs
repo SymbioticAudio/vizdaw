@@ -3858,3 +3858,75 @@ fn gpui_record_recover_trash_over_the_channel() {
     assert_eq!(shown["alerts"], json!([]), "{shown}");
     app.quit();
 }
+
+/// The bar part of `groups_vcas_and_transport_bar_over_the_channel`
+/// (slice 8b Task 5): a `command:window.mixer` button's click opens a
+/// Mixer window; Reset puts the default bar back with Click on it; the
+/// click's settings show in `state.get transport` and on the bar; Click's
+/// menu refuses the channel; a hostile level is refused.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_transport_bar_click_and_command_buttons() {
+    use core_control::ErrorCode;
+    let home = temp_home();
+    let (mut app, w) = start_demo(home.path());
+    let before = mixer_windows(&mut app).len();
+    run_in(
+        &mut app,
+        &w,
+        "ui.set_transport_bar",
+        json!({"items": "cluster,command:window.mixer"}),
+    );
+    let button = wait_in_tree(&mut app, &w, "the Mixer button", |nodes| {
+        find_node(nodes, "Mixer").filter(|n| n["role"] == "button")
+    });
+    assert_eq!(button["enabled"], true, "{button}");
+    app.call("ui.click", json!({"window": w, "element": button["id"]}));
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    while mixer_windows(&mut app).len() <= before {
+        assert!(Instant::now() < deadline, "no mixer window opened");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    run_in(&mut app, &w, "ui.reset_transport_bar", json!({}));
+    // The default bar has Click; unknown or off, it reads off.
+    wait_for_node(&mut app, &w, "Click Options");
+
+    // The click: its settings show in the transport state and on the bar.
+    run_in(&mut app, &w, "transport.click", json!({"on": true}));
+    run_in(
+        &mut app,
+        &w,
+        "transport.set_click_level",
+        json!({"level_db": "-12"}),
+    );
+    run_in(
+        &mut app,
+        &w,
+        "transport.set_click_mode",
+        json!({"mode": "record_only"}),
+    );
+    let t = app.call("state.get", json!({"target": "transport", "window": w}));
+    assert_eq!(t["click"]["on"], true, "{t}");
+    assert!(
+        (t["click"]["level_db"].as_f64().unwrap() + 12.0).abs() < 1e-3,
+        "{t}"
+    );
+    assert_eq!(t["click"]["mode"], "record_only", "{t}");
+    wait_in_tree(&mut app, &w, "Click on", |nodes| {
+        find_node(nodes, "Click").filter(|n| n["role"] == "button" && n["value"] == "on")
+    });
+    // Click's menu would track modally: the channel gets the commands.
+    let options = wait_for_node(&mut app, &w, "Click Options");
+    app.call("ui.click", json!({"window": w, "element": options["id"]}));
+    wait_for_editor(&mut app, &w, "the channel note", |e| {
+        e["status"]
+            == "Click's menu does not open for the control channel; use \
+                transport.set_click_level or transport.set_click_mode."
+    });
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "transport.set_click_level", "params": {"level_db": "6"}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{e}");
+    app.quit();
+}

@@ -811,6 +811,65 @@ fn a_channel_click_on_more_names_the_bar_command(cx: &mut TestAppContext) {
     );
 }
 
+/// Click's ⌄ under the channel (slice 8b Task 5): its menu would track
+/// modally, so the status names the commands and no menu opens.
+#[gpui::test]
+fn a_channel_click_on_click_options_names_the_commands(cx: &mut TestAppContext) {
+    let s = setup(cx, demo_fake());
+    ok(call(&s, cx, "app.new_demo", json!({})));
+    ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "ui.set_transport_bar", "params": {"items": "cluster,click"}}),
+    ));
+    // The session has said: the ⌄ is enabled.
+    ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "transport.click", "params": {"on": true}}),
+    ));
+    let tree = ok(call(&s, cx, "ui.tree", json!({})));
+    let node = |label: &str| {
+        tree["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["label"] == label)
+            .cloned()
+    };
+    let options = node("Click Options").unwrap_or_else(|| panic!("no Click Options in {tree}"));
+    assert_eq!(options["enabled"], true, "{options}");
+    ok(call(
+        &s,
+        cx,
+        "ui.click",
+        json!({"element": options["id"].as_str().unwrap()}),
+    ));
+    let status = cx.update(|cx| {
+        let s = AppState::global(cx).read(cx);
+        let doc = s.windows()[0].doc;
+        s.store.document(doc).unwrap().status().map(String::from)
+    });
+    assert_eq!(
+        status.as_deref(),
+        Some(
+            "Click's menu does not open for the control channel; use \
+             transport.set_click_level or transport.set_click_mode."
+        )
+    );
+    let tree = ok(call(&s, cx, "ui.tree", json!({})));
+    assert!(
+        !tree["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["role"] == "menuitem" && n["label"] == "Level"),
+        "{tree}"
+    );
+}
+
 // ---- Slice 3: wait, keys, modifier clicks, screenshots, transport ----
 
 /// One bar of 4/4, in ticks.

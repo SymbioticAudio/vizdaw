@@ -24,9 +24,9 @@ struct Setup {
     cx: VisualTestContext,
 }
 
-/// The default window's width (Swift's 1440): the whole standard bar
-/// fits.
-const WIDE: f32 = 1440.;
+/// A width the whole standard bar fits (Swift `TransportRowTests`: "at
+/// 1,600 pt nothing folds"; the default window is 1440).
+const WIDE: f32 = 1600.;
 
 /// The app with one demo document window over `fake`.
 fn setup(cx: &mut TestAppContext, fake: FakeSession) -> Setup {
@@ -167,7 +167,8 @@ fn the_bar_names_its_controls_as_the_swift_bar(cx: &mut TestAppContext) {
     assert_eq!(s.value("textfield", "Edit Out"), "");
     assert!(!s.focused("Position"));
     assert_eq!(s.value("button", "Loop"), "off");
-    // The standard bar fits the window: nothing folds.
+    // The standard bar fits a wide window: nothing folds.
+    s.resize(WIDE);
     assert!(!s.has("button", "More Transport Items"));
     // Playing flips Play to Stop.
     s.click("button", "Play");
@@ -793,6 +794,7 @@ fn the_record_items_name_their_controls_as_the_swift_bar(cx: &mut TestAppContext
         at("Play") + 1,
         "Record follows Play: {labels:?}"
     );
+    s.resize(WIDE);
     assert!(
         !s.has("button", "More Transport Items"),
         "the bar still fits"
@@ -1402,4 +1404,241 @@ fn the_field_labels_do_not_clip(cx: &mut TestAppContext) {
         assert!(label >= text, "{} has {label} for {text}", f.title());
         end = right;
     }
+}
+
+// Slice 8b Task 5: Click with its Level/Mode menu, DSP Load, Audio
+// Device and command buttons.
+
+impl Setup {
+    /// The click the transport reads, and the session holds.
+    fn set_click(&mut self, level_db: f64, mode: vizdaw_ffi::session::click::ClickModeRow) {
+        let row = vizdaw_ffi::ClickRow {
+            on: false,
+            level_db,
+            mode,
+        };
+        self.fake.set_click_row(row);
+        self.fake.set_transport(|t| t.click = Some(row));
+        self.update_model(|d| {
+            let _ = d.poll_transport();
+        });
+    }
+
+    fn selected(&mut self, role: &str, label: &str) -> bool {
+        self.node(role, label)
+            .unwrap_or_else(|| panic!("no {role} {label:?} in {:?}", self.tree()))["selected"]
+            == true
+    }
+
+    fn right_click(&mut self, role: &str, label: &str) {
+        let at = self.center(role, label);
+        self.cx
+            .simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        self.cx
+            .simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
+        self.cx.run_until_parked();
+    }
+
+    fn mixer_windows(&mut self) -> usize {
+        self.app.read_with(&self.cx, |a, _| {
+            a.windows()
+                .iter()
+                .filter(|w| w.kind == vizdaw_gpui::WindowKind::Mixer)
+                .count()
+        })
+    }
+}
+
+/// Swift `theClickItemSetsLevelAndMode` on the bar: the toggle and ⌄,
+/// the ⌄'s Level › and Mode › with the transport's settings checked;
+/// choosing runs the command and the check follows the next read.
+#[gpui::test]
+fn the_click_menus_checks_follow_the_transport(cx: &mut TestAppContext) {
+    use vizdaw_ffi::session::click::ClickModeRow;
+    let mut s = setup(cx, demo_fake());
+    s.set_bar("cluster,click");
+    s.set_click(-6.0, ClickModeRow::PlayAndRecord);
+    assert!(s.enabled("button", "Click") && s.enabled("button", "Click Options"));
+    assert_eq!(s.value("button", "Click"), "off");
+    s.click("button", "Click Options");
+    assert!(s.has("menuitem", "Level") && s.has("menuitem", "Mode"));
+    s.click("menuitem", "Level");
+    assert!(s.selected("menuitem", "\u{2212}6 dB"), "a new song's level");
+    assert!(!s.selected("menuitem", "\u{2212}12 dB"));
+    s.click("menuitem", "\u{2212}12 dB");
+    assert!(!s.has("menuitem", "Level"), "choosing closes the menu");
+    let last = s.fake.clicks_run().last().cloned().unwrap();
+    assert_eq!(last.0, "transport.set_click_level");
+    // The checks follow the transport read (`state.get transport`).
+    s.fake.set_transport(|t| {
+        t.click = Some(vizdaw_ffi::ClickRow {
+            on: false,
+            level_db: -24.0,
+            mode: ClickModeRow::RecordOnly,
+        })
+    });
+    s.update_model(|d| {
+        let _ = d.poll_transport();
+    });
+    // A right-click on the toggle opens the same menu.
+    s.right_click("button", "Click");
+    s.click("menuitem", "Level");
+    assert!(s.selected("menuitem", "\u{2212}24 dB"));
+    s.click("menuitem", "Mode");
+    assert!(s.selected("menuitem", "Record Only"));
+    s.click("menuitem", "Play and Record");
+    let last = s.fake.clicks_run().last().cloned().unwrap();
+    assert_eq!(last.0, "transport.set_click_mode");
+    // Esc closes it.
+    s.click("button", "Click Options");
+    assert!(s.has("menuitem", "Level"));
+    s.keys("escape");
+    assert!(!s.has("menuitem", "Level"));
+    // The toggle runs transport.click; it shows the session's answer.
+    s.click("button", "Click");
+    assert_eq!(s.value("button", "Click"), "on");
+    assert_eq!(s.fake.clicks_run().last().unwrap().0, "transport.click");
+    s.click("button", "Click");
+    assert_eq!(s.value("button", "Click"), "off");
+}
+
+/// Both parts are off while the session has not given the settings, and
+/// the right-click menu's entries too.
+#[gpui::test]
+fn the_click_item_is_disabled_while_unknown(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    s.set_bar("cluster,click");
+    assert!(!s.enabled("button", "Click"));
+    assert!(!s.enabled("button", "Click Options"));
+    s.right_click("button", "Click Options");
+    assert!(!s.enabled("menuitem", "Level"));
+    assert!(!s.enabled("menuitem", "Mode"));
+    s.click("menuitem", "Level");
+    assert!(
+        !s.has("menuitem", "0 dB"),
+        "a disabled submenu opens nothing"
+    );
+    assert!(s.fake.clicks_run().is_empty());
+}
+
+/// Folded, Click is a submenu `Click` ✓ of the toggle, Level › and
+/// Mode ›; DSP Load and Audio Device are `<title>: <text>` texts.
+#[gpui::test]
+fn folded_click_dsp_and_device_are_swifts_entries_in_more(cx: &mut TestAppContext) {
+    use vizdaw_ffi::session::click::ClickModeRow;
+    let mut s = setup(cx, demo_fake());
+    s.set_bar("cluster,bar,time,tempo,signature,edit_fields,click,dsp_load,device");
+    s.set_click(-12.0, ClickModeRow::PlayAndRecord);
+    s.fake.set_transport(|t| {
+        t.device = "Offline".into();
+        t.sample_rate = 48_000.0;
+    });
+    s.update_model(|d| {
+        let _ = d.poll_transport();
+    });
+    s.resize(600.);
+    assert!(!s.has("button", "Click"), "folds");
+    s.click("button", "More Transport Items");
+    let dsp = s.node("menuitem", "DSP Load").expect("an entry");
+    assert_eq!(dsp["enabled"], false, "a text");
+    assert_eq!(dsp["value"], "DSP Load: DSP 0%");
+    let device = s.node("menuitem", "Audio Device").expect("an entry");
+    assert_eq!(device["value"], "Audio Device: Offline \u{b7} 48 kHz");
+    assert!(!s.selected("menuitem", "Click"), "off");
+    s.click("menuitem", "Click");
+    assert!(s.has("menuitem", "Level"), "the submenu opened");
+    s.click("menuitem", "Level");
+    assert!(s.selected("menuitem", "\u{2212}12 dB"));
+    s.click("menuitem", "\u{2212}3 dB");
+    assert!(!s.has("menuitem", "Level"), "the menu closed");
+    assert_eq!(
+        s.fake.clicks_run().last().unwrap().1[0].value,
+        vizdaw_ffi::control::ControlValue::Text { value: "-3".into() }
+    );
+}
+
+/// DSP Load: `DSP n%` read through the mixer's levels every 0.25 s, only
+/// while it shows; Audio Device: `No output` before the first Play.
+#[gpui::test]
+fn dsp_load_polls_only_while_it_shows(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    s.fake.set_levels(vizdaw_ffi::mixer::MixerLevels {
+        meters: vec![],
+        dsp_load: 0.25,
+        dsp_peak: 0.3,
+        latency_frames: 0,
+        faulted: vec![],
+        midi: vec![],
+    });
+    s.set_bar("cluster,dsp_load,device");
+    assert_eq!(s.value("text", "Audio Device"), "No output");
+    s.poll_until("the load", |s| s.value("text", "DSP Load") == "DSP 25%");
+    // Gone from the bar, it reads no more.
+    s.set_bar("cluster,loop");
+    s.cx.executor().advance_clock(Duration::from_millis(300));
+    s.cx.run_until_parked();
+    let reads = s.fake.levels_reads();
+    for _ in 0..4 {
+        s.cx.executor().advance_clock(Duration::from_millis(250));
+        s.cx.run_until_parked();
+    }
+    assert_eq!(s.fake.levels_reads(), reads, "no reads while hidden");
+    // Shown again, it reads again, at most 4 times a second.
+    s.set_bar("cluster,dsp_load");
+    let reads = s.fake.levels_reads();
+    for _ in 0..4 {
+        s.cx.executor().advance_clock(Duration::from_millis(250));
+        s.cx.run_until_parked();
+    }
+    let more = s.fake.levels_reads() - reads;
+    assert!((1..=5).contains(&more), "{more} reads in a second");
+}
+
+/// A `command:window.mixer` button: the registry's title, enabled as its
+/// menu item; a click opens the Mixer. A stale id is greyed with its
+/// tooltip. Folded, the button is an action with its label.
+#[gpui::test]
+fn a_command_button_runs_its_menu_item(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    s.set_bar("cluster,command:window.mixer,command:gone.command:Old");
+    assert!(s.enabled("button", "Mixer"));
+    assert_eq!(s.value("button", "Mixer"), "Mixer", "the tooltip");
+    assert!(!s.enabled("button", "Old"));
+    assert_eq!(
+        s.value("button", "Old"),
+        "This command is no longer in VizDAW"
+    );
+    assert_eq!(s.mixer_windows(), 0);
+    s.click("button", "Mixer");
+    assert_eq!(s.mixer_windows(), 1, "the Mixer opened");
+    // A label of its own; folded, an action with that label.
+    s.set_bar("cluster,bar,time,tempo,signature,edit_fields,command:edit.undo:Back");
+    s.resize(600.);
+    s.click("button", "More Transport Items");
+    let entry = s.node("menuitem", "Back").expect("an entry");
+    assert_eq!(entry["enabled"], false, "as Undo's menu item");
+}
+
+/// A button whose command cannot run says so (Swift `cannotRun`).
+#[gpui::test]
+fn a_command_button_that_cannot_run_says_so(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    s.set_bar("cluster,command:transport.loop");
+    assert!(s.enabled("button", "Loop"));
+    // Not runnable by the time it is pressed.
+    let window = s.window;
+    window
+        .update(&mut s.cx, |v, window, cx| {
+            v.app().clone().update(cx, |a, _| {
+                let doc = a.windows()[0].doc;
+                a.store.with_document(doc, |d, _| d.select(None));
+            });
+            v.press_command("transport.loop", window, cx);
+        })
+        .unwrap();
+    s.cx.run_until_parked();
+    assert_eq!(
+        s.status().as_deref(),
+        Some("Loop can't run from a button right now.")
+    );
 }

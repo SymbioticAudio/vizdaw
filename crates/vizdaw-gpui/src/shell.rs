@@ -37,6 +37,7 @@ use vizdaw_app::editor::{MainView, PaneSide, PaneView, ViewLayouts};
 use vizdaw_app::mixer::MixerPlacement;
 use vizdaw_app::record::PopoverHost;
 use vizdaw_app::transport::Shuttle;
+use vizdaw_app::transport_bar::TransportItem;
 use vizdaw_app::transport_fields::{self as fields_model, TransportField};
 use vizdaw_app::{DocId, DocumentModel, SaveAction, SaveChoice, WindowToken};
 use vizdaw_ffi::snapshot::LaneRow;
@@ -66,6 +67,8 @@ use crate::transport_fields::TransportFields;
 
 /// How long a status text shows (Swift `StatusLine`).
 pub const STATUS_TIMEOUT: Duration = Duration::from_secs(6);
+/// How often DSP Load reads the engine's load (Swift: 0.25 s).
+pub const DSP_POLL: Duration = Duration::from_millis(250);
 /// How many frames [`DocumentWindow::fit_log`] keeps.
 const FIT_LOG_KEPT: usize = 32;
 /// One frame's pane host area and the centre's bounds in it.
@@ -104,6 +107,13 @@ pub struct DocumentWindow {
     _hold: Option<Task<()>>,
     /// The transport bar's » menu is open.
     more_open: bool,
+    /// Click's own menu, while open: the row of its open submenu at each
+    /// depth.
+    click_menu: Option<Vec<usize>>,
+    /// Click's submenu in », while open: likewise.
+    more_click: Option<Vec<usize>>,
+    /// Reads the DSP load every [`DSP_POLL`] while DSP Load is on the bar.
+    _dsp_poll: Option<Task<()>>,
     /// The step key last run whose key has not come up: a key-down for it
     /// before then is the key repeating.
     step_key_down: Option<SharedString>,
@@ -419,6 +429,9 @@ impl DocumentWindow {
             shuttle: Shuttle::new(),
             _hold: None,
             more_open: false,
+            click_menu: None,
+            more_click: None,
+            _dsp_poll: None,
             step_key_down: None,
             pane_menu: None,
             pane_drag: None,
@@ -693,12 +706,134 @@ impl DocumentWindow {
 
     pub(crate) fn toggle_more(&mut self, cx: &mut Context<Self>) {
         self.more_open = !self.more_open;
+        self.more_click = None;
+        self.click_menu = None;
         cx.notify();
     }
 
     pub(crate) fn close_more(&mut self, cx: &mut Context<Self>) {
         self.more_open = false;
+        self.more_click = None;
         cx.notify();
+    }
+
+    /// Click's ⌄: its menu opens or closes. Under the channel it would
+    /// track modally, so the status line names the commands instead.
+    pub(crate) fn toggle_click_menu(&mut self, cx: &mut Context<Self>) {
+        if self.click_menu.is_some() {
+            self.close_bar_menus(cx);
+        } else {
+            self.open_click_menu(cx);
+        }
+    }
+
+    /// A right-click on Click, or its ⌄: its menu opens (its entries
+    /// disabled while the session has not given the settings).
+    pub(crate) fn open_click_menu(&mut self, cx: &mut Context<Self>) {
+        if crate::control::is_channel_click() {
+            self.set_status(vizdaw_app::bar_items::CLICK_ON_CHANNEL, cx);
+            return;
+        }
+        self.more_open = false;
+        self.more_click = None;
+        self.click_menu = Some(vec![]);
+        cx.notify();
+    }
+
+    /// Click's menus and » close (an entry was chosen, or a press outside).
+    pub(crate) fn close_bar_menus(&mut self, cx: &mut Context<Self>) {
+        self.click_menu = None;
+        self.close_more(cx);
+    }
+
+    /// Click's entry in »: its submenu opens or closes.
+    pub(crate) fn toggle_more_click(&mut self, cx: &mut Context<Self>) {
+        self.more_click = match self.more_click {
+            Some(_) => None,
+            None => Some(vec![]),
+        };
+        cx.notify();
+    }
+
+    /// A submenu row at `depth` of `owner`'s menu: it opens (or, open,
+    /// closes), and whatever was open below it closes. In » the lists
+    /// start at depth 1 (the » menu itself is depth 0).
+    pub(crate) fn open_bar_submenu(
+        &mut self,
+        owner: transport_bar::MenuOwner,
+        depth: usize,
+        row: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let (path, depth) = match owner {
+            transport_bar::MenuOwner::Click => (&mut self.click_menu, depth),
+            transport_bar::MenuOwner::More => (&mut self.more_click, depth.saturating_sub(1)),
+        };
+        let Some(path) = path else { return };
+        let was = path.get(depth).copied();
+        path.truncate(depth);
+        if was != Some(row) {
+            path.push(row);
+        }
+        cx.notify();
+    }
+
+    /// A Click entry, on the bar or in »: a refusal in the status line.
+    pub(crate) fn run_bar_action(
+        &mut self,
+        action: vizdaw_app::bar_items::BarAction,
+        cx: &mut Context<Self>,
+    ) {
+        self.with_model(cx, |d| vizdaw_app::bar_items::run(action, d));
+    }
+
+    /// A command button, on the bar or in » (Swift `CommandButtonAction`):
+    /// what its menu item runs, a dialog command's dialog too; when it
+    /// cannot run, the status line says so.
+    pub fn press_command(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let runs = self
+            .with_model(cx, |d| vizdaw_app::bar_items::press_command(id, d))
+            .unwrap_or(false);
+        if runs {
+            window.dispatch_action(menus::action_for(id), cx);
+        }
+    }
+
+    /// DSP Load reads the engine's load through the mixer every
+    /// [`DSP_POLL`] while it is on the bar (`shown`), and not otherwise.
+    fn follow_dsp(&mut self, shown: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !shown {
+            self._dsp_poll = None;
+            return;
+        }
+        if self._dsp_poll.is_some() {
+            return;
+        }
+        let doc = self.doc;
+        self._dsp_poll = Some(cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(DSP_POLL).await;
+                let now = cx.background_executor().now();
+                let polled = this.update(cx, |this, cx| {
+                    let load = |d: &DocumentModel| d.mixer().map(|m| m.meters().dsp_load);
+                    let moved = this.app.update(cx, |s, _| {
+                        s.store
+                            .with_document(doc, |d, _| {
+                                let before = load(d).map(vizdaw_app::bar_items::dsp_text);
+                                d.with_mixer(|m, d| m.poll_levels(d, now));
+                                load(d).map(vizdaw_app::bar_items::dsp_text) != before
+                            })
+                            .unwrap_or(false)
+                    });
+                    if moved {
+                        cx.notify();
+                    }
+                });
+                if polled.is_err() {
+                    break;
+                }
+            }
+        }));
     }
 
     /// The Faults button or its » entry: the popover opens or closes.
@@ -1111,6 +1246,8 @@ impl DocumentWindow {
         }
         let headers = std::mem::take(&mut self.track_headers.add_menu_open);
         let more = std::mem::take(&mut self.more_open);
+        self.more_click = None;
+        let click_menu = self.click_menu.take().is_some();
         let field_popover = self.close_field_popover(window, cx);
         let faults = self.escape_faults(cx);
         let record = self.escape_record_popover(window, cx);
@@ -1121,6 +1258,7 @@ impl DocumentWindow {
         if self.menu_bar.as_mut().is_some_and(MenuBar::close)
             || headers
             || more
+            || click_menu
             || field_popover
             || faults
             || record
@@ -1677,10 +1815,25 @@ impl DocumentWindow {
 
     /// What the bar shows now and then, with its labels measured.
     fn bar_shows(bar: Option<&BarState>, window: &Window) -> transport_bar::Shows {
-        transport_bar::Shows {
-            labels: transport_bar::LabelWidths::measure(window),
-            ..bar.map(BarState::shows).unwrap_or_default()
+        transport_bar::Shows::measured(bar, window)
+    }
+
+    /// Click's menu goes with Click off the row, and »'s Click submenu with
+    /// »; DSP Load polls while it is on the row.
+    fn follow_bar_menus(
+        &mut self,
+        plan: Option<&Plan>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let shown = plan.map(Plan::shown).unwrap_or_default();
+        if !shown.contains(&transport_bar::Piece::Click) {
+            self.click_menu = None;
         }
+        if !self.more_open {
+            self.more_click = None;
+        }
+        self.follow_dsp(shown.contains(&transport_bar::Piece::DspLoad), window, cx);
     }
 
     /// The Mixer window: the menu bar (off macOS), the alert, its
@@ -1710,6 +1863,7 @@ impl DocumentWindow {
         if plan.folded().is_empty() {
             self.more_open = false;
         }
+        self.follow_bar_menus(bar.as_ref().map(|_| &plan), window, cx);
         let popover = bar.as_ref().and_then(|b| b.record_popover.as_ref());
         self.follow_record_popover(&plan, popover, window, cx);
         if title != self.title {
@@ -1738,6 +1892,8 @@ impl DocumentWindow {
                     fields: &self.transport_fields,
                     popover: &self.record_popover,
                     more_open: self.more_open,
+                    click_menu: self.click_menu.as_deref(),
+                    more_click: self.more_click.as_deref(),
                 },
                 &mut root.container(),
                 window,
@@ -1907,6 +2063,7 @@ impl Render for DocumentWindow {
         if plan.folded().is_empty() {
             self.more_open = false;
         }
+        self.follow_bar_menus(bar.as_ref().map(|_| &plan), window, cx);
         let popover = bar.as_ref().and_then(|b| b.record_popover.as_ref());
         self.follow_record_popover(&plan, popover, window, cx);
         self.follow_status(&status, window, cx);
@@ -1969,6 +2126,8 @@ impl Render for DocumentWindow {
                         fields: &self.transport_fields,
                         popover: &self.record_popover,
                         more_open: self.more_open,
+                        click_menu: self.click_menu.as_deref(),
+                        more_click: self.more_click.as_deref(),
                     },
                     &mut root.container(),
                     window,
@@ -2073,5 +2232,20 @@ fn bar_state(
                 PopoverHost::MixerWindow
             })
             .then(|| PopoverState::of(d)),
+        click: transport_bar::ClickState::of(d),
+        dsp: vizdaw_app::bar_items::dsp_text(d.mixer().map_or(0., |m| m.meters().dsp_load)),
+        device: vizdaw_app::bar_items::device_text(&d.last_transport()),
+        commands: s
+            .transport_layout()
+            .items_for(document_window)
+            .into_iter()
+            .filter_map(|i| match i {
+                TransportItem::Command { id, label } => Some((
+                    id.clone(),
+                    vizdaw_app::bar_items::CommandButtonFace::make(id, label.as_deref(), Some(d)),
+                )),
+                _ => None,
+            })
+            .collect(),
     })
 }

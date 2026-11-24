@@ -7,6 +7,7 @@ pub mod arrangement;
 pub mod audio_format;
 pub mod audition;
 pub mod banners;
+pub mod bar_items;
 pub mod bounce;
 pub mod bounce_commands;
 pub mod close_prompts;

@@ -582,7 +582,7 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 | co_producer_import_midi_is_refused | | |
 | control_close_of_a_dirty_song_does_not_prompt | S2 | S2 |
 | app_quit_refuses_while_a_song_is_unsaved | S2 | S2 |
-| groups_vcas_and_transport_bar_over_the_channel | partial S6a + S6b (transport bar, strips, groups and VCAs; command: bar items later) | partial S6a |
+| groups_vcas_and_transport_bar_over_the_channel | S6a + S6b (strips, groups and VCAs), S8b (the bar part: `gpui_transport_bar_click_and_command_buttons`) | partial S6a; the bar part S8b, Linux run pending |
 
 ## Linux gaps
 

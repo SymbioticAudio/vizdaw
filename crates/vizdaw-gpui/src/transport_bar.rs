@@ -6,8 +6,10 @@
 //! and the pane toggles, Faults with its popover (document window only),
 //! and the record items: Record in the cluster, Replace/Overdub,
 //! Count-in, Record Options with its popover ([`crate::record_popover`])
-//! and the Step Entry summary; what does not fit folds, last first, into
-//! the » menu, where a folded field item is a popover of its live fields.
+//! and the Step Entry summary; Click with its Level/Mode menu, DSP Load,
+//! Audio Device and command buttons; what does not fit folds, last first,
+//! into the » menu, where a folded field item is a popover of its live
+//! fields.
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -16,6 +18,7 @@ use gpui::{
     Window, anchored, canvas, deferred, div, point, px, rgb,
 };
 use vizdaw_app::DocumentModel;
+use vizdaw_app::bar_items::{self, CommandButtonFace, EntryKind, MenuEntry};
 use vizdaw_app::editor::{MainView, PaneSide};
 use vizdaw_app::transport::{ReadoutBox, TransportReadout};
 use vizdaw_app::transport_bar::{Fit, ItemKind, TransportItem, TransportLayout, fit};
@@ -51,6 +54,37 @@ pub struct BarState {
     pub summary: Option<String>,
     /// The record popover, while it is open in this window.
     pub record_popover: Option<PopoverState>,
+    /// The Click item.
+    pub click: ClickState,
+    /// DSP Load's text (`DSP 12%`), as the poll last read it.
+    pub dsp: String,
+    /// Audio Device's text.
+    pub device: String,
+    /// The command buttons, in bar order: each one's id and face.
+    pub commands: Vec<(String, CommandButtonFace)>,
+}
+
+/// What the Click item draws (Swift `ClickItemView`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClickState {
+    /// The session has given the settings (else both parts are off).
+    pub known: bool,
+    pub on: bool,
+    /// Its own menu: Level › and Mode ›.
+    pub menu: Vec<MenuEntry>,
+    /// Its » entry: the submenu `Click`.
+    pub entry: MenuEntry,
+}
+
+impl ClickState {
+    pub fn of(d: &DocumentModel) -> ClickState {
+        ClickState {
+            known: d.last_transport().click.is_some(),
+            on: bar_items::click_is_on(d),
+            menu: bar_items::click_menu(d),
+            entry: bar_items::click_entry(d),
+        }
+    }
 }
 
 /// What the Record part of the cluster, Replace/Overdub and Count-in draw
@@ -127,7 +161,7 @@ impl BarState {
             faults: self.faults.is_some(),
             summary: self.summary.is_some(),
             cluster_readouts: self.record.readouts_width(),
-            labels: LabelWidths::default(),
+            ..Shows::default()
         }
     }
 
@@ -180,6 +214,17 @@ const READOUT_CHAR_SM: f32 = 8.;
 const READOUT_CHAR_XS: f32 = 7.;
 const READOUT_CHAR_MONO: f32 = 7.5;
 
+/// The Click toggle's and its ⌄'s widths.
+const CLICK_TOGGLE: f32 = 52.;
+const CLICK_CHEVRON: f32 = 20.;
+/// A command button's padding, each side (`px_3`).
+const COMMAND_PADDING: f32 = 12.;
+/// The widths DSP Load, Audio Device and a command button take in a bar
+/// planned with no window.
+const DSP_WIDTH: f32 = 64.;
+const DEVICE_WIDTH: f32 = 120.;
+const COMMAND_WIDTH: f32 = 96.;
+
 /// The Main View picker's label (Swift `MainViewItem`).
 pub const MAIN_VIEW: &str = "Main View";
 
@@ -229,11 +274,17 @@ pub enum Piece {
     Summary,
     RecordOptions,
     Separator,
+    Click,
+    DspLoad,
+    Device,
+    /// The bar's `n`th command button (0 the first).
+    Command(usize),
 }
 
 /// What shows only now and then: an item that is absent takes no room
-/// (Swift: a zero-width item is neither shown nor folded).
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+/// (Swift: a zero-width item is neither shown nor folded). With it, the
+/// widths measured from the texts.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Shows {
     /// Faults: there are faults or a report.
     pub faults: bool,
@@ -244,6 +295,48 @@ pub struct Shows {
     pub cluster_readouts: f32,
     /// The fields' label widths.
     pub labels: LabelWidths,
+    /// DSP Load's width (for `DSP 100%`) and Audio Device's, when
+    /// measured.
+    pub dsp: Option<f32>,
+    pub device: Option<f32>,
+    /// Each command button's width, in bar order, when measured.
+    pub commands: Vec<f32>,
+}
+
+impl Shows {
+    /// What `bar` shows, with its texts measured in `window`'s font.
+    pub fn measured(bar: Option<&BarState>, window: &Window) -> Shows {
+        let caption = window.rem_size() * 0.75;
+        let body = window.rem_size() * 0.875;
+        let mut shows = bar.map(BarState::shows).unwrap_or_default();
+        shows.labels = LabelWidths::measure(window);
+        shows.dsp = Some(text_width(window, &bar_items::dsp_text(1.), caption));
+        if let Some(b) = bar {
+            shows.device = Some(text_width(window, &b.device, caption));
+            shows.commands = b
+                .commands
+                .iter()
+                .map(|(_, f)| text_width(window, &f.label, body) + 2. * COMMAND_PADDING)
+                .collect();
+        }
+        shows
+    }
+}
+
+/// `text`'s width at `size` in `window`'s font, rounded up.
+fn text_width(window: &Window, text: &str, size: gpui::Pixels) -> f32 {
+    let run = TextRun {
+        len: text.len(),
+        font: window.text_style().font(),
+        color: gpui::black(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let line = window
+        .text_system()
+        .shape_line(text.to_owned().into(), size, &[run], None);
+    f32::from(line.width).ceil()
 }
 
 /// The fields' label widths, measured from their titles at the caption
@@ -261,23 +354,8 @@ impl Default for LabelWidths {
 impl LabelWidths {
     /// The labels' widths in `window`'s font.
     pub fn measure(window: &Window) -> LabelWidths {
-        let font = window.text_style().font();
         let size = window.rem_size() * 0.75;
-        LabelWidths(TransportField::ALL.map(|f| {
-            let title = f.title();
-            let run = TextRun {
-                len: title.len(),
-                font: font.clone(),
-                color: gpui::black(),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-            let line = window
-                .text_system()
-                .shape_line(title.into(), size, &[run], None);
-            f32::from(line.width).ceil()
-        }))
+        LabelWidths(TransportField::ALL.map(|f| text_width(window, f.title(), size)))
     }
 
     /// `f`'s label width.
@@ -325,7 +403,11 @@ impl Piece {
             TransportItem::Summary => Piece::Summary,
             TransportItem::RecordOptions => Piece::RecordOptions,
             TransportItem::Separator => Piece::Separator,
-            _ => return None,
+            TransportItem::Click => Piece::Click,
+            TransportItem::DspLoad => Piece::DspLoad,
+            TransportItem::Device => Piece::Device,
+            // Numbered by the plan.
+            TransportItem::Command { .. } => Piece::Command(0),
         })
     }
 
@@ -356,6 +438,21 @@ impl Piece {
             Piece::Summary => SUMMARY,
             Piece::RecordOptions => CHEVRON,
             Piece::Separator => 1.,
+            Piece::Click => CLICK_TOGGLE + CLUSTER_GAP + CLICK_CHEVRON,
+            Piece::DspLoad => DSP_WIDTH,
+            Piece::Device => DEVICE_WIDTH,
+            Piece::Command(_) => COMMAND_WIDTH,
+        }
+    }
+
+    /// Its width in a bar that `shows`: the measured one where there is.
+    fn width_in(self, shows: &Shows) -> f32 {
+        match self {
+            Piece::Cluster => self.width(&shows.labels) + shows.cluster_readouts,
+            Piece::DspLoad => shows.dsp.unwrap_or(DSP_WIDTH),
+            Piece::Device => shows.device.unwrap_or(DEVICE_WIDTH),
+            Piece::Command(n) => shows.commands.get(n).copied().unwrap_or(COMMAND_WIDTH),
+            _ => self.width(&shows.labels),
         }
     }
 
@@ -380,6 +477,10 @@ impl Piece {
             Piece::Summary => "Step Entry",
             Piece::RecordOptions => record_popover::RECORD_OPTIONS,
             Piece::Separator => "Separator",
+            Piece::Click => bar_items::CLICK,
+            Piece::DspLoad => bar_items::DSP_LOAD,
+            Piece::Device => bar_items::AUDIO_DEVICE,
+            Piece::Command(_) => bar_items::COMMAND_BUTTON,
         }
     }
 
@@ -418,6 +519,8 @@ pub struct Plan {
     items: Vec<TransportItem>,
     fit: Fit,
     labels: LabelWidths,
+    /// DSP Load's and Audio Device's widths.
+    widths: (f32, f32),
 }
 
 impl Plan {
@@ -435,10 +538,18 @@ impl Plan {
         document_window: bool,
         shows: Shows,
     ) -> Plan {
+        let mut commands = 0;
         let (pieces, items): (Vec<Piece>, Vec<TransportItem>) = layout
             .items_for(document_window)
             .into_iter()
             .filter_map(|i| Piece::of(i).map(|p| (p, i.clone())))
+            .map(|(p, i)| match p {
+                Piece::Command(_) => {
+                    commands += 1;
+                    (Piece::Command(commands - 1), i)
+                }
+                _ => (p, i),
+            })
             .filter(|(p, _)| match p {
                 Piece::Faults => shows.faults,
                 Piece::Summary => shows.summary,
@@ -453,11 +564,7 @@ impl Plan {
                     Piece::Separator => ItemKind::Separator,
                     _ => ItemKind::Content,
                 };
-                let width = match p {
-                    Piece::Cluster => p.width(&shows.labels) + shows.cluster_readouts,
-                    _ => p.width(&shows.labels),
-                };
-                (width, *p == Piece::Cluster, kind)
+                (p.width_in(&shows), *p == Piece::Cluster, kind)
             })
             .collect();
         let fit = fit(&widths, width - 2. * PADDING, GAP, CHEVRON);
@@ -466,6 +573,10 @@ impl Plan {
             items,
             fit,
             labels: shows.labels,
+            widths: (
+                Piece::DspLoad.width_in(&shows),
+                Piece::Device.width_in(&shows),
+            ),
         }
     }
 
@@ -843,6 +954,238 @@ fn summary(text: &str, scope: &mut RegistryScope) -> AnyElement {
         .into_any_element()
 }
 
+/// Click (Swift `ClickItemView`): the metronome's toggle and its ⌄. A
+/// right-click on either, or the ⌄, opens Level › and Mode ›; both parts
+/// are off while the session has not given the settings. Under the
+/// channel the menu does not open (it would track modally): the status
+/// line names the commands.
+fn click_item(
+    c: &ClickState,
+    open: Option<&[usize]>,
+    scope: &mut RegistryScope,
+    window: &Window,
+    cx: &mut Context<DocumentWindow>,
+) -> AnyElement {
+    let enabled = c.known;
+    let toggle =
+        face(
+            "click-toggle",
+            bar_items::CLICK,
+            enabled,
+            if c.on { colors::ON } else { colors::BUTTON },
+        )
+        .w(px(CLICK_TOGGLE))
+        .child(scope.control_with(
+            "button",
+            bar_items::CLICK,
+            enabled,
+            Some(if c.on { "on" } else { "off" }),
+            false,
+        ))
+        .when(enabled, |b| {
+            b.on_click(cx.listener(|this, _, _, cx| {
+                this.run_bar_action(bar_items::BarAction::ToggleClick, cx)
+            }))
+        })
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(|this, _, _, cx| this.open_click_menu(cx)),
+        );
+    let toggle = crate::sheet_host::with_help(toggle, bar_items::CLICK_HELP.to_owned());
+    let options = face("click-options", "\u{2304}", enabled, colors::BUTTON)
+        .w(px(CLICK_CHEVRON))
+        .child(scope.control("button", bar_items::CLICK_OPTIONS, enabled))
+        .when(enabled, |b| {
+            b.on_click(cx.listener(|this, _, _, cx| this.toggle_click_menu(cx)))
+        })
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(|this, _, _, cx| this.open_click_menu(cx)),
+        );
+    let options = crate::sheet_host::with_help(options, bar_items::CLICK_OPTIONS_HELP.to_owned());
+    let mut item = div()
+        .relative()
+        .flex()
+        .flex_row()
+        .flex_none()
+        .items_center()
+        .gap(px(CLUSTER_GAP))
+        .child(toggle)
+        .child(options);
+    if let Some(path) = open {
+        let size = window.viewport_size();
+        let list = bar_menu_list(
+            &c.menu,
+            path,
+            0,
+            MenuOwner::Click,
+            &mut scope.container(),
+            cx,
+        );
+        item = item
+            .child(
+                deferred(
+                    anchored().position(point(px(0.), px(0.))).child(
+                        div()
+                            .id("click-menu-backdrop")
+                            .w(size.width)
+                            .h(size.height)
+                            .occlude()
+                            .on_any_mouse_down(
+                                cx.listener(|this, _, _, cx| this.close_bar_menus(cx)),
+                            ),
+                    ),
+                )
+                .with_priority(1),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_full()
+                    .left_0()
+                    .child(deferred(anchored().snap_to_window().child(list)).with_priority(2)),
+            );
+    }
+    item.into_any_element()
+}
+
+/// Whose menu a bar menu list is: Click's own, or Click's in ».
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuOwner {
+    Click,
+    More,
+}
+
+/// A bar item's menu (Swift's `TransportMenuEntry`s): an action shows ✓
+/// while on and acts, closing the menus; a submenu opens on a click, its
+/// list beside it. `path` holds the open submenu's row at each depth.
+fn bar_menu_list(
+    entries: &[MenuEntry],
+    path: &[usize],
+    depth: usize,
+    owner: MenuOwner,
+    scope: &mut RegistryScope,
+    cx: &mut Context<DocumentWindow>,
+) -> Stateful<Div> {
+    let mut list = div()
+        .id(("bar-menu", depth))
+        .occlude()
+        .flex()
+        .flex_col()
+        .min_w(px(160.))
+        .py_1()
+        .bg(rgb(colors::LIST))
+        .border_1()
+        .border_color(rgb(colors::BORDER))
+        .rounded_md()
+        .shadow_md()
+        .text_color(rgb(colors::TEXT));
+    for (row, e) in entries.iter().enumerate() {
+        let mut el = div()
+            .id(("bar-menu-item", depth * 1000 + row))
+            .relative()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_1()
+            .child(
+                div()
+                    .w(px(12.))
+                    .child(if e.checked { "\u{2713}" } else { "" }),
+            )
+            .child(div().flex_1().whitespace_nowrap().child(e.title.clone()))
+            .child(scope.control_selected("menuitem", &e.title, e.enabled, None, e.checked));
+        el = if e.enabled {
+            el.cursor_pointer().hover(|s| s.bg(rgb(colors::BUTTON)))
+        } else {
+            el.text_color(rgb(colors::DISABLED))
+        };
+        match &e.kind {
+            EntryKind::Action(action) => {
+                if e.enabled {
+                    let action = *action;
+                    el = el.on_click(cx.listener(move |this, _, _, cx| {
+                        this.close_bar_menus(cx);
+                        this.run_bar_action(action, cx);
+                    }));
+                }
+            }
+            EntryKind::Submenu(items) => {
+                el = el.child(div().text_color(rgb(colors::DIM)).child("\u{25B8}"));
+                if e.enabled {
+                    el = el.on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_bar_submenu(owner, depth, row, cx)
+                    }));
+                    if path.first() == Some(&row) {
+                        let nested = bar_menu_list(items, &path[1..], depth + 1, owner, scope, cx);
+                        el = el.child(side_list(owner, nested, depth));
+                    }
+                }
+            }
+        }
+        list = list.child(el);
+    }
+    list
+}
+
+/// A submenu's list beside its row: to the right of Click's own menu, to
+/// the left in » (it hangs from the window's right edge).
+fn side_list(owner: MenuOwner, list: Stateful<Div>, depth: usize) -> AnyElement {
+    let at = div().absolute().top_0();
+    let at = match owner {
+        MenuOwner::Click => at.left_full(),
+        MenuOwner::More => at.right_full(),
+    };
+    at.child(deferred(anchored().snap_to_window().child(list)).with_priority(3 + depth))
+        .into_any_element()
+}
+
+/// DSP Load or Audio Device (Swift `DspLoadView`, `DeviceItem`): a
+/// caption text `width` wide (DSP Load's fits `DSP 100%`, so its digits
+/// never move the row).
+fn caption_item(label: &str, text: &str, width: f32, scope: &mut RegistryScope) -> AnyElement {
+    div()
+        .relative()
+        .flex_none()
+        .w(px(width))
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_xs()
+        .text_color(rgb(colors::DIM))
+        .child(text.to_owned())
+        .child(scope.control_with("text", label, true, Some(text), false))
+        .into_any_element()
+}
+
+/// A command button (Swift `CommandButtonItem`): its face's label, its
+/// tooltip (in the tree as its value) and accessibility label; enabled as
+/// its menu item, a click runs what that item runs.
+fn command_button(
+    n: usize,
+    id: &str,
+    f: &CommandButtonFace,
+    scope: &mut RegistryScope,
+    cx: &mut Context<DocumentWindow>,
+) -> AnyElement {
+    let id = id.to_owned();
+    let button = face(("command-button", n), &f.label, f.enabled, colors::BUTTON)
+        .px(px(COMMAND_PADDING))
+        .whitespace_nowrap()
+        .child(scope.control_with(
+            "button",
+            &f.accessibility_label,
+            f.enabled,
+            Some(&f.tooltip),
+            false,
+        ))
+        .when(f.enabled, |b| {
+            b.on_click(cx.listener(move |this, _, window, cx| this.press_command(&id, window, cx)))
+        });
+    crate::sheet_host::with_help(button, f.tooltip.clone()).into_any_element()
+}
+
 /// A separator: a thin line in the theme's separator colour.
 fn separator() -> AnyElement {
     let tokens = crate::strip_palette::tokens();
@@ -1106,8 +1449,9 @@ fn pane_toggles(
     row.into_any_element()
 }
 
+/// » (`open`: its menu is open, `more_click`: so is Click's submenu in it).
 fn more_button(
-    open: bool,
+    (open, more_click): (bool, Option<&[usize]>),
     folded: &[Piece],
     state: &BarState,
     fields: &TransportFields,
@@ -1160,6 +1504,7 @@ fn more_button(
                     deferred(anchored().snap_to_window().child(more_menu(
                         folded,
                         state,
+                        more_click,
                         &mut scope.container(),
                         cx,
                     )))
@@ -1174,6 +1519,7 @@ fn more_button(
 fn more_menu(
     folded: &[Piece],
     state: &BarState,
+    more_click: Option<&[usize]>,
     scope: &mut RegistryScope,
     cx: &mut Context<DocumentWindow>,
 ) -> AnyElement {
@@ -1223,6 +1569,65 @@ fn more_menu(
             }
             continue;
         }
+        if piece == Piece::Click {
+            // Swift's submenu `Click` ✓: the toggle, Level › and Mode ›.
+            let e = &state.click.entry;
+            let mut entry = div()
+                .id(("more-item", row))
+                .relative()
+                .flex()
+                .flex_row()
+                .gap_3()
+                .px_3()
+                .py_1()
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(colors::BUTTON)))
+                .child(div().flex_1().child(format!(
+                    "{}{}",
+                    if e.checked { "\u{2713} " } else { "" },
+                    e.title
+                )))
+                .child(div().text_color(rgb(colors::DIM)).child("\u{25B8}"))
+                .child(scope.control_selected("menuitem", &e.title, true, None, e.checked))
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_more_click(cx)));
+            if let (Some(path), EntryKind::Submenu(items)) = (more_click, &e.kind) {
+                let nested = bar_menu_list(items, path, 1, MenuOwner::More, scope, cx);
+                entry = entry.child(side_list(MenuOwner::More, nested, 0));
+            }
+            list = list.child(entry);
+            row += 1;
+            continue;
+        }
+        if let Piece::Command(n) = piece
+            && let Some((id, f)) = state.commands.get(n)
+        {
+            // An action with its face's label, greyed as the button is.
+            let id = id.clone();
+            let mut entry = div()
+                .id(("more-item", row))
+                .relative()
+                .flex()
+                .flex_row()
+                .gap_3()
+                .px_3()
+                .py_1()
+                .child(div().flex_1().child(f.label.clone()))
+                .child(scope.control_with("menuitem", &f.label, f.enabled, None, false));
+            entry = if f.enabled {
+                entry
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(colors::BUTTON)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.close_more(cx);
+                        this.press_command(&id, window, cx);
+                    }))
+            } else {
+                entry.text_color(rgb(colors::DISABLED))
+            };
+            list = list.child(entry);
+            row += 1;
+            continue;
+        }
         // Swift's entry (`M/TransportItemEntries.swift:96-143`): a text
         // shows its title and text; an action acts, a check action shows
         // ✓ while on.
@@ -1245,7 +1650,11 @@ fn more_menu(
             | Piece::CountIn
             | Piece::Summary
             | Piece::RecordOptions
-            | Piece::Separator => String::new(),
+            | Piece::Separator
+            | Piece::Click
+            | Piece::DspLoad
+            | Piece::Device
+            | Piece::Command(_) => String::new(),
         };
         // Faults is an action, enabled with faults or a report (Swift
         // `M/TransportItemEntries.swift:132-133`); it folds only then.
@@ -1267,14 +1676,15 @@ fn more_menu(
             _ => false,
         };
         let check = matches!(piece, Piece::ReplaceOverdub | Piece::CountIn);
-        // The summary is one text, `Step Entry: <summary or "off">`.
-        let text = (piece == Piece::Summary).then(|| {
-            format!(
-                "{}: {}",
-                piece.title(),
-                state.summary.as_deref().unwrap_or("off")
-            )
-        });
+        // The summary, DSP Load and Audio Device are one text each,
+        // `<title>: <text>` (the summary's "off" when step entry is).
+        let text = match piece {
+            Piece::Summary => Some(state.summary.as_deref().unwrap_or("off")),
+            Piece::DspLoad => Some(state.dsp.as_str()),
+            Piece::Device => Some(state.device.as_str()),
+            _ => None,
+        }
+        .map(|t| format!("{}: {t}", piece.title()));
         let shown = match (&text, check) {
             (Some(t), _) => t.clone(),
             (None, true) => format!(
@@ -1332,6 +1742,10 @@ pub struct BarParts<'a> {
     pub fields: &'a TransportFields,
     pub popover: &'a RecordPopover,
     pub more_open: bool,
+    /// Click's own menu, while open: its open submenus.
+    pub click_menu: Option<&'a [usize]>,
+    /// Click's submenu in », while open: its open submenus.
+    pub more_click: Option<&'a [usize]>,
 }
 
 /// The bar: `plan`'s shown pieces, then » when anything folds.
@@ -1347,6 +1761,8 @@ pub fn render(
         fields,
         popover,
         more_open,
+        click_menu,
+        more_click,
     } = parts;
     // Drawn again below, while the cluster and the chevrons show.
     fields.record_button.set(None);
@@ -1385,12 +1801,29 @@ pub fn render(
                 record_popover::chevron(state.record_popover.as_ref(), popover, scope, window, cx)
             }
             Piece::Separator => separator(),
+            Piece::Click => click_item(&state.click, click_menu, scope, window, cx),
+            Piece::DspLoad => caption_item(bar_items::DSP_LOAD, &state.dsp, plan.widths.0, scope),
+            Piece::Device => {
+                caption_item(bar_items::AUDIO_DEVICE, &state.device, plan.widths.1, scope)
+            }
+            Piece::Command(n) => match state.commands.get(n) {
+                Some((id, f)) => command_button(n, id, f, scope, cx),
+                None => continue,
+            },
         };
         row = row.child(child);
     }
     let folded = plan.folded();
     if !folded.is_empty() {
-        let mut more = more_button(more_open, &folded, state, fields, scope, window, cx);
+        let mut more = more_button(
+            (more_open, more_click),
+            &folded,
+            state,
+            fields,
+            scope,
+            window,
+            cx,
+        );
         // A folded field item's popover, at ».
         if let Some(p) = fields.popover().filter(|p| folded.contains(p)) {
             more = div()
