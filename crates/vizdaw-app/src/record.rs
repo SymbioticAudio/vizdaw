@@ -500,6 +500,8 @@ impl DocumentModel {
         // A file the core could not move (no Trash support on this
         // platform yet) stays where it is, kept for the next open; its
         // line, which the core leaves for the next idle, is the answer.
+        // Every line this read takes in stays in the document's list
+        // (Faults shows it).
         let (_, problems) = self.take_idle_news();
         let kept: Vec<String> = problems
             .into_iter()

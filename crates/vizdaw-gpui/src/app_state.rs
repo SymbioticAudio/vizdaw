@@ -280,10 +280,18 @@ impl AppState {
         let Some(t) = self.transports.get_mut(&doc) else {
             return idled;
         };
-        // The playhead draws the tick and sequence too.
+        // The playhead draws the tick and sequence too; Faults the
+        // faults and the compile report.
         let seen = |t: &TransportModel, store: &DocumentStore| {
             let s = t.state();
-            (t.readout(None), s.tick, s.seq, store.alert().map(|a| a.id))
+            (
+                t.readout(None),
+                s.tick,
+                s.seq,
+                store.alert().map(|a| a.id),
+                s.faults.clone(),
+                s.report.clone(),
+            )
         };
         let before = seen(t, &self.store);
         let (result, recorded) = t.poll_document(&mut self.store, doc);

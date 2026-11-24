@@ -3,9 +3,9 @@
 //! `TransportFieldsView`): the cluster (Return to Start, Rewind, Fast
 //! Forward, Play/Stop), Loop, the four readouts, the Position and Edit
 //! In/Out fields, flexible space, the Main View picker and the pane
-//! toggles; what does not fit folds, last first, into the » menu.
-//! Recording, the click, step entry and faults come with their slices and
-//! are not drawn yet.
+//! toggles, and Faults with its popover (document window only); what
+//! does not fit folds, last first, into the » menu. Recording, the click
+//! and step entry come with their slices and are not drawn yet.
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -39,6 +39,18 @@ pub struct BarState {
     pub main: MainView,
     /// Whether the main view shows each pane (left, bottom, right).
     pub panes: [bool; 3],
+    /// Faults, while there are faults or a report (document window only).
+    pub faults: Option<FaultsState>,
+}
+
+/// What the Faults item draws (Swift `FaultsItem`).
+pub struct FaultsState {
+    /// The popover's lines (Swift `messages`).
+    pub lines: Vec<String>,
+    /// Real-time faults: the error tint, else the warning tint.
+    pub error: bool,
+    /// The popover is open.
+    pub open: bool,
 }
 
 impl BarState {
@@ -83,6 +95,12 @@ const SEGMENT: f32 = 60.;
 /// The Main View picker's label (Swift `MainViewItem`).
 pub const MAIN_VIEW: &str = "Main View";
 
+/// The Faults button's label and help (Swift
+/// `V/TransportItemViews.swift:229-230`), and its popover's least width.
+pub const FAULTS: &str = "Faults";
+pub const FAULTS_HELP: &str = "Faults and compile messages";
+const FAULTS_MIN_WIDTH: f32 = 240.;
+
 /// The pane toggles' commands, in bar order (Swift
 /// `TransportItemEntries.panes`).
 const PANE_TOGGLES: [(&str, PaneSide, &str); 3] = [
@@ -116,6 +134,7 @@ pub enum Piece {
     Space,
     MainView,
     Panes,
+    Faults,
 }
 
 impl Piece {
@@ -132,6 +151,7 @@ impl Piece {
             TransportItem::Space => Piece::Space,
             TransportItem::MainView => Piece::MainView,
             TransportItem::Panes => Piece::Panes,
+            TransportItem::Faults => Piece::Faults,
             _ => return None,
         })
     }
@@ -154,6 +174,7 @@ impl Piece {
             Piece::Space => 0.,
             Piece::MainView => 2. * SEGMENT + 1.,
             Piece::Panes => 3. * CLUSTER_BUTTON + 2. * CLUSTER_GAP,
+            Piece::Faults => CLUSTER_BUTTON,
         }
     }
 
@@ -171,6 +192,7 @@ impl Piece {
             Piece::Space => "Flexible Space",
             Piece::MainView => MAIN_VIEW,
             Piece::Panes => "Pane Toggles",
+            Piece::Faults => FAULTS,
         }
     }
 
@@ -208,18 +230,25 @@ pub struct Plan {
 }
 
 impl Plan {
-    /// A document window's bar.
-    pub fn new(layout: &TransportLayout, width: f32) -> Plan {
-        Plan::for_window(layout, width, true)
+    /// A document window's bar; Faults takes room only while it shows
+    /// (`faults`).
+    pub fn new(layout: &TransportLayout, width: f32, faults: bool) -> Plan {
+        Plan::for_window(layout, width, true, faults)
     }
 
     /// The bar of a document window (`document_window`) or of a Mixer
     /// window, which leaves out the document-only items.
-    pub fn for_window(layout: &TransportLayout, width: f32, document_window: bool) -> Plan {
+    pub fn for_window(
+        layout: &TransportLayout,
+        width: f32,
+        document_window: bool,
+        faults: bool,
+    ) -> Plan {
         let pieces: Vec<Piece> = layout
             .items_for(document_window)
             .into_iter()
             .filter_map(Piece::of)
+            .filter(|p| faults || *p != Piece::Faults)
             .collect();
         let widths: Vec<(f32, bool, ItemKind)> = pieces
             .iter()
@@ -707,9 +736,11 @@ fn more_menu(
                 .collect::<Vec<_>>()
                 .join(" \u{2013} "),
             Piece::MainView => panes::main_title(state.main).to_owned(),
-            Piece::Cluster | Piece::Space | Piece::Panes => String::new(),
+            Piece::Cluster | Piece::Space | Piece::Panes | Piece::Faults => String::new(),
         };
-        let acts = piece == Piece::Loop;
+        // Faults is an action, enabled with faults or a report (Swift
+        // `M/TransportItemEntries.swift:132-133`); it folds only then.
+        let acts = piece == Piece::Loop || (piece == Piece::Faults && state.faults.is_some());
         let mut entry = div()
             .id(("more-item", row))
             .relative()
@@ -725,9 +756,13 @@ fn more_menu(
             entry = entry
                 .cursor_pointer()
                 .hover(|s| s.bg(rgb(colors::BUTTON)))
-                .on_click(cx.listener(|this, _, _, cx| {
+                .on_click(cx.listener(move |this, _, _, cx| {
                     this.close_more(cx);
-                    this.toggle_loop(cx);
+                    if piece == Piece::Faults {
+                        this.toggle_faults(cx);
+                    } else {
+                        this.toggle_loop(cx);
+                    }
                 }));
         }
         list = list.child(entry);
@@ -769,14 +804,119 @@ pub fn render(
             Piece::Space => div().flex_1().into_any_element(),
             Piece::MainView => main_view(state.main, &mut scope.container(), cx),
             Piece::Panes => pane_toggles(state.panes, scope, cx),
+            Piece::Faults => match &state.faults {
+                Some(f) => faults_button(f, scope, window, cx),
+                None => continue,
+            },
         };
         row = row.child(child);
     }
     let folded = plan.folded();
     if !folded.is_empty() {
-        row = row
-            .child(div().flex_1())
-            .child(more_button(more_open, &folded, state, scope, window, cx));
+        let mut more = more_button(more_open, &folded, state, scope, window, cx);
+        // Folded, the popover opens at ».
+        if let Some(f) = state.faults.as_ref().filter(|f| f.open)
+            && folded.contains(&Piece::Faults)
+        {
+            more = div()
+                .relative()
+                .flex_none()
+                .child(more)
+                .child(faults_popover(f, scope, window, cx))
+                .into_any_element();
+        }
+        row = row.child(div().flex_1()).child(more);
     }
     row
+}
+
+/// The Faults button (Swift `FaultsItem`): the error tint with faults,
+/// else the warning tint (theme tokens); a click toggles the popover.
+/// The tree's value names the tint.
+fn faults_button(
+    state: &FaultsState,
+    scope: &mut RegistryScope,
+    window: &Window,
+    cx: &mut Context<DocumentWindow>,
+) -> AnyElement {
+    let tokens = crate::strip_palette::tokens();
+    let (tint, value) = if state.error {
+        (tokens.state_error, "error")
+    } else {
+        (tokens.state_warning, "warning")
+    };
+    let button = face("faults", "\u{26a0}", true, colors::BUTTON)
+        .w(px(CLUSTER_BUTTON))
+        .text_color(rgb(tint))
+        .child(scope.control_with("button", FAULTS, true, Some(value), false))
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_faults(cx)));
+    let button = crate::sheet_host::with_help(button, FAULTS_HELP.to_owned());
+    let mut item = div().relative().flex_none().child(button);
+    if state.open {
+        item = item.child(faults_popover(state, scope, window, cx));
+    }
+    item.into_any_element()
+}
+
+/// The Faults popover: one line per message, under its opener; a press
+/// outside it closes it (an in-window overlay, as the » menu).
+fn faults_popover(
+    state: &FaultsState,
+    scope: &mut RegistryScope,
+    window: &Window,
+    cx: &mut Context<DocumentWindow>,
+) -> AnyElement {
+    let size = window.viewport_size();
+    let mut scope = scope.container();
+    let mut list = div()
+        .id("faults-popover")
+        .occlude()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_4()
+        .min_w(px(FAULTS_MIN_WIDTH))
+        .max_w(px(3. * FAULTS_MIN_WIDTH))
+        .bg(rgb(colors::LIST))
+        .border_1()
+        .border_color(rgb(colors::BORDER))
+        .rounded_md()
+        .shadow_md()
+        .text_color(rgb(colors::TEXT))
+        .child(scope.this("group", FAULTS, true));
+    for line in &state.lines {
+        list = list.child(
+            div()
+                .relative()
+                .child(line.clone())
+                .child(scope.control("text", line, true)),
+        );
+    }
+    // Over its opener, so the list hangs from the opener's bottom edge.
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .child(
+            deferred(
+                anchored().position(point(px(0.), px(0.))).child(
+                    div()
+                        .id("faults-backdrop")
+                        .w(size.width)
+                        .h(size.height)
+                        .occlude()
+                        .on_any_mouse_down(cx.listener(|this, _, _, cx| this.close_faults(cx))),
+                ),
+            )
+            .with_priority(1),
+        )
+        .child(
+            div()
+                .absolute()
+                .top_full()
+                .right_0()
+                .child(deferred(anchored().snap_to_window().child(list)).with_priority(2)),
+        )
+        .into_any_element()
 }

@@ -59,7 +59,7 @@ use crate::piano_roll::{PianoRoll, RollState};
 use crate::registry::{RegistryScope, SharedRegistry};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::track_headers::{HeadersState, Rename, TrackHeaders};
-use crate::transport_bar::{self, BarState, Plan, colors};
+use crate::transport_bar::{self, BarState, FaultsState, Plan, colors};
 use crate::transport_fields::TransportFields;
 
 /// How long a status text shows (Swift `StatusLine`).
@@ -658,6 +658,24 @@ impl DocumentWindow {
         cx.notify();
     }
 
+    /// The Faults button or its » entry: the popover opens or closes.
+    pub(crate) fn toggle_faults(&mut self, cx: &mut Context<Self>) {
+        self.with_model(cx, DocumentModel::toggle_faults);
+    }
+
+    pub(crate) fn close_faults(&mut self, cx: &mut Context<Self>) {
+        self.with_model(cx, |d| d.set_shows_faults(false));
+    }
+
+    /// Esc: the Faults popover closes; true when it was open.
+    fn escape_faults(&mut self, cx: &mut Context<Self>) -> bool {
+        let open = self.read_model(cx, DocumentModel::shows_faults) == Some(true);
+        if open {
+            self.close_faults(cx);
+        }
+        open
+    }
+
     /// Runs `f` on the shuttle and the window's document.
     fn with_shuttle<R>(
         &mut self,
@@ -1050,6 +1068,7 @@ impl DocumentWindow {
         }
         let headers = std::mem::take(&mut self.track_headers.add_menu_open);
         let more = std::mem::take(&mut self.more_open);
+        let faults = self.escape_faults(cx);
         let arrangement = self.arrangement.close_menus();
         let detail = self.pane_menu.take().is_some();
         let list = self.list_editor.close_menu();
@@ -1057,6 +1076,7 @@ impl DocumentWindow {
         if self.menu_bar.as_mut().is_some_and(MenuBar::close)
             || headers
             || more
+            || faults
             || arrangement
             || detail
             || list
@@ -1629,13 +1649,19 @@ impl DocumentWindow {
                         .collect(),
                     main: d.layout().views.main,
                     panes: PaneSide::ALL.map(|side| d.layout().views.current().pane(side).shown),
+                    faults: None,
                 }),
                 menus::menu_model(d, &s.keymap),
                 s.store.front().is_none_or(|f| f == doc),
                 s.transport_layout(),
             )
         };
-        let plan = Plan::for_window(&layout, f32::from(window.viewport_size().width), false);
+        let plan = Plan::for_window(
+            &layout,
+            f32::from(window.viewport_size().width),
+            false,
+            false,
+        );
         self.set_shown_fields(
             if bar.is_some() {
                 plan.shown_fields()
@@ -1750,6 +1776,11 @@ impl Render for DocumentWindow {
                         .collect(),
                     main: d.layout().views.main,
                     panes: PaneSide::ALL.map(|side| d.layout().views.current().pane(side).shown),
+                    faults: (d.has_faults() || d.has_report()).then(|| FaultsState {
+                        lines: d.fault_lines(),
+                        error: d.has_faults(),
+                        open: d.shows_faults(),
+                    }),
                 }),
                 menus::menu_model(s.store.document(doc), &s.keymap),
                 s.store.front().is_none_or(|f| f == doc),
@@ -1828,7 +1859,22 @@ impl Render for DocumentWindow {
         {
             self.pane_drag = None;
         }
-        let plan = Plan::new(&layout, f32::from(window.viewport_size().width));
+        let faults = bar.as_ref().and_then(|b| b.faults.as_ref());
+        let plan = Plan::new(
+            &layout,
+            f32::from(window.viewport_size().width),
+            faults.is_some(),
+        );
+        // Faults went (its lines cleared): so does its popover, after the
+        // draw (nothing shows the flag meanwhile).
+        if faults.is_none() && self.read_model(cx, DocumentModel::shows_faults) == Some(true) {
+            let (app, doc) = (self.app.clone(), self.doc);
+            cx.defer(move |cx| {
+                app.update(cx, |s, _| {
+                    s.store.with_document(doc, |d, _| d.set_shows_faults(false));
+                });
+            });
+        }
         self.set_shown_fields(
             if bar.is_some() {
                 plan.shown_fields()

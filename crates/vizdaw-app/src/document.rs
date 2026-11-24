@@ -26,6 +26,10 @@ use crate::alerts::{AlertItem, error_message};
 use crate::editor::{EditorModel, GESTURE_OPEN};
 use crate::session::DocSession;
 
+/// How many idle problem lines a document keeps (Swift
+/// `DocumentModel.swift:854`).
+pub const PROBLEMS_KEPT: usize = 50;
+
 /// What File > Save does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SaveAction {
@@ -89,6 +93,12 @@ pub struct DocumentModel {
     pub(crate) jobs: Vec<vizdaw_ffi::JobRow>,
     /// A finished job's problems (the Problems banner).
     pub(crate) job_problems: Vec<String>,
+    /// The session's idle problem lines (plug-in load failures, autosave,
+    /// media reads, why a pass stopped by itself), newest last, at most
+    /// [`PROBLEMS_KEPT`] (Swift `pluginProblems`).
+    problems: Vec<String>,
+    /// The Faults popover is open (Swift `showsFaults`).
+    shows_faults: bool,
     /// The project format and mismatches, as last read.
     pub(crate) project_info: Option<vizdaw_ffi::ProjectInfoRow>,
     pub(crate) media_version: u64,
@@ -241,6 +251,8 @@ impl DocumentModel {
             mixer: crate::mixer::DocMixer::default(),
             jobs: vec![],
             job_problems: vec![],
+            problems: vec![],
+            shows_faults: false,
             project_info: None,
             media_version: 0,
             disk_warning_dismissed: Arc::new(AtomicBool::new(false)),
@@ -332,7 +344,7 @@ impl DocumentModel {
     pub fn idle(&mut self) -> bool {
         let pending = self.gesture_pending() || self.has_pending_note_offs();
         self.tick();
-        let (mut arrived, _problems) = self.take_idle_news();
+        let (mut arrived, _) = self.take_idle_news();
         // The device rate moved (the transport says so first): the
         // banner reads the project info again.
         let mismatch = self.last_transport().rate_mismatch;
@@ -356,9 +368,9 @@ impl DocumentModel {
     }
 
     /// The session's idle news taken in: a snapshot, the slots or the
-    /// media changing. True when something arrived; the new problem
-    /// lines are the caller's (the idle tick has nowhere to show them
-    /// yet).
+    /// media changing, problem lines. True when something arrived. The
+    /// new lines join the document's list (Faults shows them) and are
+    /// also returned, for a caller that answers with its own.
     pub(crate) fn take_idle_news(&mut self) -> (bool, Vec<String>) {
         let mut arrived = false;
         let Ok(news) = self.session.idle() else {
@@ -378,7 +390,49 @@ impl DocumentModel {
             self.relink_due();
             arrived = true;
         }
+        if !news.problems.is_empty() {
+            self.problems.extend(news.problems.iter().cloned());
+            let over = self.problems.len().saturating_sub(PROBLEMS_KEPT);
+            self.problems.drain(..over);
+            arrived = true;
+        }
         (arrived, news.problems)
+    }
+
+    /// What the Faults popover lists: the transport's faults, its compile
+    /// report, then the idle problem lines (Swift `messages`).
+    pub fn fault_lines(&self) -> Vec<String> {
+        let t = self.transport.lock().unwrap();
+        t.faults
+            .iter()
+            .chain(&t.report)
+            .chain(&self.problems)
+            .cloned()
+            .collect()
+    }
+
+    /// The transport has real-time faults (Faults takes the error tint).
+    pub fn has_faults(&self) -> bool {
+        !self.transport.lock().unwrap().faults.is_empty()
+    }
+
+    /// A compile report or problem lines (Faults shows, warning tint).
+    pub fn has_report(&self) -> bool {
+        !self.problems.is_empty() || !self.transport.lock().unwrap().report.is_empty()
+    }
+
+    /// Whether the Faults popover is open.
+    pub fn shows_faults(&self) -> bool {
+        self.shows_faults
+    }
+
+    pub fn set_shows_faults(&mut self, on: bool) {
+        self.shows_faults = on;
+    }
+
+    /// The Faults button and its » entry.
+    pub fn toggle_faults(&mut self) {
+        self.shows_faults = !self.shows_faults;
     }
 
     /// The session's live answer; the snapshot's flag can lag. A session

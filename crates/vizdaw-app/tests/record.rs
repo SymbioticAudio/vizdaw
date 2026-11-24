@@ -1284,4 +1284,53 @@ fn record_recover_trash_answers_what_was_not_moved() {
     );
     assert_eq!(f.count("recover_recordings(false)"), 1);
     assert!(m.alert.is_none() && m.recovery_offer().is_none());
+    // The line stays for the Faults popover.
+    assert_eq!(m.fault_lines(), vec![line.to_owned()]);
+}
+
+/// Slice 8b Task 1: the lines `record.recover` takes in on its own idle
+/// read stay in the list, the unrelated ones too; only its own
+/// not-moved lines are the answer.
+#[test]
+fn record_recover_trash_keeps_every_line_it_read() {
+    let (f, mut m) = armed();
+    f.set_idle_problems(vec!["earlier".into()]);
+    m.idle();
+    f.set_recovered_files(vec![vizdaw_ffi::record::RecoveredFileRow {
+        path: "Media/Recorded/a.caf".into(),
+        frames: 10,
+        size_known: false,
+        readable: true,
+    }]);
+    let line =
+        "Media/Recorded/a.caf: not moved to the Trash (this platform has no Trash support yet)";
+    f.set_idle_problems(vec!["plug-in X failed to load".into(), line.into()]);
+    assert_eq!(
+        fails(run("record.recover", &[("action", text("trash"))], &mut m)),
+        (ErrorCode::Failed, line.into())
+    );
+    assert_eq!(
+        m.fault_lines(),
+        vec![
+            "earlier".to_owned(),
+            "plug-in X failed to load".to_owned(),
+            line.to_owned()
+        ]
+    );
+}
+
+/// Slice 8b Task 1: why a pass stopped by itself reaches Faults.
+#[test]
+fn a_pass_that_ends_by_itself_leaves_its_line_in_the_faults() {
+    let (f, mut m) = armed();
+    m.toggle_record().unwrap();
+    f.end_pass_by_itself_because("the disk is almost full");
+    assert!(m.idle());
+    assert!(
+        m.fault_lines()
+            .contains(&"Recording stopped: the disk is almost full.".to_owned()),
+        "{:?}",
+        m.fault_lines()
+    );
+    assert!(m.has_report());
 }

@@ -1362,6 +1362,14 @@ impl FakeSession {
         Self::land_pass(&mut s);
     }
 
+    /// As [`Self::end_pass_by_itself`], and the next idle says why, as
+    /// the core does: `Recording stopped: <why>.`.
+    pub fn end_pass_by_itself_because(&self, why: &str) {
+        let mut s = self.st();
+        Self::land_pass(&mut s);
+        s.idle_problems.push(format!("Recording stopped: {why}."));
+    }
+
     /// A pass lands: the take is one undo step "Record", the transport
     /// stops, and a Save made meanwhile saves now.
     fn land_pass(s: &mut State) {

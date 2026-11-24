@@ -3685,8 +3685,8 @@ fn gpui_keys_drive_step_entry_and_locators() {
 /// left in the project's `Media/Recorded` that no region uses is offered
 /// at the next open, without the Recovered Recordings alert while the
 /// channel is on. Trash moves it to the trash folder on macOS (the e2e's
-/// own, never the real Trash); on Linux the file stays and the problem
-/// line is the call's answer.
+/// own, never the real Trash); on Linux the file stays, the problem
+/// line is the call's answer, and the Faults popover lists it.
 #[test]
 #[ignore = "needs a window server and VIZDAW_E2E_APP"]
 fn gpui_record_recover_trash_over_the_channel() {
@@ -3779,6 +3779,24 @@ fn gpui_record_recover_trash_over_the_channel() {
             other => panic!("expected the problem line, got {other:?}"),
         }
         assert!(left.is_file(), "the file stays where it was");
+        // The line stays for the user: Faults lists it (slice 8b Task 1).
+        let line = "Media/Recorded/Left Behind.caf: not moved to the Trash (this platform \
+                    has no Trash support yet)";
+        let faults = wait_in_tree(&mut app, &w, "Faults button", |nodes| {
+            nodes
+                .as_array()?
+                .iter()
+                .find(|n| n["role"] == "button" && n["label"] == "Faults")
+                .map(|n| n["id"].clone())
+        });
+        app.call("ui.click", json!({"window": w, "element": faults}));
+        wait_in_tree(&mut app, &w, "the not-moved line in Faults", |nodes| {
+            nodes
+                .as_array()?
+                .iter()
+                .find(|n| n["role"] == "text" && n["label"] == line)
+                .map(|_| ())
+        });
     }
     let shown = app.call("state.get", json!({"target": "windows"}));
     assert_eq!(shown["alerts"], json!([]), "{shown}");

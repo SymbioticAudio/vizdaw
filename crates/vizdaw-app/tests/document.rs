@@ -509,3 +509,52 @@ fn the_record_poll_reoffers_a_held_recovery() {
     assert!(m.poll_record());
     assert!(m.recovery_offer().is_some(), "offered again");
 }
+
+/// Slice 8b Task 1 (Swift `DocumentModel.swift:852-855`): the idle tick
+/// keeps the session's problem lines, newest last, at most 50, and
+/// answers true when lines arrive; Faults lists the transport's faults,
+/// then its report, then those lines (Swift `messages`).
+#[test]
+fn idle_problems_are_kept_in_order_and_capped_at_50() {
+    let f = Arc::new(demo_fake());
+    let mut m = model(&f);
+    assert!(m.fault_lines().is_empty());
+    assert!(!m.has_faults() && !m.has_report());
+    f.set_idle_problems(vec!["autosave failed: disk full".into()]);
+    assert!(m.idle(), "a line arrived: the window redraws");
+    assert_eq!(m.fault_lines(), vec!["autosave failed: disk full"]);
+    assert!(m.has_report() && !m.has_faults());
+    f.set_idle_problems((0..60).map(|i| format!("p{i}")).collect());
+    assert!(m.idle());
+    let lines = m.fault_lines();
+    assert_eq!(lines.len(), 50);
+    assert_eq!(lines.first().map(String::as_str), Some("p10"));
+    assert_eq!(lines.last().map(String::as_str), Some("p59"));
+    // The transport's faults and report come first.
+    f.set_transport(|t| {
+        t.faults = vec!["stream-underrun".into()];
+        t.report = vec!["compile: note past the end".into()];
+    });
+    m.poll_transport().unwrap();
+    assert!(m.has_faults() && m.has_report());
+    let lines = m.fault_lines();
+    assert_eq!(lines.len(), 52);
+    assert_eq!(lines[0], "stream-underrun");
+    assert_eq!(lines[1], "compile: note past the end");
+    assert_eq!(lines[2], "p10");
+}
+
+/// The Faults popover is the document's (Swift `showsFaults`).
+#[test]
+fn shows_faults_is_per_document() {
+    let f = Arc::new(demo_fake());
+    let mut m = model(&f);
+    assert!(!m.shows_faults());
+    m.toggle_faults();
+    assert!(m.shows_faults());
+    m.set_shows_faults(false);
+    assert!(!m.shows_faults());
+    let other = model(&Arc::new(demo_fake()));
+    m.toggle_faults();
+    assert!(!other.shows_faults());
+}

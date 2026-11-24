@@ -561,3 +561,141 @@ fn held_keys_do_nothing_while_a_file_panel_is_up(cx: &mut TestAppContext) {
     s.keys("shift-.");
     assert_eq!(s.fake.key_steps(), vec![true]);
 }
+
+impl Setup {
+    /// Lets the poll and the idle tick run (it waits at least 50 ms of
+    /// real time) until `done`.
+    fn poll_until(&mut self, what: &str, done: impl Fn(&mut Setup) -> bool) {
+        for _ in 0..40 {
+            if done(self) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(60));
+            self.cx.executor().advance_clock(Duration::from_millis(250));
+            self.cx.run_until_parked();
+        }
+        panic!("no {what} in {:?}", self.tree());
+    }
+
+    fn faults_open(&mut self) -> bool {
+        self.with_doc(vizdaw_app::DocumentModel::shows_faults)
+    }
+}
+
+const PROBLEM: &str = "Media/a.wav: the file could not be read";
+const FAULT: &str = "stream-underrun";
+const REPORT: &str = "Song: a note past the end was dropped";
+
+/// Slice 8b Task 1 (Swift `FaultsItem`): Faults shows only with faults or
+/// a report, in the warning tint for a report and the error tint with
+/// faults; a click opens the popover of every line, and Esc, a click
+/// elsewhere or the button again close it.
+#[gpui::test]
+fn faults_shows_its_lines_in_a_popover(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    assert!(!s.has("button", "Faults"), "no lines, no Faults");
+    s.fake.set_idle_problems(vec![PROBLEM.into()]);
+    s.poll_until("Faults", |s| s.has("button", "Faults"));
+    assert_eq!(s.value("button", "Faults"), "warning");
+    // Faults and a compile report come with playing (the poll reads the
+    // transport then).
+    s.fake.set_transport(|t| {
+        t.faults = vec![FAULT.into()];
+        t.report = vec![REPORT.into()];
+    });
+    s.click("button", "Play");
+    s.poll_until("the error tint", |s| s.value("button", "Faults") == "error");
+    s.click("button", "Stop");
+    assert!(!s.has("text", PROBLEM), "closed until clicked");
+    s.click("button", "Faults");
+    assert!(s.faults_open());
+    for line in [FAULT, REPORT, PROBLEM] {
+        assert!(s.has("text", line), "no {line:?} in {:?}", s.tree());
+    }
+    // In Swift's order: faults, report, problems.
+    let lines: Vec<String> = s
+        .tree()
+        .into_iter()
+        .filter(|n| n["role"] == "text")
+        .filter_map(|n| n["label"].as_str().map(String::from))
+        .filter(|l| [FAULT, REPORT, PROBLEM].contains(&l.as_str()))
+        .collect();
+    assert_eq!(lines, [FAULT, REPORT, PROBLEM]);
+    s.keys("escape");
+    assert!(!s.has("text", PROBLEM) && !s.faults_open());
+    // The button again closes it.
+    s.click("button", "Faults");
+    assert!(s.has("text", PROBLEM));
+    s.click("button", "Faults");
+    assert!(!s.has("text", PROBLEM));
+    // A click elsewhere closes it.
+    s.click("button", "Faults");
+    s.cx.simulate_click(gpui::point(px(700.), px(500.)), Modifiers::none());
+    s.cx.run_until_parked();
+    assert!(!s.has("text", PROBLEM) && !s.faults_open());
+}
+
+/// Folded, Faults is a » action that opens the same popover.
+#[gpui::test]
+fn folded_faults_is_an_action_in_more(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    s.fake.set_idle_problems(vec![PROBLEM.into()]);
+    s.poll_until("Faults", |s| s.has("button", "Faults"));
+    s.resize(600.);
+    assert!(!s.has("button", "Faults"), "folds");
+    s.click("button", "More Transport Items");
+    assert_eq!(
+        s.node("menuitem", "Faults").unwrap()["enabled"],
+        true,
+        "enabled with a report"
+    );
+    s.click("menuitem", "Faults");
+    assert!(!s.has("menuitem", "Faults"), "the menu closed");
+    assert!(s.has("text", PROBLEM), "the popover opened");
+    s.keys("escape");
+    assert!(!s.has("text", PROBLEM));
+}
+
+/// Faults is the document window's only (Swift `documentOnly`).
+#[gpui::test]
+fn the_mixer_window_has_no_faults(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    s.fake.set_idle_problems(vec![PROBLEM.into()]);
+    s.poll_until("Faults", |s| s.has("button", "Faults"));
+    let doc = s.doc();
+    let app = s.app.clone();
+    let mixer =
+        s.cx.update(|_, cx| DocumentWindow::open_mixer(&app, doc, cx).unwrap());
+    s.cx.run_until_parked();
+    let mcx = VisualTestContext::from_window(mixer.into(), &s.cx);
+    mcx.run_until_parked();
+    let tree = mixer
+        .read_with(&mcx, |v, _| v.registry().borrow().tree())
+        .unwrap();
+    let nodes = tree["nodes"].as_array().unwrap();
+    assert!(
+        nodes
+            .iter()
+            .any(|n| n["role"] == "button" && n["label"] == "Loop"),
+        "the Mixer window has its bar: {tree}"
+    );
+    assert!(
+        !nodes.iter().any(|n| n["label"] == "Faults"),
+        "no Faults: {tree}"
+    );
+}
+
+/// Faults going (its report cleared) takes its open popover with it: the
+/// next lines do not open it by themselves.
+#[gpui::test]
+fn faults_going_closes_its_popover(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    s.fake.set_transport(|t| t.report = vec![REPORT.into()]);
+    s.click("button", "Play");
+    s.poll_until("Faults", |s| s.has("button", "Faults"));
+    s.click("button", "Faults");
+    assert!(s.has("text", REPORT));
+    s.fake.set_transport(|t| t.report = vec![]);
+    s.poll_until("no Faults", |s| !s.has("button", "Faults"));
+    assert!(!s.faults_open());
+}
