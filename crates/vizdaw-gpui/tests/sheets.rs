@@ -261,7 +261,7 @@ fn no_window_key_acts_while_a_sheet_is_up(cx: &mut TestAppContext) {
     assert_eq!(s.fake.count("play(3)"), 0);
     assert_eq!(s.fake.count("locate(0)"), 0);
     // The window's own commands do nothing either (Save, Close).
-    s.cx.simulate_keystrokes("cmd-w");
+    s.cx.simulate_keystrokes("secondary-w");
     s.cx.run_until_parked();
     assert!(s.window.read_with(&s.cx, |_, _| ()).is_ok(), "still open");
     s.cx.simulate_keystrokes("escape");

@@ -97,7 +97,7 @@ fn a_documents_alert_is_a_prompt_with_ok_on_its_own_window(cx: &mut TestAppConte
         message: "disk full".into(),
     }));
     let mut vcx = VisualTestContext::from_window(s.window.into(), cx);
-    vcx.simulate_keystrokes("cmd-s");
+    vcx.simulate_keystrokes("secondary-s");
     vcx.run_until_parked();
     assert_eq!(
         cx.pending_prompt(),
