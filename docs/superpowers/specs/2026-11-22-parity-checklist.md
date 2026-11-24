@@ -384,8 +384,8 @@ editors). The record popover is a popover, not a window.
 | Torn-off editor: List | `DetailEditorKind.list` (⌥⌘2) | | |
 | Torn-off editor: Strip Chart | `DetailEditorKind.stripChart` (⌥⌘3) | | |
 | Torn-off editor: Drum Grid | `DetailEditorKind.drumGrid` (⌥⌘4) | | |
-| Plug-in editor window (one per insert or instrument slot) | `PluginWindows.show`, AppKit `NSWindow` (`PluginWindows.swift`) | | |
-| Built-in Synth window | `BuiltinSynthWindow.swift`, AppKit `NSWindow` | | |
+| Plug-in editor window (one per insert or instrument slot) | `PluginWindows.show`, AppKit `NSWindow` (`PluginWindows.swift`) | H2 (CLAP editor and parameter list by e2e; AU and VST3 editors open in `manual-checks.md`) | |
+| Built-in Synth window | `BuiltinSynthWindow.swift`, AppKit `NSWindow` | H2 | |
 | Modify panel (floating, one per document) | `ModifyPanels.show`, AppKit `NSPanel` (`ModifyPanel.swift`) | | |
 | Mixer | `mixer` | S6a + S6b (strips, master, buses, meters, sends, groups, VCAs, slots without editors, MIDI strips) | S6a + S6b (same) |
 | Media Pool | `media-pool` | | |

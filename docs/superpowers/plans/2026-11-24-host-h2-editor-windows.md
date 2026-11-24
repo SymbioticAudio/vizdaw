@@ -90,3 +90,55 @@
 - [ ] CI: the new X11 test steps with `VIZDAW_REQUIRE_DISPLAY`. Controller runs the Linux e2e over ssh.
 - [ ] `manual-checks.md` rows — controller (macOS): an AU Cocoa editor, an AU v3 editor ("Loading…" then the editor, no hang or crash), the bundled Multi-Q CLAP, an SDK VST3 `again`; knob drag = one undo step; Bypass from the header; the keys rule; a resizable editor follows a window drag; a self-resizing CLAP editor grows its window; a move between a 2× and a 1× display; close during another editor's open (Busy); quit with two windows open. Owner (Linux): XWayland in the KDE session and a pure X11 session; the gui test plug-in, a DPF plug-in (timer required) and a heavy open-source instrument as CLAP and VST3; move/minimize with the document window; typing into an editor's text field; 2× scale; close and quit with editors open (no BadWindow exit); transparency or garbage in the editor area.
 - [ ] Tick the parity rows; write the Outcome (rulings, carries, deferred minors); commit `host H2: e2e, CI and checks`.
+
+## Outcome (2026-11-24)
+
+All six tasks done (commits on `host` from 4f267133 to the Task 6 commit `host H2: e2e, CI and checks`). The GPUI app opens plug-in editor windows (CLAP, VST3 and AU on macOS; CLAP and VST3 embedded on X11 and XWayland), with the header, the parameter-list fallback, the Built-in Synth sound window and the slot gestures, on Swift's strings; core hosts VST3 `IPlugView`s, pumps the plug-in run loop from the app, and opens AU v3 views asynchronously. Evidence: vizdaw-app and vizdaw-gpui 1609/1609 on the Mac at the end, app+gpui 1609/1609 on Linux after Task 5; GPUI e2e 34/35 on the Mac (`gpui_demo_play_screenshot_stop` needs the `screenshot` build) (with `gpui_plugin_window_opens_bypasses_and_reopens_with_the_project`, `gpui_plugin_window_without_an_editor_lists_parameters` and `gpui_builtin_synth_window_picks_a_sound`); the Linux X11 e2e (`gpui_x11_*`) runs in CI only (the test box has no X server).
+
+**Not yet seen on screen or on a real device:** every real editor (AU Cocoa, AU v3, Multi-Q, the SDK `again`, Linux plug-ins), a real AU v3's asynchronous open, the keys rule, ⌘W with a focused native editor, 2× scale, and the Linux X11 tree outside Xvfb. All are rows in `docs/testing/manual-checks.md` ("Plug-in editor windows (host track H2)").
+
+### Plan amendments
+
+- Task 1: Ruling R1 (implementer, accepted; plan amendment): the module's host context also offers Linux::IRunLoop — VSTGUI's X11 frame registers through the factory-wide run loop set from setHostContext (x11frame.cpp:646, x11platform.cpp:131), else a null call — cost: host-context registrations live until the plug-in unregisters them or the module exits; Review Focus 3 "gone at close" holds for frame registrations only
+- Task 5 file list: `crates/vizdaw-gpui/src/builtin_synth_window.rs` was not created; the Built-in Synth window's drawing is in `crates/vizdaw-gpui/src/plugin_windows/view.rs` (Task 5 ruling below). Task 4 also added `plugin_windows/x11.rs` and `plugin_windows/other.rs`.
+- Task 6 file list: also `crates/vizdaw-app/src/session.rs` and `crates/vizdaw-gpui/src/lib.rs` (the catalog at launch), `crates/vizdaw-gpui/src/control.rs` (`content`, ⌘W over the channel), `crates/test-plugins/src/vst3_view.rs` (`VIZDAW_TEST_VST3_VIEW_FLAGS`) and `crates/vizctl/Cargo.toml` (`test-plugins`, Linux `x11rb`).
+
+### Rulings
+
+- Task 2: Rulings (implementer, accepted): pump in core-host (re-exported by core-ffi; vizdaw-play lacks core-ffi); only POLLNVAL silenced; 256-timer cap per table; debug_editor_opening test hook; GPUI pump starts in run() not install() — costs in task-2-report.md
+- Task 2: Ruling: reviewer Minor 1 (AU v3 completion block released after the request) stays Minor — the block ABI requires an async callee to copy a block it keeps; the old code relied on the same — cost: a crash with a unit that breaks that rule; cheap fix (keep RcBlock in ViewRequest) if seen
+- Pre-Task 3: merged origin/next (670b547c) into host as f543f07f (no force-push; plan said rebase); pre-Task 5 merged origin/next again (IdleNews kept both sides' fields; plugin_news folded into take_idle_news)
+- Task 3: Rulings (implementer, accepted): drags reuse MixerModel gestures (Touch(None) resolved by core, session.rs:9191); end_plugin_gestures dropped (core close_editor ends them); plug-in news kept only for slots with a window
+- Task 3: Ruling: idle problems (plug-in load failures, autosave failed) still dropped — pre-existing; owner slice 8b (Faults bar item) — backlog row on next (since reached the Faults popover on next, 35a627e1)
+- Task 4: Rulings (implementer, accepted): close button and resize snap on a later main-loop turn (cx.spawn) — no plug-in call inside the platform callback; extra file plugin_windows/x11.rs; parent 0 on the test platform; SCREEN_MARGIN 40 pt; scale-change reopen Linux only; a Busy close then document close keeps the container until exit (no BadWindow) — costs in task-4-report.md
+- Task 5: Rulings (implementer, accepted): Built-in Synth drawing in plugin_windows/view.rs (no builtin_synth_window.rs in gpui); Bypass a checkbox in ui.tree; double-click opens on the second mouse-down; Built-in Synth slot opens the focused track's synth, else the first (reviewer: no wrong-track write — changes go to the shown destination)
+- Task 6: Ruling (implementer): the GPUI app opens its plug-in catalog (`plugins.json` in the support folder) at launch, before any document, with no scan (Swift opened it at launch) — without it no project's plug-in loaded in the GPUI app at all — cost: a damaged catalog file is only printed to stderr until the Plugin Manager slice shows it
+- Task 6: Ruling (implementer): `state.get windows` rows carry `content` (the drawn size, no title bar) beside `frame` — the brief's 300×237 is a content size
+- Task 6: Ruling (implementer): over the channel, `ui.key` ⌘W in a plug-in or Built-in Synth window is delivered to that window (its own ⌘W closes it) instead of running `file.close` on its document, which closed the whole project — Swift `performClose` parity
+- Task 6: Ruling (implementer): the e2e seeds the throwaway home's catalog with the test bundles and gives a saved copy of the demo an insert by editing its `project.json` (the GPUI channel has no `mixer.add_insert`; the catalogue slice adds the picking) — cost: the file format's insert shape is written by `core_model::mixer::PluginSlot`'s serde, not by the app
+- Task 6: Ruling (implementer): the test VST3 view reads extra flags from `VIZDAW_TEST_VST3_VIEW_FLAGS` so an app the test launches draws the X11 variant
+- Task 6: Ruling (implementer): the parity rows are ticked on the Mac only (H2); the Linux cells stay blank until CI's `gpui_x11_*` and the Linux GPUI e2e pass on `host`
+
+### Carried
+
+- Task 1: Linux gate: box lacks Xvfb/ninja — vst3_gui_linux runs in CI only (added to ci.yml); box ran core-host/test-plugins/editors_main 258/258
+- Task 2: Linux 2033/2034 — scan_fills_the_catalog_and_plugins_lists_it fails on the box on next too (systemd-coredump core_pattern makes the crasher outlive the 2 s scan timeout → 'timed out'); environmental, not H2; backlog row on next
+- Task 3: carry to Task 4: registry enforces one window per (document, slot); tick calls refresh/open_editor/take_editor_resize/follow_core_touches/retry_close, opened() on create — done in Task 4
+- Task 4: fix round 1 4f6f370f: park and destroy checked (server round-trip before GPUI destroys its window); CI runs vizdaw-gpui --lib plugin_windows::x11 under Xvfb
+- Task 4: carry to Task 5: ⌘W closes a plug-in window (Swift did) — done in Task 5 (keyboard) and Task 6 (the channel)
+- Task 6: carry to the controller: run the Linux GPUI e2e (`gpui_x11_*` included) over ssh where an X server is available, else read CI's run; then tick the Linux parity cells
+
+### On-screen checks (rows in `docs/testing/manual-checks.md`)
+
+- Task 2: controller check (on screen, Task 5+): real AU v3 opens Busy then attaches; close while opening; generic view after 3 s
+- Task 5: on-screen checks: a native editor holding focus may swallow ⌘W/Ctrl-W (X11); window focuses its root on open
+- Task 4 and Task 5 reports' on-screen lists (the header at 37 pt, the parameter list, the Built-in Synth window, real double-clicks, the style mask and snap, the Busy park, the 24-bit container)
+
+### Deferred minors
+
+- Task 1: minor (deferred): 6 Minor items in task-1-review.md
+- Task 2: minor (deferred): Minors 2-5 in task-2-review.md
+- Task 3: minor (deferred): Busy destinations() → wrong set_sound refusal; Busy first-move read drops a drag; toggle_bypass not deduped; end_open_drag releases plug-in touch; no test that closing stops params_changed
+- Task 4: minor (deferred): our WM_NORMAL_HINTS replace GPUI's; macOS host drop assumes GPUI releases its last-frame NativeView clone; X11 test pins the contract, not the original race; other Minors in task-4-review.md
+- Task 5: minor (deferred): no focused-track Built-in Synth test; header test doesn't pin 37 pt; two Built-in Synth windows share a title (Swift same); other Minors in task-5-review.md
+- Task 6: minor (deferred): over the channel, other bound keys in a plug-in window still run their commands (Space plays) where the keyboard gives plain keys to the plug-in; a parameter-list window opened while its plug-in loads shows 360 wide until the parameters arrive, then grows to 400; the GPUI app ignores `VIZDAW_SUPPORT_DIR` (the e2e seeds `$HOME`'s support folder)

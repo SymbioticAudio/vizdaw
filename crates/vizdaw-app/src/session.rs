@@ -978,9 +978,20 @@ impl CoreCalls for LiveCore {
     }
 }
 
+/// Opens the app's plug-in catalog at launch, before any project, as
+/// Swift did (`fix(app): ... open catalog before projects`): every
+/// session's host learns where the scanned plug-ins live, so a project's
+/// slots load. No scan runs (the Plugin Manager is a later slice). Answers
+/// why the catalog file was not read, if it was not.
+pub fn open_plugin_catalog() -> Option<String> {
+    match live_catalog() {
+        Ok(c) => c.take_problem().ok().flatten(),
+        Err(e) => Some(format!("plugin settings not read: {e}")),
+    }
+}
+
 /// The app's plug-in catalog (`plugins.json` in the support folder),
-/// opened when first needed. Swift opened it at launch; the GPUI app has
-/// no Plugin Manager yet, so only "Disable <names>" opens it.
+/// opened at launch ([`open_plugin_catalog`]) or when first needed.
 fn live_catalog() -> Result<Arc<vizdaw_ffi::PluginCatalog>, VizError> {
     static CATALOG: std::sync::Mutex<Option<Arc<vizdaw_ffi::PluginCatalog>>> =
         std::sync::Mutex::new(None);

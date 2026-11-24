@@ -15,7 +15,8 @@
 //! [`crate::MIN_SIZE`]–[`crate::MAX_SIZE`]), asking the host to resize it
 //! through the frame inside `attached`, leaving its run-loop registrations
 //! behind in `removed`, or (Linux) drawing a real X11 child window with the
-//! GUI kind's [`crate::gui::XChild`]. The probe can also make the latest
+//! GUI kind's [`crate::gui::XChild`]; `VIZDAW_TEST_VST3_VIEW_FLAGS` adds
+//! flags to every view of a process the test does not run in (an app). The probe can also make the latest
 //! view ask for a resize ([`crate::Vst3Probe::view_resize`]).
 //!
 //! On Linux, `attached` queries the frame for `Linux::IRunLoop`, as VSTGUI
@@ -357,10 +358,23 @@ pub(crate) fn note_host_context(context: *mut sdk::FUnknown) {
     store(vx::HOST_RUN_LOOP, u64::from(has));
 }
 
+/// Flags every view of this process gets on top of [`FLAGS`]: the
+/// decimal value of `VIZDAW_TEST_VST3_VIEW_FLAGS`, read once, so a test can
+/// set them in an app it launches (the GPUI end-to-end test's X11 view).
+fn env_flags() -> u32 {
+    static ENV: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *ENV.get_or_init(|| {
+        std::env::var("VIZDAW_TEST_VST3_VIEW_FLAGS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0)
+    })
+}
+
 /// A new view (`createView("editor")`), as an owned `IPlugView` pointer.
 pub(crate) fn create() -> *mut IPlugView {
     let state = Rc::new(State {
-        flags: FLAGS.load(Ordering::SeqCst),
+        flags: FLAGS.load(Ordering::SeqCst) | env_flags(),
         me: Cell::new(std::ptr::null_mut()),
         frame: RefCell::new(None),
         attached: Cell::new(false),

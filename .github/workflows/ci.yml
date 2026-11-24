@@ -85,14 +85,17 @@ jobs:
           VIZDAW_REQUIRE_DISPLAY: "1"
       - name: GPUI end to end (Linux, virtual X server)
         if: runner.os == 'Linux'
-        timeout-minutes: 20
+        timeout-minutes: 25
         run: |
           cargo build -p vizdaw-gpui --features screenshot
           unset WAYLAND_DISPLAY
           xvfb-run -a -s "-screen 0 1280x800x24" cargo test -p vizctl --test e2e_gpui -- --ignored --nocapture --test-threads 1
         env:
           VIZDAW_E2E_APP: target/debug/vizdaw-gpui
+          # The plug-in window X11 tests (gpui_x11_*): a missing X server
+          # or SDK `again` sample fails them instead of skipping them.
           VIZDAW_REQUIRE_DISPLAY: "1"
+          VIZDAW_REQUIRE_VST3_SAMPLES: "1"
       - name: Bundled Multi-Q tests
         if: runner.os == 'macOS'
         run: |

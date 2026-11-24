@@ -79,7 +79,7 @@ use vizdaw_ffi::control::{
     AlertRow, ControlResult, DetailRow, EditorStateRow, TransportMarksRow, result_json,
 };
 
-use crate::app_state::{AppState, WindowEntry};
+use crate::app_state::{AppState, WindowEntry, WindowKind};
 use crate::menus;
 use crate::shell::DocumentWindow;
 use crate::transport_fields::NO_FIELDS;
@@ -1029,7 +1029,8 @@ fn read_error(e: vizdaw_ffi::VizError) -> ControlError {
 
 /// `state.get windows`: the document and Mixer windows, the front
 /// document's first, and the alert the store holds. `frame` is the
-/// window's bounds in GPUI's screen coordinates (top-left origin). `key`
+/// window's bounds in GPUI's screen coordinates (top-left origin),
+/// `content` the size of what it draws (no title bar). `key`
 /// (and `main`) is the one window that has the keyboard.
 fn windows_state(cx: &mut App) -> Value {
     let app = AppState::global(cx);
@@ -1043,11 +1044,17 @@ fn windows_state(cx: &mut App) -> Value {
         let now = cx.background_executor().now();
         let shown = match w.document_window() {
             Some(h) => h.update(cx, |v, window, _| {
-                (window.bounds(), v.take_frame_stats(now))
+                (
+                    window.bounds(),
+                    window.viewport_size(),
+                    v.take_frame_stats(now),
+                )
             }),
-            None => w.handle.update(cx, |_, window, _| (window.bounds(), None)),
+            None => w.handle.update(cx, |_, window, _| {
+                (window.bounds(), window.viewport_size(), None)
+            }),
         };
-        let Ok((bounds, frames)) = shown else {
+        let Ok((bounds, content, frames)) = shown else {
             continue;
         };
         let (title, key) = {
@@ -1067,6 +1074,10 @@ fn windows_state(cx: &mut App) -> Value {
                 "y": f32::from(bounds.origin.y),
                 "width": f32::from(bounds.size.width),
                 "height": f32::from(bounds.size.height),
+            },
+            "content": {
+                "width": f32::from(content.width),
+                "height": f32::from(content.height),
             },
         });
         if let Some(frames) = frames {
@@ -1229,7 +1240,9 @@ fn key_strokes(
         // a window that is not drawing frames (a background app on macOS)
         // would otherwise route it on a stale focus.
         fresh_frame(entry, cx)?;
-        if let Some(id) = bound_command(entry, k, cx) {
+        if let Some(id) = bound_command(entry, k, cx)
+            && !closes_itself(entry, id)
+        {
             let ran = match app_wide(id, &[], cx) {
                 Some(r) => r,
                 None => run_command(id, &[], entry, cx),
@@ -1257,6 +1270,13 @@ fn key_strokes(
         sent += 2;
     }
     Ok(json!({ "window": number(entry.handle), "events": sent, "x": 0.0, "y": 0.0 }))
+}
+
+/// Whether `id` is Close in a plug-in or Built-in Synth window, which
+/// closes that window, not its document (its own ⌘W binding, as Swift's
+/// `performClose`): the key is delivered to the window.
+fn closes_itself(entry: &WindowEntry, id: &str) -> bool {
+    id == "file.close" && matches!(entry.kind, WindowKind::Plugin | WindowKind::Other)
 }
 
 /// Whether a document window's key bindings or key handler run command

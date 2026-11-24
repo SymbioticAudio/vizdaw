@@ -118,3 +118,45 @@ what's left is what a person sees, hears and opens elsewhere.
 | Linux | Panel #12 (Merge With Existing Project…): choosing `project.json` inside a `.vizdaw` folder merges into that project | open |
 | Linux | The return prompt as the sheet card: Return is New Project, Esc is Cancel, Merge With Existing Project… is clickable | open |
 | — | A file whose export ID was lost: the sheet lists the project's exports ("Export of <date> at <time>, N tracks", the newest selected); Preview starts the merge with the one chosen | open |
+
+### Plug-in editor windows (host track H2)
+
+A GPUI build from `host` (later `next`). The window models, the header, the
+parameter list, the Built-in Synth window and the slot gestures are tested
+headless (`crates/vizdaw-app/src/plugin_window.rs`,
+`crates/vizdaw-gpui/tests/{plugin_windows,plugin_window_view,mixer_slots}.rs`);
+the GPUI end to end opens a CLAP editor, the parameter list and the
+Built-in Synth window on the Mac (`gpui_plugin_window_*`,
+`gpui_builtin_synth_window_picks_a_sound`) and, in Linux CI under Xvfb,
+checks the X11 container, the plug-in's child window and
+`WM_TRANSIENT_FOR` (`gpui_x11_*`). What's left is what a person sees and
+does with real editors. **Controller** rows Claude runs on the Mac with
+screen control; **owner** rows need the owner's Linux desktop.
+
+| Platform | Who | What | Status |
+|---|---|---|---|
+| macOS | controller | An AU Cocoa editor opens in its window under the 37-pt header, at its size | open |
+| macOS | controller | An AU v3 editor: "Loading…" shows, then the editor; no hang or crash | open |
+| macOS | controller | A real AU v3 opens Busy, then attaches on a later tick; closing its window while it opens leaves no editor behind; a unit that never answers shows the generic view after 3 s | open |
+| macOS | controller | The bundled Multi-Q CLAP's editor (the EQ slot's single click opens it; the EQ's bypass button only bypasses) | open |
+| macOS | controller | The SDK VST3 `again` sample's editor | open |
+| macOS | controller | Turning a knob in an editor, then Edit › Undo, returns the knob: one undo step per drag ("Change Plugin Parameter") | open |
+| macOS | controller | Bypass from the header: lit while bypassed, the slot's dot follows; Learn shows disabled with its help | open |
+| macOS | controller | The keys rule (README :70–72): in a plug-in window plain keys go to the plug-in (Space does not play), ⌘ keys go to the menu | open |
+| macOS | controller | ⌘W closes the plug-in window while a native editor has the keyboard, and leaves the plug-in on its slot | open |
+| macOS | controller | A new plug-in window takes the keyboard when it opens, and gives it to nothing else (the document window keeps its own focus when brought back) | open |
+| macOS | controller | A resizable editor follows a window drag and snaps without jitter; a fixed one cannot be resized | open |
+| macOS | controller | A self-resizing CLAP editor grows its window | open |
+| macOS | controller | Moving the window between a 2× and a 1× display keeps the editor sharp and at its size | open |
+| macOS | controller | Closing a window during another editor's open (Busy) closes it once the open ends; nothing is left on screen | open |
+| macOS | controller | Quit with two plug-in windows open: no crash, both reopen with the project (README 18) | open |
+| macOS | controller | The parameter list: alignment, the thumb at both ends, scrolling with many parameters, the monospaced value column | open |
+| macOS | controller | Real double-clicks: an insert opens its window without starting a drag; an instrument slot opens its window; the Built-in Synth slot opens the sound window of the focused track's synth (300×200, radio glyphs, the caption wraps) | open |
+| Linux | owner | XWayland in the KDE session and a pure X11 session: editors embed in both | open |
+| Linux | owner | The gui test plug-in, a DPF plug-in (timer required) and a heavy open-source instrument, each as CLAP and as VST3: the editor shows, animates and answers the mouse | open |
+| Linux | owner | The plug-in window moves and minimizes with its document window (`WM_TRANSIENT_FOR`), also when opened from the Mixer window and at project reopen | open |
+| Linux | owner | Typing into an editor's text field reaches the plug-in | open |
+| Linux | owner | Ctrl-W closes the plug-in window while a native editor has the keyboard (an X11 editor that grabs focus may swallow it) | open |
+| Linux | owner | 2× scale: the container sits under the header and the editor reopens at the new scale | open |
+| Linux | owner | Close and quit with editors open: no BadWindow exit (also after a Busy close) | open |
+| Linux | owner | No transparency or garbage in the editor area (the 24-bit container inside the 32-bit GPUI window) | open |

@@ -325,6 +325,10 @@ pub fn run() {
         // The preferences under the launch home (a throwaway e2e home
         // keeps its own).
         state.update(cx, |s, _| s.set_prefs(vizdaw_app::Prefs::open()));
+        // Before any document opens, so their plug-ins load.
+        if let Some(problem) = vizdaw_app::session::open_plugin_catalog() {
+            eprintln!("{problem}");
+        }
         // Before any document opens.
         if let Some(path) = &options.control
             && let Err(e) = control::start(path, cx)

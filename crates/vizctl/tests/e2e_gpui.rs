@@ -3784,3 +3784,640 @@ fn gpui_record_recover_trash_over_the_channel() {
     assert_eq!(shown["alerts"], json!([]), "{shown}");
     app.quit();
 }
+
+// Host track H2: plug-in editor windows, on the real core and the test
+// plug-ins (`test-plugins`). The app opens its catalog at launch (no scan),
+// so the throwaway home's catalog is seeded with the test bundles and a
+// copy of the demo gets an insert by hand.
+
+/// The support folder the GPUI app reads under `home` (its `HOME`).
+fn support_in(home: &std::path::Path) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/VizDAW")
+    } else {
+        home.join(".local/share/vizdaw")
+    }
+}
+
+/// Seeds `home`'s catalog with every plug-in of the CLAP bundles `clap`
+/// and the VST3 bundles `vst3`, as a scan would record them; answers
+/// their references.
+fn seed_catalog(
+    home: &std::path::Path,
+    clap: &[PathBuf],
+    vst3: &[PathBuf],
+) -> Vec<core_model::mixer::PluginRef> {
+    use core_host::catalog::{Catalog, CatalogEntry, ScanStatus, Source};
+    let mut catalog = Catalog::new();
+    let mut refs = Vec::new();
+    let bundles = clap
+        .iter()
+        .map(|p| (Source::clap_bundle(p), core_host::clap::list_bundle(p)))
+        .chain(
+            vst3.iter()
+                .map(|p| (Source::vst3_bundle(p), core_host::vst3::list_bundle(p))),
+        );
+    for (src, listed) in bundles {
+        let listed = listed.unwrap_or_else(|e| panic!("{}: {e}", src.path.display()));
+        let entries = listed
+            .into_iter()
+            .map(|(plugin, kind)| {
+                refs.push(plugin.clone());
+                CatalogEntry {
+                    source: src.clone(),
+                    plugin,
+                    kind: Some(kind),
+                    info: None,
+                    status: ScanStatus::Ok,
+                }
+            })
+            .collect();
+        catalog.record(&src, entries);
+    }
+    let support = support_in(home);
+    std::fs::create_dir_all(&support).unwrap();
+    catalog
+        .save(&support.join("plugins.json"))
+        .expect("the seeded catalog");
+    refs
+}
+
+/// The reference `id` among `refs`.
+fn plugin_ref(refs: &[core_model::mixer::PluginRef], id: &str) -> core_model::mixer::PluginRef {
+    refs.iter()
+        .find(|r| r.id == id)
+        .unwrap_or_else(|| panic!("no plug-in {id} in {refs:?}"))
+        .clone()
+}
+
+/// Saves the open demo (`w`) as `Demo.vizdaw` in `home`, copies it to
+/// `name`.vizdaw with `plugin` as the Built-in Synth strip's insert, and
+/// opens the copy: its window and the insert's slot ID.
+fn open_with_insert(
+    app: &mut App,
+    home: &std::path::Path,
+    w: &Value,
+    plugin: &core_model::mixer::PluginRef,
+    name: &str,
+) -> (Value, u64, PathBuf) {
+    let demo = home.join("Demo.vizdaw");
+    app.call(
+        "command.run",
+        json!({"id": "file.save_as", "params": {"path": demo}, "window": w}),
+    );
+    let song = home.join(format!("{name}.vizdaw"));
+    copy_dir(&demo, &song);
+    let file = song.join("project.json");
+    let mut project: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    let doc = &mut project["document"];
+    let id = doc["counters"]["plugin"].as_u64().unwrap();
+    doc["counters"]["plugin"] = json!(id + 1);
+    let slot =
+        core_model::mixer::PluginSlot::new(core_model::ids::PluginInstanceId(id), plugin.clone());
+    let strip = doc["mixer"]["strips"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|s| s["name"] == "Built-in Synth")
+        .expect("the demo's Built-in Synth strip");
+    strip["inserts"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::to_value(&slot).unwrap());
+    std::fs::write(&file, serde_json::to_vec_pretty(&project).unwrap()).unwrap();
+    let opened = app.call("app.open", json!({"path": song}));
+    let window = opened["window"].clone();
+    assert!(window.as_i64().is_some(), "{opened}");
+    (window, id, song)
+}
+
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap().flatten() {
+        let p = e.path();
+        let dest = to.join(e.file_name());
+        if p.is_dir() {
+            copy_dir(&p, &dest);
+        } else {
+            std::fs::copy(&p, &dest).unwrap();
+        }
+    }
+}
+
+/// Insert `slot` of `state.get mixer`, if it is there.
+fn insert_of(m: &Value, slot: u64) -> Option<Value> {
+    m["strips"]
+        .as_array()?
+        .iter()
+        .flat_map(|s| s["inserts"].as_array().cloned().unwrap_or_default())
+        .find(|i| i["slot"] == slot)
+}
+
+/// The node with role `role` labelled `label`.
+fn find_role(nodes: &Value, role: &str, label: &str) -> Option<Value> {
+    nodes.as_array().into_iter().flatten().find_map(|n| {
+        if n["role"] == role && n["label"].as_str() == Some(label) {
+            Some(n.clone())
+        } else {
+            find_role(&n["children"], role, label)
+        }
+    })
+}
+
+/// The `state.get windows` rows of kind `plugin`.
+fn plugin_windows(app: &mut App) -> Vec<Value> {
+    let w = app.call("state.get", json!({"target": "windows"}));
+    w["windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|x| x["kind"] == "plugin")
+        .cloned()
+        .collect()
+}
+
+/// Polls until a plug-in window titled `title` whose content is `size`
+/// (points) is listed; its row.
+fn wait_for_plugin_window(app: &mut App, title: &str, size: Option<(f64, f64)>) -> Value {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let rows = plugin_windows(app);
+        if let Some(row) = rows.iter().find(|r| {
+            r["title"] == title
+                && size.is_none_or(|(w, h)| {
+                    r["content"]["width"].as_f64() == Some(w)
+                        && r["content"]["height"].as_f64() == Some(h)
+                })
+        }) {
+            return row.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no plug-in window {title:?} of {size:?} within {WAIT_MS} ms: {rows:?}\nlog:\n{}",
+            log_tail(&app.launched.log, 40)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Polls until no plug-in window is listed.
+fn wait_for_no_plugin_window(app: &mut App) {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let rows = plugin_windows(app);
+        if rows.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "plug-in windows stay open: {rows:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Opens the document's Mixer window and double-clicks the insert slot
+/// named `name` there (`slot`; a window opened while it loads opens its
+/// editor once it has); the Mixer window's number.
+fn double_click_slot(app: &mut App, w: &Value, slot: u64, name: &str) -> Value {
+    wait_for_state(app, w, "mixer", |m| insert_of(m, slot).is_some());
+    app.call("command.run", json!({"id": "window.mixer", "window": w}));
+    let mixer = wait_for_mixer_window(app);
+    let button = wait_in_tree(app, &mixer, name, |n| find_role(n, "button", name));
+    app.call(
+        "ui.click",
+        json!({"window": mixer, "element": button["id"], "count": 2}),
+    );
+    mixer
+}
+
+/// README 11, 12 and 18 on the CLAP `timer` kind (a headless embedded
+/// editor, 300×200): a double-click on its slot opens "‹strip› — ‹plug-in›"
+/// with the editor under the 37-pt header; the header's Bypass toggles the
+/// slot; ⌘W closes the window and leaves the plug-in; saved with the
+/// window open, closed and reopened, the window is back; removing the slot
+/// closes it.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_plugin_window_opens_bypasses_and_reopens_with_the_project() {
+    let home = temp_home();
+    let refs = seed_catalog(home.path(), &[test_plugins::bundle()], &[]);
+    let timer = plugin_ref(&refs, "vizdaw.test.timer");
+    let (mut app, demo) = start_demo(home.path());
+    let (w, slot, song) = open_with_insert(&mut app, home.path(), &demo, &timer, "Timer");
+    let title = "Built-in Synth \u{2014} Test Timer";
+
+    // 11: the double-click opens the window, the editor under the header.
+    let mixer = double_click_slot(&mut app, &w, slot, "Test Timer");
+    let row = wait_for_plugin_window(&mut app, title, Some((300.0, 237.0)));
+    assert_eq!(
+        row["doc"],
+        app.call("state.get", json!({"target": "windows"}))["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["number"] == w)
+            .unwrap()["doc"]
+    );
+    let pw = row["number"].clone();
+    // A second double-click brings the same window forward.
+    let button = wait_in_tree(&mut app, &mixer, "slot", |n| {
+        find_role(n, "button", "Test Timer")
+    });
+    app.call(
+        "ui.click",
+        json!({"window": mixer, "element": button["id"], "count": 2}),
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(plugin_windows(&mut app).len(), 1, "one window per slot");
+
+    // 12: Bypass from the header, both ways.
+    for on in [true, false] {
+        let bypass = wait_in_tree(&mut app, &pw, "Bypass", |n| {
+            find_role(n, "checkbox", "Bypass")
+        });
+        app.call("ui.click", json!({"window": pw, "element": bypass["id"]}));
+        wait_for_state(&mut app, &w, "mixer", |m| {
+            insert_of(m, slot).is_some_and(|i| i["bypass"] == on)
+        });
+        wait_in_tree(&mut app, &pw, "Bypass", |n| {
+            find_role(n, "checkbox", "Bypass").filter(|b| (b["selected"] == true) == on)
+        });
+    }
+
+    // 11: closing the window keeps the plug-in.
+    app.call(
+        "ui.key",
+        json!({"window": pw, "key": "w", "modifiers": ["command"]}),
+    );
+    wait_for_no_plugin_window(&mut app);
+    let m = app.call("state.get", json!({"target": "mixer", "window": w}));
+    assert!(insert_of(&m, slot).is_some(), "the plug-in stays: {m}");
+
+    // 18: saved with the window open, closed and reopened: it is back.
+    double_click_slot(&mut app, &w, slot, "Test Timer");
+    wait_for_plugin_window(&mut app, title, Some((300.0, 237.0)));
+    app.call("command.run", json!({"id": "file.save", "window": w}));
+    app.call("command.run", json!({"id": "file.close", "window": w}));
+    wait_for_no_plugin_window(&mut app);
+    let opened = app.call("app.open", json!({"path": song}));
+    let w = opened["window"].clone();
+    let row = wait_for_plugin_window(&mut app, title, Some((300.0, 237.0)));
+
+    // Removing the slot closes its window.
+    let mixer = {
+        app.call("command.run", json!({"id": "window.mixer", "window": w}));
+        let rows = app.call("state.get", json!({"target": "windows"}));
+        rows["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["kind"] == "mixer" && x["doc"] == row["doc"])
+            .map(|x| x["number"].clone())
+            .unwrap_or_else(|| wait_for_mixer_window(&mut app))
+    };
+    let button = wait_in_tree(&mut app, &mixer, "slot", |n| {
+        find_role(n, "button", "Test Timer")
+    });
+    app.call(
+        "ui.click",
+        json!({"window": mixer, "element": button["id"], "button": "right"}),
+    );
+    let remove = wait_in_tree(&mut app, &mixer, "Remove", |n| {
+        find_role(n, "menuitem", "Remove")
+    });
+    app.call(
+        "ui.click",
+        json!({"window": mixer, "element": remove["id"]}),
+    );
+    wait_for_state(&mut app, &w, "mixer", |m| insert_of(m, slot).is_none());
+    wait_for_no_plugin_window(&mut app);
+    app.quit();
+}
+
+/// The CLAP `gain` kind has no editor: its window lists the parameters
+/// (Swift `ParameterList`) under the header, 400 wide, with the reason
+/// the editor did not open.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_plugin_window_without_an_editor_lists_parameters() {
+    let home = temp_home();
+    let refs = seed_catalog(home.path(), &[test_plugins::bundle()], &[]);
+    let gain = plugin_ref(&refs, "vizdaw.test.gain");
+    let (mut app, demo) = start_demo(home.path());
+    let (w, slot, _) = open_with_insert(&mut app, home.path(), &demo, &gain, "Gain");
+    double_click_slot(&mut app, &w, slot, "Test Gain");
+    // The list's size: 400 wide, min(420, 30 n + 30) for its 3
+    // parameters, plus the header (360 × 120 while it loads and lists
+    // none).
+    let row = wait_for_plugin_window(
+        &mut app,
+        "Built-in Synth \u{2014} Test Gain",
+        Some((400.0, 30.0 * 3.0 + 30.0 + 37.0)),
+    );
+    let pw = row["number"].clone();
+    for name in ["Gain", "Latency", "Wiggle"] {
+        let slider = wait_in_tree(&mut app, &pw, name, |n| find_role(n, "slider", name));
+        assert_eq!(slider["enabled"], true, "{slider}");
+    }
+    let tree = app.call("ui.tree", json!({"window": pw}));
+    assert!(
+        find_role(&tree["nodes"], "checkbox", "Bypass").is_some(),
+        "the header: {tree}"
+    );
+    app.quit();
+}
+
+/// The Built-in Synth slot's double-click opens the "Built-in Synth"
+/// window (kind `other`, 300×200): its "Sound" radio group picks a sound
+/// as one undo step, and a second double-click brings the same window
+/// forward.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_builtin_synth_window_picks_a_sound() {
+    let home = temp_home();
+    let (mut app, w) = start_demo(home.path());
+    app.call("command.run", json!({"id": "window.mixer", "window": w}));
+    let mixer = wait_for_mixer_window(&mut app);
+    let synths = |app: &mut App| -> Vec<Value> {
+        let rows = app.call("state.get", json!({"target": "windows"}));
+        rows["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|x| x["kind"] == "other")
+            .cloned()
+            .collect()
+    };
+    let label = "Built-in Synth, instrument";
+    for _ in 0..2 {
+        let slot = wait_in_tree(&mut app, &mixer, label, |n| find_role(n, "button", label));
+        app.call(
+            "ui.click",
+            json!({"window": mixer, "element": slot["id"], "count": 2}),
+        );
+    }
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    let row = loop {
+        let rows = synths(&mut app);
+        if let Some(r) = rows.first() {
+            break r.clone();
+        }
+        assert!(Instant::now() < deadline, "no Built-in Synth window");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(synths(&mut app).len(), 1, "one window per destination");
+    assert_eq!(row["title"], "Built-in Synth", "{row}");
+    assert_eq!(
+        (
+            row["content"]["width"].clone(),
+            row["content"]["height"].clone()
+        ),
+        (json!(300.0), json!(200.0)),
+        "{row}"
+    );
+    let sw = row["number"].clone();
+    let tree = app.call("ui.tree", json!({"window": sw}));
+    assert!(
+        find_role(&tree["nodes"], "radiogroup", "Sound").is_some(),
+        "{tree}"
+    );
+    let bass = find_role(&tree["nodes"], "radio", "Bass").expect("Bass");
+    assert_ne!(bass["selected"], true, "{bass}");
+    app.call("ui.click", json!({"window": sw, "element": bass["id"]}));
+    wait_for_undo(&mut app, &w, "Set Built-in Synth Sound");
+    wait_in_tree(&mut app, &sw, "Bass selected", |n| {
+        find_role(n, "radio", "Bass").filter(|b| b["selected"] == true)
+    });
+    app.quit();
+}
+
+// Linux only: the editors embed under the plug-in window on X11 (CI runs
+// these under Xvfb with VIZDAW_REQUIRE_DISPLAY=1; without DISPLAY each
+// says so and passes, unless that is set).
+
+/// The test's own X connection, or `None` (skipped) without a display.
+#[cfg(target_os = "linux")]
+fn x_display() -> Option<x11rb::rust_connection::RustConnection> {
+    if std::env::var_os("DISPLAY").is_none() {
+        let required = std::env::var("VIZDAW_REQUIRE_DISPLAY").is_ok_and(|v| v == "1");
+        assert!(!required, "VIZDAW_REQUIRE_DISPLAY=1 but DISPLAY is not set");
+        eprintln!("skipped: no DISPLAY (run under an X server, e.g. xvfb-run)");
+        return None;
+    }
+    let (conn, _) = x11rb::rust_connection::RustConnection::connect(None)
+        .expect("DISPLAY is set but X is unreachable");
+    Some(conn)
+}
+
+#[cfg(target_os = "linux")]
+fn x_children(conn: &impl x11rb::connection::Connection, w: u32) -> Vec<u32> {
+    use x11rb::protocol::xproto::ConnectionExt as _;
+    conn.query_tree(w)
+        .ok()
+        .and_then(|c| c.reply().ok())
+        .map(|t| t.children)
+        .unwrap_or_default()
+}
+
+/// Whether X window `w` still exists.
+#[cfg(target_os = "linux")]
+fn x_exists(conn: &impl x11rb::connection::Connection, w: u32) -> bool {
+    use x11rb::protocol::xproto::ConnectionExt as _;
+    conn.get_window_attributes(w)
+        .ok()
+        .is_some_and(|c| c.reply().is_ok())
+}
+
+/// Window `w`'s `_NET_WM_NAME`, else its `WM_NAME`.
+#[cfg(target_os = "linux")]
+fn x_name(conn: &impl x11rb::connection::Connection, w: u32) -> Option<String> {
+    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _};
+    let net = conn
+        .intern_atom(false, b"_NET_WM_NAME")
+        .ok()?
+        .reply()
+        .ok()?
+        .atom;
+    for atom in [net, AtomEnum::WM_NAME.into()] {
+        let value = conn
+            .get_property(false, w, atom, AtomEnum::ANY, 0, 1024)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .map(|r| r.value)
+            .unwrap_or_default();
+        if !value.is_empty() {
+            return Some(String::from_utf8_lossy(&value).into_owned());
+        }
+    }
+    None
+}
+
+/// The top-level X window titled `title`.
+#[cfg(target_os = "linux")]
+fn x_top_level(conn: &impl x11rb::connection::Connection, title: &str) -> Option<u32> {
+    let root = conn.setup().roots[0].root;
+    x_children(conn, root)
+        .into_iter()
+        .find(|&w| x_name(conn, w).as_deref() == Some(title))
+}
+
+/// Window `w`'s `WM_TRANSIENT_FOR`.
+#[cfg(target_os = "linux")]
+fn x_transient_for(conn: &impl x11rb::connection::Connection, w: u32) -> Option<u32> {
+    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _};
+    let r = conn
+        .get_property(false, w, AtomEnum::WM_TRANSIENT_FOR, AtomEnum::WINDOW, 0, 1)
+        .ok()?
+        .reply()
+        .ok()?;
+    r.value32()?.next()
+}
+
+/// Polls `f` until it answers something, for up to [`WAIT_MS`].
+#[cfg(target_os = "linux")]
+fn x_wait<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        if let Some(v) = f() {
+            return v;
+        }
+        assert!(Instant::now() < deadline, "{what} within {WAIT_MS} ms");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Opens plug-in `id` (from the CLAP bundles `clap` or the VST3 bundles
+/// `vst3`, the app launched with `env`) as the Built-in Synth strip's
+/// insert and its window, then checks the X tree: the GPUI window holds
+/// our container, which holds the plug-in's own child window; the GPUI
+/// window is `WM_TRANSIENT_FOR` the document window; the content is
+/// `size` (points, the editor under the 37-pt header) once the editor
+/// has settled, when given; ⌘W (Ctrl-W) closes it and leaves no window of
+/// it, ours or the plug-in's.
+#[cfg(target_os = "linux")]
+fn x11_editor_embeds(
+    clap: &[PathBuf],
+    vst3: &[PathBuf],
+    id: &str,
+    env: &[(&str, &str)],
+    size: Option<(f64, f64)>,
+) {
+    let Some(conn) = x_display() else {
+        return;
+    };
+    let home = temp_home();
+    let refs = seed_catalog(home.path(), clap, vst3);
+    let plugin = plugin_ref(&refs, id);
+    let mut app = App::start_with(home.path(), false, env);
+    let demo = app.call("app.new_demo", json!({}))["window"].clone();
+    let (w, slot, _) = open_with_insert(&mut app, home.path(), &demo, &plugin, "Embed");
+    double_click_slot(&mut app, &w, slot, &plugin.name);
+    let title = format!("Built-in Synth \u{2014} {}", plugin.name);
+    let row = wait_for_plugin_window(&mut app, &title, None);
+    let pw = row["number"].clone();
+
+    let window = x_wait("the plug-in window's X window", || {
+        x_top_level(&conn, &title)
+    });
+    let (container, child) = x_wait("a plug-in child window inside our container", || {
+        x_children(&conn, window)
+            .into_iter()
+            .find_map(|c| x_children(&conn, c).first().map(|&p| (c, p)))
+    });
+    let windows = app.call("state.get", json!({"target": "windows"}));
+    let doc_title = windows["windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["number"] == w)
+        .and_then(|x| x["title"].as_str())
+        .unwrap()
+        .to_string();
+    let document = x_top_level(&conn, &doc_title)
+        .unwrap_or_else(|| panic!("no X window titled {doc_title:?}"));
+    assert_eq!(
+        x_transient_for(&conn, window),
+        Some(document),
+        "WM_TRANSIENT_FOR is the document window"
+    );
+    if let Some(size) = size {
+        wait_for_plugin_window(&mut app, &title, Some(size));
+    }
+
+    app.call(
+        "ui.key",
+        json!({"window": pw, "key": "w", "modifiers": ["command"]}),
+    );
+    wait_for_no_plugin_window(&mut app);
+    x_wait(
+        "the plug-in window, its container and the plug-in's window gone",
+        || {
+            (!x_exists(&conn, window) && !x_exists(&conn, container) && !x_exists(&conn, child))
+                .then_some(())
+        },
+    );
+    assert!(x_top_level(&conn, &title).is_none());
+    app.quit();
+}
+
+/// The CLAP `gui` kind: a real X11 editor that asks to grow by
+/// [`test_plugins::GUI_GROW`] points after its first timer tick; the
+/// window follows.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_x11_editor_embeds_under_the_plugin_window() {
+    let (w, h) = test_plugins::BASE_SIZE;
+    let (gw, gh) = test_plugins::GUI_GROW;
+    x11_editor_embeds(
+        &[test_plugins::bundle()],
+        &[],
+        "vizdaw.test.gui",
+        &[],
+        Some((f64::from(w + gw), f64::from(h + gh) + 37.0)),
+    );
+}
+
+/// The test VST3's `view` kind, drawing its X11 child (view flag `X11`).
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_x11_vst3_view_embeds_under_the_plugin_window() {
+    let (w, h) = test_plugins::BASE_SIZE;
+    let flags = test_plugins::vst3_view_flags::X11.to_string();
+    x11_editor_embeds(
+        &[],
+        &[test_plugins::vst3_bundle()],
+        test_plugins::VST3_VIEW_ID,
+        &[("VIZDAW_TEST_VST3_VIEW_FLAGS", &flags)],
+        Some((f64::from(w), f64::from(h) + 37.0)),
+    );
+}
+
+/// The VST3 SDK's `again` sample (a VSTGUI editor). Skipped when the
+/// samples are not built (`scripts/build-vst3-samples.sh`), unless
+/// `VIZDAW_REQUIRE_VST3_SAMPLES=1`.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_x11_sdk_again_embeds_under_the_plugin_window() {
+    let dir = std::env::var_os("VIZDAW_VST3_SAMPLES")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/vst3sdk/out")
+        });
+    let again = dir.join("again.vst3");
+    if !again.is_dir() {
+        let required = std::env::var("VIZDAW_REQUIRE_VST3_SAMPLES").is_ok_and(|v| v == "1");
+        assert!(
+            !required,
+            "the VST3 SDK sample {} is missing (run scripts/build-vst3-samples.sh)",
+            again.display()
+        );
+        eprintln!("skipped: {} is not built", again.display());
+        return;
+    }
+    x11_editor_embeds(&[], &[again], "84E8DE5F92554F5396FAE4133C935A18", &[], None);
+}
