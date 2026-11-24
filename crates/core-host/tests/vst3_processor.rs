@@ -575,3 +575,28 @@ fn non_finite_output_values_reach_neither_the_host_nor_the_controller() {
     }
     inst.deactivate(proc);
 }
+
+#[test]
+fn a_spilled_edit_beats_older_queued_ones_when_the_processor_stops() {
+    let (_d, copy, probe) = private();
+    let mut inst = Vst3Instance::load(&copy, VST3_GAIN_ID).unwrap();
+    let proc = inst.activate(48_000.0, 64).unwrap();
+    // The queue fills with Gain=0.1; the newer 0.3 spills to `pending`.
+    for _ in 0..1024 {
+        probe.edit(Vst3Edit::Perform(VST3_PARAM_GAIN, 0.1));
+    }
+    inst.gestures();
+    probe.edit(Vst3Edit::Perform(VST3_PARAM_GAIN, 0.3));
+    inst.gestures();
+    // The processor goes before it read anything.
+    inst.deactivate(proc);
+    let mut proc = inst.activate(48_000.0, 64).unwrap();
+    let mut b = Block::new(inst.info(), 64);
+    b.quiet(proc.as_mut(), 64);
+    let c = probe.counters();
+    assert_eq!(c.param_points, 1, "one value, in the first block: {c:?}");
+    assert!(close(c.param_in(VST3_PARAM_GAIN).unwrap(), 0.3), "{c:?}");
+    b.quiet(proc.as_mut(), 64);
+    assert_eq!(probe.counters().param_points, 1, "nothing older after it");
+    inst.deactivate(proc);
+}

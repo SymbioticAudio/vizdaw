@@ -240,9 +240,16 @@ impl Vst3Instance {
         let Some(a) = self.active.take() else {
             return;
         };
-        // Oldest first, so later values win.
+        // What the processor never took, oldest first (later entries win)…
+        let mut untaken = BTreeMap::new();
         while let Some((id, n)) = a.returned.pop().or_else(|| a.edits.pop()) {
-            self.pending.insert(id, n);
+            untaken.insert(id, n);
+        }
+        // …under the spills already in `pending`, which are newer than
+        // anything queued (a spill happens only when the queue is full,
+        // and later edits wait behind it).
+        for (id, n) in untaken {
+            self.pending.entry(id).or_insert(n);
         }
         self.plugin.set_active(false);
         self.plugin.activate_buses(false);
