@@ -45,6 +45,6 @@ pub use instance::{
 pub use process::{
     MAX_EVENTS, MAX_PARAM_EVENTS, MidiEvent, ParamChange, ParamEvent, ParamOut, ProcessCtx,
 };
-pub use run_loop::run_loop_tick;
 #[cfg(unix)]
 pub use run_loop::{FdFlags, run_loop_fds};
+pub use run_loop::{RunLoopCalls, run_loop_calls, run_loop_tick};

@@ -8,6 +8,8 @@
 //! after the factory is released; on Linux `ModuleEntry(handle)` and
 //! `ModuleExit`. A plug-in is set up as the SDK's `plugprovider.cpp` does.
 
+#[cfg(unix)]
+use super::editor::{RunLoopHost, run_loop_host};
 use super::module::{ClassInfo, binary_path, c_text, w_text};
 use crate::error::HostError;
 use crossbeam_queue::ArrayQueue;
@@ -257,7 +259,7 @@ impl Module {
         let mut module = Module {
             factory: None,
             exit,
-            host: ComWrapper::new(HostApp),
+            host: ComWrapper::new(HostApp::new()),
             _library: library,
             #[cfg(target_os = "macos")]
             _bundle: cf_bundle,
@@ -405,6 +407,9 @@ impl Drop for Module {
             // library is still loaded.
             unsafe { exit() };
         }
+        // What the module left in its host context's run loop goes with it.
+        #[cfg(unix)]
+        self.host.run.shut();
     }
 }
 
@@ -449,12 +454,35 @@ fn hand_out(obj: Option<ComPtr<FUnknown>>, iid: &[u8; 16], out: *mut *mut c_void
 }
 
 /// The host context (`IHostApplication`): its name, and the messages and
-/// attribute lists plug-ins send each other through connection points.
-pub(crate) struct HostApp;
+/// attribute lists plug-ins send each other through connection points. On
+/// Linux it is also the module's `Linux::IRunLoop`: VSTGUI takes its run
+/// loop from the factory's host context (`setHostContext`) and keeps it
+/// for the module's life, and the SDK's own timers do too; a view's frame
+/// has its own ([`super::editor`]). Its registrations go when the module
+/// exits.
+pub(crate) struct HostApp {
+    #[cfg(unix)]
+    run: RunLoopHost,
+}
+
+impl HostApp {
+    fn new() -> HostApp {
+        HostApp {
+            #[cfg(unix)]
+            run: RunLoopHost::new(),
+        }
+    }
+}
 
 impl Class for HostApp {
+    #[cfg(target_os = "linux")]
+    type Interfaces = (IHostApplication, sdk::Linux::IRunLoop);
+    #[cfg(not(target_os = "linux"))]
     type Interfaces = (IHostApplication,);
 }
+
+#[cfg(unix)]
+run_loop_host!(HostApp);
 
 impl IHostApplicationTrait for HostApp {
     unsafe fn getName(&self, name: *mut String128) -> tresult {
@@ -975,6 +1003,7 @@ impl IComponentHandler2Trait for ComponentHandler {
         kResultOk
     }
 
+    /// Ignored: editors open only when the user asks (H2).
     unsafe fn requestOpenEditor(&self, _name: FIDString) -> tresult {
         kNotImplemented
     }
@@ -1144,6 +1173,11 @@ impl Plugin {
                 )
             })
             .collect()
+    }
+
+    /// The controller (a new reference), for its editor view.
+    pub(crate) fn controller(&self) -> Option<ComPtr<IEditController>> {
+        self.controller.clone()
     }
 
     /// The audio buses, inputs or outputs.

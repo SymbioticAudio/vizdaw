@@ -25,23 +25,177 @@ use x11rb::protocol::xproto::{
 };
 use x11rb::rust_connection::RustConnection;
 
-/// What the GUI kind's editor holds and has seen (main thread only).
-pub struct Gui {
-    conn: Option<RustConnection>,
-    /// Its window and graphics context, once parented.
+/// A real X11 child window drawn through its own X connection, as DPF,
+/// JUCE and VSTGUI editors draw: the GUI kind's CLAP editor and the test
+/// VST3 view's X11 variant (`vst3_view.rs`) both use it.
+pub(crate) struct XChild {
+    conn: RustConnection,
+    /// Its window and graphics context, once created under a parent.
     window: u32,
     gc: u32,
     parent: u32,
     shown: bool,
-    scale: f64,
     /// In physical pixels.
+    size: (u32, u32),
+    draws: u32,
+}
+
+fn x_fail<E>(_: E) -> &'static str {
+    "X11 request failed"
+}
+
+impl XChild {
+    /// Connects to the X server (`DISPLAY`); no window yet.
+    pub(crate) fn connect(size: (u32, u32)) -> Option<XChild> {
+        let (conn, _screen) = RustConnection::connect(None).ok()?;
+        Some(XChild {
+            conn,
+            window: 0,
+            gc: 0,
+            parent: 0,
+            shown: false,
+            size,
+            draws: 0,
+        })
+    }
+
+    /// The connection's descriptor (what the host's run loop polls).
+    pub(crate) fn fd(&self) -> RawFd {
+        self.conn.stream().as_raw_fd()
+    }
+
+    pub(crate) fn window(&self) -> u32 {
+        self.window
+    }
+
+    pub(crate) fn parent(&self) -> u32 {
+        self.parent
+    }
+
+    pub(crate) fn draws(&self) -> u32 {
+        self.draws
+    }
+
+    pub(crate) fn shown(&self) -> bool {
+        self.shown
+    }
+
+    /// Creates its window (unmapped) under `parent`, at its size.
+    pub(crate) fn create(&mut self, parent: u32) -> Result<(), &'static str> {
+        if self.window != 0 {
+            return Err("already parented");
+        }
+        let conn = &self.conn;
+        let wid = conn.generate_id().map_err(x_fail)?;
+        let gc = conn.generate_id().map_err(x_fail)?;
+        let (w, h) = self.size;
+        conn.create_window(
+            x11rb::COPY_DEPTH_FROM_PARENT,
+            wid,
+            parent,
+            0,
+            0,
+            w.clamp(1, u32::from(u16::MAX)) as u16,
+            h.clamp(1, u32::from(u16::MAX)) as u16,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            x11rb::COPY_FROM_PARENT,
+            &CreateWindowAux::new()
+                .background_pixel(0)
+                .event_mask(EventMask::EXPOSURE | EventMask::STRUCTURE_NOTIFY),
+        )
+        .map_err(x_fail)?
+        .check()
+        .map_err(|_| "bad parent window")?;
+        conn.create_gc(gc, wid, &CreateGCAux::new().foreground(GUI_COLOR))
+            .map_err(x_fail)?;
+        conn.flush().map_err(x_fail)?;
+        self.window = wid;
+        self.gc = gc;
+        self.parent = parent;
+        Ok(())
+    }
+
+    /// Maps or unmaps its window.
+    pub(crate) fn show(&mut self, show: bool) -> Result<(), &'static str> {
+        if self.window == 0 {
+            return Err("no parent");
+        }
+        if show {
+            self.conn.map_window(self.window).map_err(x_fail)?;
+        } else {
+            self.conn.unmap_window(self.window).map_err(x_fail)?;
+        }
+        self.conn.flush().map_err(x_fail)?;
+        self.shown = show;
+        Ok(())
+    }
+
+    /// Takes `size` (physical pixels), its window too once it has one.
+    pub(crate) fn resize(&mut self, size: (u32, u32)) {
+        if self.window != 0 {
+            let _ = self.conn.configure_window(
+                self.window,
+                &ConfigureWindowAux::new().width(size.0).height(size.1),
+            );
+            let _ = self.conn.flush();
+        }
+        self.size = size;
+    }
+
+    /// Reads every queued X event; true if one asks for a redraw.
+    pub(crate) fn drain(&self) -> bool {
+        let mut redraw = false;
+        while let Ok(Some(ev)) = self.conn.poll_for_event() {
+            redraw |= matches!(ev, Event::Expose(_) | Event::ConfigureNotify(_));
+        }
+        redraw
+    }
+
+    /// Fills the window with [`GUI_COLOR`] (while shown).
+    pub(crate) fn draw(&mut self) {
+        if self.window == 0 || !self.shown {
+            return;
+        }
+        let rect = Rectangle {
+            x: 0,
+            y: 0,
+            width: self.size.0.min(u32::from(u16::MAX)) as u16,
+            height: self.size.1.min(u32::from(u16::MAX)) as u16,
+        };
+        if self
+            .conn
+            .poly_fill_rectangle(self.window, self.gc, &[rect])
+            .is_ok()
+        {
+            self.draws += 1;
+        }
+        let _ = self.conn.flush();
+    }
+}
+
+impl Drop for XChild {
+    /// Frees the window; the connection (and its descriptor) closes after.
+    fn drop(&mut self) {
+        if self.window != 0 {
+            let _ = self.conn.free_gc(self.gc);
+            let _ = self.conn.destroy_window(self.window);
+        }
+        let _ = self.conn.flush();
+    }
+}
+
+/// What the GUI kind's editor holds and has seen (main thread only).
+pub struct Gui {
+    x: Option<XChild>,
+    scale: f64,
+    /// In physical pixels (its window's, once it has one).
     size: (u32, u32),
     timer: Option<u32>,
     fd: Option<RawFd>,
     create_timer: f64,
     create_fd: f64,
     resize_asked: f64,
-    draws: u32,
     timer_calls: u32,
     fd_calls: u32,
 }
@@ -49,11 +203,7 @@ pub struct Gui {
 impl Default for Gui {
     fn default() -> Gui {
         Gui {
-            conn: None,
-            window: 0,
-            gc: 0,
-            parent: 0,
-            shown: false,
+            x: None,
             scale: 0.0,
             size: BASE_SIZE,
             timer: None,
@@ -61,18 +211,13 @@ impl Default for Gui {
             create_timer: -2.0,
             create_fd: -2.0,
             resize_asked: -1.0,
-            draws: 0,
             timer_calls: 0,
             fd_calls: 0,
         }
     }
 }
 
-fn x_err<E>(_: E) -> PluginError {
-    PluginError::Message("X11 request failed")
-}
-
-fn px(points: u32, scale: f64) -> u32 {
+pub(crate) fn px(points: u32, scale: f64) -> u32 {
     (f64::from(points) * scale).round() as u32
 }
 
@@ -85,70 +230,25 @@ impl Gui {
         if self.scale > 0.0 { self.scale } else { 1.0 }
     }
 
-    /// Reads every queued X event; true if one asks for a redraw.
-    fn drain(&mut self) -> bool {
-        let Some(conn) = &self.conn else {
-            return false;
-        };
-        let mut redraw = false;
-        while let Ok(Some(ev)) = conn.poll_for_event() {
-            redraw |= matches!(ev, Event::Expose(_) | Event::ConfigureNotify(_));
-        }
-        redraw
-    }
-
-    /// Fills the window with [`GUI_COLOR`].
-    fn draw(&mut self) {
-        let Some(conn) = &self.conn else {
-            return;
-        };
-        if self.window == 0 || !self.shown {
-            return;
-        }
-        let rect = Rectangle {
-            x: 0,
-            y: 0,
-            width: self.size.0.min(u32::from(u16::MAX)) as u16,
-            height: self.size.1.min(u32::from(u16::MAX)) as u16,
-        };
-        if conn
-            .poly_fill_rectangle(self.window, self.gc, &[rect])
-            .is_ok()
-        {
-            self.draws += 1;
-        }
-        let _ = conn.flush();
-    }
-
-    /// Frees the window and the connection (the descriptor closes with
-    /// it).
-    fn tear_down(&mut self) {
-        if let Some(conn) = self.conn.take() {
-            if self.window != 0 {
-                let _ = conn.free_gc(self.gc);
-                let _ = conn.destroy_window(self.window);
-            }
-            let _ = conn.flush();
-        }
-        self.window = 0;
-        self.gc = 0;
-        self.shown = false;
+    fn window(&self) -> u32 {
+        self.x.as_ref().map_or(0, XChild::window)
     }
 }
 
 impl MainThread<'_> {
     pub(crate) fn gui_readout(&self, id: u32) -> Option<f64> {
         let g = self.gui.borrow();
+        let x = g.x.as_ref();
         Some(match id {
             PARAM_GUI_SCALE => g.scale,
             PARAM_GUI_WIDTH => f64::from(g.size.0),
             PARAM_GUI_HEIGHT => f64::from(g.size.1),
-            PARAM_GUI_OPEN => f64::from(u8::from(g.conn.is_some())),
+            PARAM_GUI_OPEN => f64::from(u8::from(x.is_some())),
             PARAM_GUI_CREATE_TIMER => g.create_timer,
             PARAM_GUI_CREATE_FD => g.create_fd,
-            PARAM_GUI_WINDOW => f64::from(g.window),
-            PARAM_GUI_PARENT => f64::from(g.parent),
-            PARAM_GUI_DRAWS => f64::from(g.draws),
+            PARAM_GUI_WINDOW => f64::from(g.window()),
+            PARAM_GUI_PARENT => f64::from(x.map_or(0, XChild::parent)),
+            PARAM_GUI_DRAWS => f64::from(x.map_or(0, XChild::draws)),
             PARAM_GUI_TIMER_CALLS => f64::from(g.timer_calls),
             PARAM_GUI_FD_CALLS => f64::from(g.fd_calls),
             PARAM_GUI_RESIZE_ASKED => g.resize_asked,
@@ -165,17 +265,16 @@ impl MainThread<'_> {
             return Err(PluginError::Message("embedded X11 only"));
         }
         self.gui_destroy();
-        let (conn, _screen) =
-            RustConnection::connect(None).map_err(|_| PluginError::Message("no X display"))?;
-        let fd = conn.stream().as_raw_fd();
+        let x = XChild::connect(BASE_SIZE).ok_or(PluginError::Message("no X display"))?;
+        let fd = x.fd();
         // Both before the window exists, as DPF and JUCE editors do.
         let timer = self.register_timer(GUI_TIMER_MS);
-        let fd_ok = self.host.get_extension::<HostPosixFd>().is_some_and(|x| {
-            x.register_fd(&self.host, fd, FdFlags::READ | FdFlags::ERROR)
+        let fd_ok = self.host.get_extension::<HostPosixFd>().is_some_and(|ext| {
+            ext.register_fd(&self.host, fd, FdFlags::READ | FdFlags::ERROR)
                 .is_ok()
         });
         *self.gui.borrow_mut() = Gui {
-            conn: Some(conn),
+            x: Some(x),
             timer,
             fd: fd_ok.then_some(fd),
             create_timer: timer.map_or(-1.0, f64::from),
@@ -188,7 +287,9 @@ impl MainThread<'_> {
     pub(crate) fn gui_destroy(&self) {
         let (timer, fd) = {
             let mut g = self.gui.borrow_mut();
-            g.tear_down();
+            // Frees the window and the connection (the descriptor closes
+            // with it).
+            g.x = None;
             (g.timer.take(), g.fd.take())
         };
         if let Some(t) = timer {
@@ -204,11 +305,15 @@ impl MainThread<'_> {
             return Err(PluginError::Message("bad scale"));
         }
         let mut g = self.gui.borrow_mut();
-        if g.window != 0 {
+        if g.window() != 0 {
             return Err(PluginError::Message("already parented"));
         }
         g.scale = scale;
-        g.size = (px(BASE_SIZE.0, scale), px(BASE_SIZE.1, scale));
+        let size = (px(BASE_SIZE.0, scale), px(BASE_SIZE.1, scale));
+        g.size = size;
+        if let Some(x) = &mut g.x {
+            x.resize(size);
+        }
         Ok(())
     }
 
@@ -224,58 +329,17 @@ impl MainThread<'_> {
         let parent = window
             .as_x11_handle()
             .ok_or(PluginError::Message("not an X11 window"))?;
-        let parent = u32::try_from(parent).map_err(x_err)?;
+        let parent =
+            u32::try_from(parent).map_err(|_| PluginError::Message("bad parent window"))?;
         let mut g = self.gui.borrow_mut();
-        let g = &mut *g;
-        let conn = g.conn.as_ref().ok_or(PluginError::Message("not created"))?;
-        if g.window != 0 {
-            return Err(PluginError::Message("already parented"));
-        }
-        let wid = conn.generate_id().map_err(x_err)?;
-        let gc = conn.generate_id().map_err(x_err)?;
-        let (w, h) = g.size;
-        conn.create_window(
-            x11rb::COPY_DEPTH_FROM_PARENT,
-            wid,
-            parent,
-            0,
-            0,
-            w.clamp(1, u32::from(u16::MAX)) as u16,
-            h.clamp(1, u32::from(u16::MAX)) as u16,
-            0,
-            WindowClass::INPUT_OUTPUT,
-            x11rb::COPY_FROM_PARENT,
-            &CreateWindowAux::new()
-                .background_pixel(0)
-                .event_mask(EventMask::EXPOSURE | EventMask::STRUCTURE_NOTIFY),
-        )
-        .map_err(x_err)?
-        .check()
-        .map_err(|_| PluginError::Message("bad parent window"))?;
-        conn.create_gc(gc, wid, &CreateGCAux::new().foreground(GUI_COLOR))
-            .map_err(x_err)?;
-        conn.flush().map_err(x_err)?;
-        g.window = wid;
-        g.gc = gc;
-        g.parent = parent;
-        Ok(())
+        let x = g.x.as_mut().ok_or(PluginError::Message("not created"))?;
+        x.create(parent).map_err(PluginError::Message)
     }
 
     pub(crate) fn gui_show(&self, show: bool) -> Result<(), PluginError> {
         let mut g = self.gui.borrow_mut();
-        let window = g.window;
-        let conn = g.conn.as_ref().ok_or(PluginError::Message("not created"))?;
-        if window == 0 {
-            return Err(PluginError::Message("no parent"));
-        }
-        if show {
-            conn.map_window(window).map_err(x_err)?;
-        } else {
-            conn.unmap_window(window).map_err(x_err)?;
-        }
-        conn.flush().map_err(x_err)?;
-        g.shown = show;
-        Ok(())
+        let x = g.x.as_mut().ok_or(PluginError::Message("not created"))?;
+        x.show(show).map_err(PluginError::Message)
     }
 
     /// The timer: reads events, asks once to grow, redraws.
@@ -286,8 +350,11 @@ impl MainThread<'_> {
                 return;
             }
             g.timer_calls += 1;
-            g.drain();
-            (g.shown && g.resize_asked < 0.0).then(|| {
+            let shown = g.x.as_ref().is_some_and(|x| {
+                x.drain();
+                x.shown()
+            });
+            (shown && g.resize_asked < 0.0).then(|| {
                 let s = g.scale();
                 (g.size.0 + px(GUI_GROW.0, s), g.size.1 + px(GUI_GROW.1, s))
             })
@@ -302,14 +369,15 @@ impl MainThread<'_> {
             g.resize_asked = f64::from(u8::from(ok));
             if ok {
                 // A fixed-size editor takes the size it asked for itself.
-                if let Some(conn) = &g.conn {
-                    let _ = conn
-                        .configure_window(g.window, &ConfigureWindowAux::new().width(w).height(h));
+                if let Some(x) = &mut g.x {
+                    x.resize((w, h));
                 }
                 g.size = (w, h);
             }
         }
-        self.gui.borrow_mut().draw();
+        if let Some(x) = &mut self.gui.borrow_mut().x {
+            x.draw();
+        }
     }
 
     /// The X connection's descriptor: reads the events, redraws on expose.
@@ -319,8 +387,10 @@ impl MainThread<'_> {
             return;
         }
         g.fd_calls += 1;
-        if g.drain() {
-            g.draw();
+        if let Some(x) = &mut g.x {
+            if x.drain() {
+                x.draw();
+            }
         }
     }
 }

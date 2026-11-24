@@ -1,24 +1,28 @@
 //! The main-thread run loop behind CLAP `timer-support` and
-//! `posix-fd-support`. Plug-ins register timers and file descriptors
-//! through their host (`clap::handlers`), each instance into its own
-//! table; the app drives the loop from its main-thread event loop: it waits
-//! until one of [`run_loop_fds`] is ready or a few milliseconds pass, then
-//! calls [`run_loop_tick`], which runs the plug-ins' callbacks. The loop has
-//! no thread of its own, so every callback runs on the main thread.
+//! `posix-fd-support` and the VST3 `Linux::IRunLoop`. Plug-ins register
+//! timers and file descriptors through their host (`clap::handlers`; a
+//! VST3 view through its frame, `vst3::editor`), each instance (each open
+//! VST3 view) into its own table; the app drives the loop from its
+//! main-thread event loop: it waits until one of [`run_loop_fds`] is ready
+//! or a few milliseconds pass, then calls [`run_loop_tick`], which runs the
+//! plug-ins' callbacks. The loop has no thread of its own, so every
+//! callback runs on the main thread.
 //!
 //! The loop belongs to the thread that creates the instances (the main
-//! thread; CLAP instances are not `Send`) and is held thread-locally, so it
-//! needs no lock. Called from any other thread it sees nothing.
+//! thread; CLAP and VST3 instances are not `Send`) and is held
+//! thread-locally, so it needs no lock. Called from any other thread it
+//! sees nothing.
 //!
 //! A tick's work is bounded: each timer fires at most once (a period-0 or
 //! late timer included; missed periods are dropped, not caught up), each
 //! ready descriptor gets at most one callback per instance, and timers
 //! registered during the tick wait for the next one.
 //!
-//! The host offers the two extensions only off macOS for now
-//! (`clap::handlers`): nothing drives the loop there yet. Descriptors exist
-//! only on unix; elsewhere the loop has timers alone and
-//! [`run_loop_tick`] takes no ready list.
+//! The CLAP host offers the two extensions only off macOS for now
+//! (`clap::handlers`), and `Linux::IRunLoop` is a Linux interface: nothing
+//! drives the loop on macOS yet. Descriptors exist only on unix; elsewhere
+//! the loop has timers alone and [`run_loop_tick`] takes no ready list.
+//! [`run_loop_calls`] counts the callbacks made, for tests and diagnostics.
 
 #[cfg(unix)]
 pub use clack_extensions::posix_fd::FdFlags;
@@ -142,9 +146,32 @@ struct Entry {
 }
 
 thread_local! {
+    static CALLS: Cell<RunLoopCalls> = const { Cell::new(RunLoopCalls { timers: 0, fds: 0 }) };
     static LOOP: RefCell<Vec<Entry>> = const { RefCell::new(Vec::new()) };
     static NEXT_KEY: Cell<u64> = const { Cell::new(0) };
     static TICKING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// How many plug-in callbacks this thread's run loop has made.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RunLoopCalls {
+    /// Timer callbacks.
+    pub timers: u64,
+    /// Descriptor callbacks.
+    pub fds: u64,
+}
+
+/// The callbacks this thread's run loop has made so far.
+pub fn run_loop_calls() -> RunLoopCalls {
+    CALLS.try_with(Cell::get).unwrap_or_default()
+}
+
+fn count(f: impl FnOnce(&mut RunLoopCalls)) {
+    let _ = CALLS.try_with(|c| {
+        let mut n = c.get();
+        f(&mut n);
+        c.set(n);
+    });
 }
 
 /// An instance's place in the run loop; dropping it removes the instance
@@ -230,6 +257,7 @@ pub fn run_loop_tick(now: Instant, ready: &[(RawFd, FdFlags)]) {
             };
             let got = *flags & (want | FdFlags::ERROR);
             if !got.is_empty() {
+                count(|c| c.fds += 1);
                 target.on_fd(*fd, got);
             }
         }
@@ -258,6 +286,7 @@ fn tick(now: Instant, mut fds: impl FnMut(&RefCell<Registrations>, &dyn Target))
         for id in &due {
             // An earlier callback may have unregistered it.
             if table.try_borrow().is_ok_and(|t| t.has_timer(*id)) {
+                count(|c| c.timers += 1);
                 target.on_timer(*id);
             }
         }
@@ -341,6 +370,17 @@ mod tests {
         assert_eq!(*fake.timers.borrow(), [ten, zero], "late: once each");
         assert!(table.borrow_mut().unregister_timer(ten));
         assert!(!table.borrow_mut().unregister_timer(ten));
+    }
+
+    #[test]
+    fn callbacks_are_counted() {
+        let (table, _fake, _m) = joined();
+        let before = run_loop_calls();
+        table.borrow_mut().register_timer(0).unwrap();
+        tick(Instant::now());
+        tick(Instant::now());
+        assert_eq!(run_loop_calls().timers, before.timers + 2);
+        assert_eq!(run_loop_calls().fds, before.fds);
     }
 
     #[test]

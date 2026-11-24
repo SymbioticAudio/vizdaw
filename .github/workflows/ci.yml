@@ -71,12 +71,13 @@ jobs:
           # The VST3 host tests load the SDK samples; here a missing one is
           # a failure, not a skip.
           VIZDAW_REQUIRE_VST3_SAMPLES: "1"
-      - name: CLAP X11 editors (Linux, virtual X server)
+      - name: CLAP and VST3 X11 editors (Linux, virtual X server)
         if: runner.os == 'Linux'
         timeout-minutes: 10
         run: |
           unset WAYLAND_DISPLAY
           xvfb-run -a -s "-screen 0 1280x800x24" cargo test -p core-host --test clap_gui_linux -- --nocapture
+          VIZDAW_REQUIRE_DISPLAY=1 VIZDAW_REQUIRE_VST3_SAMPLES=1 xvfb-run -a -s "-screen 0 1280x800x24" cargo test -p core-host --test vst3_gui_linux -- --nocapture
           xvfb-run -a -s "-screen 0 1280x800x24" cargo test -p core-ffi --test editors_main
       - name: GPUI end to end (Linux, virtual X server)
         if: runner.os == 'Linux'
