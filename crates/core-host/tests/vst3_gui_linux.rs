@@ -191,6 +191,13 @@ fn the_test_views_x11_child_is_drawn_through_the_run_loop_and_goes_at_close() {
         "drawn: {:x?}",
         pixel(&conn, win, corner.0, corner.1)
     );
+    // The draw can come through the X descriptor before the timer's
+    // first tick: pump on until the timer has run too.
+    assert!(
+        pump_until(p.as_mut(), || pv.probe.view().timer_calls > 0),
+        "{:?}",
+        pv.probe.view()
+    );
     let v = pv.probe.view();
     assert!(v.draws > 0 && v.timer_calls > 0, "{v:?}");
     // Closed: its window and registrations go.
