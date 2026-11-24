@@ -39,6 +39,9 @@ pub struct IdleNews {
     pub slots_changed: bool,
     /// The media rows changed (a job finished, media went offline).
     pub media_changed: bool,
+    /// New problem lines (a file not moved to the Trash, a failed
+    /// autosave).
+    pub problems: Vec<String>,
 }
 
 /// What the app logic needs from a core session. The real `Session`
@@ -401,6 +404,7 @@ impl DocSession for Session {
             snapshot: u.snapshot,
             slots_changed: u.slots_changed,
             media_changed: u.media_changed,
+            problems: u.problems,
         })
     }
     fn lanes(&self, seq: u64) -> Result<Vec<LaneRow>, VizError> {

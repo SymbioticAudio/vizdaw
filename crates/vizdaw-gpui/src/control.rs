@@ -27,7 +27,13 @@
 //! their recovery answers, `file.open_copy`, the imports, exports,
 //! checks, bounce, project settings, convert and relink, whose job
 //! replies wait for the job's end, and `state.get media|project`.
-//! Everything else answers `unavailable`.
+//! Slice 8a adds recording and step entry: Record, its loop passes,
+//! Record Options (`record.set`), `record.recover` (never the Recovered
+//! Recordings alert), the click, arming, the locators, the marker
+//! chores, `midi.inject` and the `step.*` commands; `state.get
+//! record|input`, step entry and the transport marks in `state.get
+//! editor`, the click in `state.get transport`; `ui.key` finds step
+//! entry's keys while it is on. Everything else answers `unavailable`.
 //!
 //! A `wait` is not answered in the tick it is taken unless it already
 //! holds: it joins a list the pump checks every tick against fresh facts,
@@ -62,7 +68,8 @@ use gpui::{
     MouseUpEvent, PlatformInput, WindowHandle,
 };
 use serde_json::{Value, json};
-use vizdaw_app::commands::{self, APP_COMMANDS, TRANSPORT_COMMANDS};
+use vizdaw_app::commands::{self, APP_COMMANDS, RECORD_COMMANDS, TRANSPORT_COMMANDS};
+use vizdaw_app::step_entry::STEP_COMMANDS;
 use vizdaw_app::{DocId, SaveAction};
 use vizdaw_ffi::control::{
     AlertRow, ControlResult, DetailRow, EditorStateRow, TransportMarksRow, result_json,
@@ -511,6 +518,13 @@ fn answer(command: &Command, cx: &mut App) -> Result<Value, ControlError> {
             let entry = target(window.as_ref(), cx)?;
             file_state(*what, entry.doc, cx)
         }
+        Command::StateGet {
+            target: what @ (StateTarget::Record | StateTarget::Input),
+            window,
+        } => {
+            let entry = target(window.as_ref(), cx)?;
+            record_state(*what, entry.doc, cx)
+        }
         Command::StateGet { target, .. } => Err(not_yet(&format!(
             "state.get {}",
             format!("{target:?}").to_lowercase()
@@ -647,7 +661,15 @@ fn run_command(
             }
             return Ok(ran_json(id, doc, entry, ran.undo, ran.status));
         }
-        _ if TRANSPORT_COMMANDS.contains(&id) => return run_transport(id, args, entry, cx),
+        // Record, step entry and the channel's record commands run as the
+        // transport's: an alert they raise is the call's failure, and the
+        // window reads the transport again (a step moves it).
+        _ if TRANSPORT_COMMANDS.contains(&id)
+            || RECORD_COMMANDS.contains(&id)
+            || STEP_COMMANDS.contains(&id) =>
+        {
+            return run_transport(id, args, entry, cx);
+        }
         // A key (`ui.key`) runs a File command without arguments: it asks
         // for its dialog, which is the answer. One that would start a job
         // or a background read is refused before it starts: nobody waits
@@ -828,9 +850,9 @@ fn document_state(doc: DocId, cx: &App) -> Result<Value, ControlError> {
 
 /// `state.get editor`, in the Swift shape (`ControlResult::Editor`): the
 /// detail, no torn-off windows, the tool, the grid, no exact mode, whether
-/// a drag is open and the status. Step entry (`step: null`) and the
-/// transport marks (no locators, punch points 0, punch and overdub off)
-/// are neutral until their slices.
+/// a drag is open and the status, step entry (`step`, `null` while off
+/// or ended; its position read now) and the transport marks (locators,
+/// punch points, punch and overdub; `transport` on the wire).
 fn editor_state(doc: DocId, cx: &App) -> Result<Value, ControlError> {
     let s = AppState::global(cx);
     let s = s.read(cx);
@@ -850,6 +872,7 @@ fn editor_state(doc: DocId, cx: &App) -> Result<Value, ControlError> {
         }
     });
     let snap = d.layout().snap;
+    let marks = &d.layout().transport;
     Ok(result_json(&ControlResult::Editor {
         doc: doc_id(doc),
         editor: EditorStateRow {
@@ -861,13 +884,13 @@ fn editor_state(doc: DocId, cx: &App) -> Result<Value, ControlError> {
             exact_mode: false,
             gesture: d.gesture_open(),
             status: d.status().map(String::from),
-            step: None,
+            step: d.step_state_row(),
             marks: TransportMarksRow {
-                locators: vec![],
-                punch_in: 0,
-                punch_out: 0,
-                punch: false,
-                overdub: false,
+                locators: marks.locators.to_vec(),
+                punch_in: marks.punch_in,
+                punch_out: marks.punch_out,
+                punch: marks.punch,
+                overdub: marks.overdub,
             },
         },
     }))
@@ -883,14 +906,7 @@ fn mixer_state(target: StateTarget, doc: DocId, cx: &App) -> Result<Value, Contr
     let s = s.read(cx);
     let d = s.store.document(doc).ok_or_else(closed)?;
     let session = d.session();
-    let read = |e: vizdaw_ffi::VizError| {
-        let code = if matches!(e, vizdaw_ffi::VizError::Busy { .. }) {
-            ErrorCode::Busy
-        } else {
-            ErrorCode::Failed
-        };
-        ControlError::new(code, vizdaw_app::alerts::error_message(&e))
-    };
+    let read = read_error;
     let result = match target {
         StateTarget::Mixer => ControlResult::Mixer {
             doc: doc_id(doc),
@@ -961,14 +977,44 @@ fn transport_state(entry: &WindowEntry, cx: &mut App) -> Result<Value, ControlEr
         .transport(doc)
         .ok_or_else(|| ControlError::new(ErrorCode::NoDocument, "the document is closed"))?
         .state();
-    Ok(json!({
-        "doc": doc_id(doc), "playing": t.playing, "seq": t.seq, "tick": t.tick,
-        "position": t.position_bbu, "seconds": t.seconds, "sample_rate": t.sample_rate,
-        "device": t.device, "faults": t.faults, "report": t.report,
-        "rate_mismatch": t.rate_mismatch, "counting_in": t.counting_in,
-        // The metronome click comes with the recording slice.
-        "click": Value::Null,
+    // The Swift shape, the click (`null` until the session says) with it.
+    Ok(result_json(&ControlResult::Transport {
+        doc: doc_id(doc),
+        state: t.clone(),
     }))
+}
+
+/// `state.get record` (what recording is doing, read fresh from the
+/// session, nothing else touched) and `state.get input` (what the input
+/// offers and each channel's peak since the last read). Busy is the
+/// call's `busy`, another refusal its `failed`.
+fn record_state(target: StateTarget, doc: DocId, cx: &App) -> Result<Value, ControlError> {
+    let s = AppState::global(cx);
+    let s = s.read(cx);
+    let d = s.store.document(doc).ok_or_else(closed)?;
+    let session = d.session();
+    let result = match target {
+        StateTarget::Record => ControlResult::Record {
+            doc: doc_id(doc),
+            state: session.record_state().map_err(read_error)?,
+        },
+        _ => ControlResult::InputState {
+            doc: doc_id(doc),
+            info: session.input_info().map_err(read_error)?,
+            levels: session.input_levels().map_err(read_error)?,
+        },
+    };
+    Ok(result_json(&result))
+}
+
+/// A refused session read as the call's error: Busy is `busy`.
+fn read_error(e: vizdaw_ffi::VizError) -> ControlError {
+    let code = if matches!(e, vizdaw_ffi::VizError::Busy { .. }) {
+        ErrorCode::Busy
+    } else {
+        ErrorCode::Failed
+    };
+    ControlError::new(code, vizdaw_app::alerts::error_message(&e))
 }
 
 /// `state.get windows`: the document and Mixer windows, the front
@@ -1200,10 +1246,10 @@ fn key_strokes(
 }
 
 /// Whether a document window's key bindings or key handler run command
-/// `id` (`menus::bindings` binds the document and transport commands; the
-/// window's key handler steps Rewind and Fast Forward).
+/// `id` (`menus::bindings` binds the document, transport and step entry
+/// commands; the window's key handler steps Rewind and Fast Forward).
 fn window_runs(id: &str) -> bool {
-    menus::routed(id) || TRANSPORT_COMMANDS.contains(&id)
+    menus::routed(id) || TRANSPORT_COMMANDS.contains(&id) || STEP_COMMANDS.contains(&id)
 }
 
 /// A command refusal after which the key still goes to the window, as
@@ -1216,8 +1262,10 @@ fn delivers(code: ErrorCode) -> bool {
 }
 
 /// The command stroke `k` runs in `entry`'s window, by the app's keymap
-/// (the one the key bindings are made from). A plain key (no ⌘ or ⌃)
-/// while a text field has the keyboard runs none: it is typed.
+/// (the one the key bindings are made from): step entry's chords first
+/// while it is on (the number row skipped while "reserve number row"
+/// keeps it the locators'), then the global ones. A plain key (no ⌘ or
+/// ⌃) while a text field has the keyboard runs none: it is typed.
 fn bound_command(entry: &WindowEntry, k: &KeyStroke, cx: &App) -> Option<&'static str> {
     let s = AppState::global(cx).read(cx);
     let typing = s
@@ -1227,6 +1275,31 @@ fn bound_command(entry: &WindowEntry, k: &KeyStroke, cx: &App) -> Option<&'stati
     let m = k.modifiers;
     if typing && !m.command && !m.control {
         return None;
+    }
+    let step_entry = s
+        .store
+        .document(entry.doc)
+        .is_some_and(|d| d.step_entry_on());
+    let reserve = s.prefs.reserve_number_row();
+    let mut mods = 0;
+    for (on, bit) in [
+        (m.shift, bindings::SHIFT),
+        (m.control, bindings::CONTROL),
+        (m.option, bindings::OPTION),
+        (m.command, bindings::COMMAND),
+    ] {
+        if on {
+            mods |= bit;
+        }
+    }
+    let chord = Chord::new(k.key_code, mods)?;
+    // As the keyboard: off macOS a ⌃ chord a ⌘ chord owns runs the ⌘ one.
+    let chord = menus::owner(&chord, &s.keymap, cfg!(target_os = "macos")).unwrap_or(chord);
+    let id = s.keymap.lookup(chord, step_entry, reserve);
+    // Step entry's keys win over the List's and the Piano Roll's own
+    // (Delete is Delete Last Step there too, as Swift's key monitor).
+    if step_entry && id.is_some_and(|id| STEP_COMMANDS.contains(&id)) {
+        return id;
     }
     // The List's table, with the keyboard, takes Return (it edits the
     // row's Position) and Delete and Forward Delete (they delete the
@@ -1248,21 +1321,7 @@ fn bound_command(entry: &WindowEntry, k: &KeyStroke, cx: &App) -> Option<&'stati
     if roll && !m.command && !m.control && !m.option && matches!(k.key_code, 51 | 117) {
         return None;
     }
-    let mut mods = 0;
-    for (on, bit) in [
-        (m.shift, bindings::SHIFT),
-        (m.control, bindings::CONTROL),
-        (m.option, bindings::OPTION),
-        (m.command, bindings::COMMAND),
-    ] {
-        if on {
-            mods |= bit;
-        }
-    }
-    let chord = Chord::new(k.key_code, mods)?;
-    // As the keyboard: off macOS a ⌃ chord a ⌘ chord owns runs the ⌘ one.
-    let chord = menus::owner(&chord, &s.keymap, cfg!(target_os = "macos")).unwrap_or(chord);
-    s.keymap.lookup(chord, false, false)
+    id
 }
 
 /// Sends `k` into the window: a key down through GPUI's keystroke
@@ -1431,12 +1490,12 @@ fn not_yet(what: &str) -> ControlError {
     ControlError::new(
         ErrorCode::Unavailable,
         format!(
-            "{what} is not available in the GPUI app yet (slice 7a answers app.new_demo, \
+            "{what} is not available in the GPUI app yet (slice 8a answers app.new_demo, \
              app.open, app.quit, command.run file.new / file.create_demo / \
              file.create_demo_audio / file.open / file.open_copy / file.close / file.save / \
              file.save_as / file.project_settings / file.bounce / file.import_* / file.export_* / \
              file.interchange_report / media.import / media.convert / media.relink / \
-             transport.* (not recording or the click) / ui.set_transport_bar / \
+             transport.* / locator.* / record.* / marker.* / midi.inject / step.* / ui.set_transport_bar / \
              ui.reset_transport_bar / edit.undo / edit.redo / track.* / editors.snap / \
              editors.list / editors.close_detail / editors.insert_event / ui.view_arrange / \
              ui.view_mix / ui.toggle_left / ui.toggle_bottom / ui.toggle_right / ui.pane / \
@@ -1445,7 +1504,7 @@ fn not_yet(what: &str) -> ControlError {
              mixer.set_output / mixer.add_send / mixer.set_send / mixer.remove_send / \
              mixer.remove_bus / mixer.set_colour / mixer.*group* / mixer.*vca* / window.mixer, \
              state.get transport / windows / document / editor / selection / \
-             mixer / layout / automation / media / project, ui.tree, ui.click, ui.key, ui.screenshot and wait)"
+             mixer / layout / automation / media / project / record / input, ui.tree, ui.click, ui.key, ui.screenshot and wait)"
         ),
     )
 }

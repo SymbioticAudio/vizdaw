@@ -57,6 +57,9 @@ pub const POPOVER_OWNER: &str = "record_popover";
 pub const STOP_RECORDING_FIRST: &str = "Stop recording first.";
 /// `record.recover` with nothing to recover.
 pub const NO_RECOVERED: &str = "There are no recovered recordings.";
+/// The core's problem line for a recording left in place by Trash
+/// (`<path>: not moved to the Trash (<why>)`).
+const NOT_TRASHED: &str = ": not moved to the Trash (";
 /// `midi.inject` while another document holds the audio engine.
 pub const INJECT_NO_ENGINE: &str =
     "Play or record first: this document does not hold the audio engine.";
@@ -470,6 +473,17 @@ impl DocumentModel {
         let Some(action) = text_arg(args, "action") else {
             return Err(ControlError::params(id, "missing `action`"));
         };
+        // Exactly one of the two: a misspelt action never means Trash.
+        let import = match action {
+            "import" => true,
+            "trash" => false,
+            _ => {
+                return Err(ControlError::params(
+                    id,
+                    "`action` must be one of import, trash",
+                ));
+            }
+        };
         let found = self.session.recovered_recordings().unwrap_or_default();
         if found.is_empty() {
             return Err(unavailable(NO_RECOVERED));
@@ -477,9 +491,25 @@ impl DocumentModel {
         if self.gesture_open() {
             return Err(unavailable(GESTURE_OPEN));
         }
-        let result = self.session.recover_recordings(action == "import");
+        let result = self.session.recover_recordings(import);
         self.apply_result(result)
-            .map_err(|e| thrown(&e, crate::document::RECOVERY_FAILED))
+            .map_err(|e| thrown(&e, crate::document::RECOVERY_FAILED))?;
+        if import {
+            return Ok(());
+        }
+        // A file the core could not move (no Trash support on this
+        // platform yet) stays where it is, kept for the next open; its
+        // line, which the core leaves for the next idle, is the answer.
+        let (_, problems) = self.take_idle_news();
+        let kept: Vec<String> = problems
+            .into_iter()
+            .filter(|l| l.contains(NOT_TRASHED))
+            .collect();
+        if kept.is_empty() {
+            Ok(())
+        } else {
+            Err(ControlError::new(ErrorCode::Failed, kept.join("\n")))
+        }
     }
 
     /// `midi.inject {port, bytes}`: feeds hex bytes as if `port` sent them.
