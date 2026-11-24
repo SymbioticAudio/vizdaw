@@ -20,6 +20,8 @@
 //!   ([`crate::sheets::import_midi`]).
 //! - Relink Media…: the Relink sheet ([`crate::sheets::relink`]).
 //! - Bounce…: the Bounce sheet ([`crate::sheets::bounce`]).
+//! - Export › MIDI File… and MIDI Clip File…: their sheet
+//!   ([`crate::sheets::export_midi`]).
 //! - Open Co-Producer Copy…: panel #2 in the project's copies folder, then
 //!   the store's `open_copy` (a new untitled project).
 //! - The items whose sheets come later do nothing yet
@@ -31,6 +33,7 @@
 use std::path::PathBuf;
 
 use gpui::{App, Context, Global, Window};
+use vizdaw_app::interchange::ExportKind;
 use vizdaw_app::panels::{self, PanelSpec};
 use vizdaw_ffi::ProjectFormatRow;
 
@@ -42,12 +45,10 @@ use crate::sheet_host::{Sheet, SheetDialog};
 use crate::shell::DocumentWindow;
 
 /// The File items whose sheet or flow lands later; their menu item does
-/// nothing yet: the Export items and the report (slice 7c).
+/// nothing yet: the other Export items and the report (slice 7c).
 pub const LATER: &[&str] = &[
     "file.export_dawproject",
     "file.export_aaf",
-    "file.export_midi",
-    "file.export_midi_clip",
     "file.export_for_daw",
     "file.interchange_report",
 ];
@@ -86,6 +87,10 @@ pub(crate) fn run_in_window(
     match action.id.as_ref() {
         "file.project_settings" => crate::sheets::project_settings::show(view, window, cx),
         "file.bounce" => crate::sheets::bounce::show(view, window, cx),
+        "file.export_midi" => crate::sheets::export_midi::show(ExportKind::Smf, view, window, cx),
+        "file.export_midi_clip" => {
+            crate::sheets::export_midi::show(ExportKind::Clip, view, window, cx)
+        }
         "media.relink" => AppState::global(cx).update(cx, |s, cx| {
             // The presenter shows the sheet once the window is free.
             s.store.with_document(doc, |d, _| d.show_relink());

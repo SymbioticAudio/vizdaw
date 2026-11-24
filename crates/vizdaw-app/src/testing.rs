@@ -317,6 +317,10 @@ struct Files {
     for_daw_check: Option<ForDawCheckRow>,
     midi_info: HashMap<String, MidiFileInfoRow>,
     clip_names: Option<ClipNamesRow>,
+    /// Every MIDI export dry run and clip names question, in order.
+    smf_checks: Vec<SmfExportRequestRow>,
+    clip_checks: Vec<ClipExportRequestRow>,
+    clip_name_requests: Vec<ClipExportRequestRow>,
     snapshots: Vec<SnapshotRow>,
     merge_report: Option<ReportRow>,
     interchange_report: Option<ReportRow>,
@@ -1058,6 +1062,21 @@ impl FakeSession {
     /// What `export_midi_clip_names` answers (default: none).
     pub fn set_clip_names(&self, row: ClipNamesRow) {
         self.st().files.clip_names = Some(row);
+    }
+
+    /// Every `export_midi_check(req)`, in order.
+    pub fn smf_checks(&self) -> Vec<SmfExportRequestRow> {
+        self.st().files.smf_checks.clone()
+    }
+
+    /// Every `export_midi_clip_check(req)`, in order.
+    pub fn clip_checks(&self) -> Vec<ClipExportRequestRow> {
+        self.st().files.clip_checks.clone()
+    }
+
+    /// Every `export_midi_clip_names(req)`, in order.
+    pub fn clip_name_requests(&self) -> Vec<ClipExportRequestRow> {
+        self.st().files.clip_name_requests.clone()
     }
 
     pub fn set_snapshots(&self, rows: Vec<SnapshotRow>) {
@@ -2191,7 +2210,8 @@ impl DocSession for FakeSession {
             JobRequest::ExportMidi(req),
         )
     }
-    fn export_midi_check(&self, _req: SmfExportRequestRow) -> Result<ReportRow, VizError> {
+    fn export_midi_check(&self, req: SmfExportRequestRow) -> Result<ReportRow, VizError> {
+        self.st().files.smf_checks.push(req);
         self.check_report("export_midi_check")
     }
     fn export_midi_clip(&self, req: ClipExportRequestRow) -> Result<u64, VizError> {
@@ -2202,11 +2222,13 @@ impl DocSession for FakeSession {
             JobRequest::ExportMidiClip(req),
         )
     }
-    fn export_midi_clip_check(&self, _req: ClipExportRequestRow) -> Result<ReportRow, VizError> {
+    fn export_midi_clip_check(&self, req: ClipExportRequestRow) -> Result<ReportRow, VizError> {
+        self.st().files.clip_checks.push(req);
         self.check_report("export_midi_clip_check")
     }
-    fn export_midi_clip_names(&self, _req: ClipExportRequestRow) -> Result<ClipNamesRow, VizError> {
+    fn export_midi_clip_names(&self, req: ClipExportRequestRow) -> Result<ClipNamesRow, VizError> {
         let mut s = self.st();
+        s.files.clip_name_requests.push(req);
         Self::read(&mut s, "export_midi_clip_names")?;
         Ok(s.files.clip_names.clone().unwrap_or(ClipNamesRow {
             names: vec![],

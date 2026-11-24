@@ -503,7 +503,10 @@ impl DocumentModel {
                         self.opened_file = false;
                         self.opened_file_end =
                             Some((r.state != JobStateRow::Cancelled).then_some(message));
-                    } else if r.state != JobStateRow::Cancelled {
+                    } else if r.state != JobStateRow::Cancelled
+                        // A MIDI export's failure goes back to its sheet.
+                        && !self.midi_export_job_failed(&r, &message)
+                    {
                         self.alert = Some(AlertItem::new(failure_title(r.kind), message));
                     }
                     self.refresh_after_job();

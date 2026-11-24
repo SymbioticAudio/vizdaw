@@ -2,6 +2,7 @@
 //! each a [`crate::sheet_host::Sheet`].
 
 pub mod bounce;
+pub mod export_midi;
 pub mod import_midi;
 pub mod project_settings;
 pub mod relink;

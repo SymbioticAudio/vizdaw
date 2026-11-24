@@ -89,6 +89,8 @@ pub struct DocumentModel {
     pub(crate) opened_file_end: Option<Option<String>>,
     /// The Import MIDI File sheet, once its read landed (slice 7c).
     pub(crate) midi_import: Option<crate::interchange::MidiImport>,
+    /// The Export MIDI File / MIDI Clip File sheet (slice 7c).
+    pub(crate) midi_export: crate::interchange::MidiExport,
     /// The Recovered Recordings offer.
     recovery: recovery::RecoveryOffer,
     /// The Relink sheet's offer.
@@ -213,6 +215,7 @@ impl DocumentModel {
             opened_file: false,
             opened_file_end: None,
             midi_import: None,
+            midi_export: crate::interchange::MidiExport::default(),
             recovery: recovery::RecoveryOffer::default(),
             relink: crate::relink::RelinkOffer::default(),
             bounce: crate::bounce::Bounce::default(),

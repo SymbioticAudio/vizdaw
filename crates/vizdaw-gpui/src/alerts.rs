@@ -109,7 +109,8 @@ enum Target {
 /// Shows what waits and can show now: the alerts in order, then a
 /// recovery question, then the return prompt, then each project's
 /// Recovered Recordings, then the sheets that show by themselves (Import
-/// MIDI File once its read landed, Relink). Call it outside any update.
+/// MIDI File once its read landed, an export MIDI sheet its failure
+/// brought back, Relink). Call it outside any update.
 pub fn present(cx: &mut App) {
     // The app's own questions (asked by a key or menu) show under the
     // channel too.
@@ -118,6 +119,7 @@ pub fn present(cx: &mut App) {
         // Nothing shows; the Relink offer still forgets items back online.
         crate::sheets::relink::present(cx, |_, _| false);
         crate::sheets::import_midi::present(cx, |_, _| false);
+        crate::sheets::export_midi::present(cx, |_, _| false);
         return;
     }
     let app = AppState::global(cx);
@@ -165,6 +167,7 @@ pub fn present(cx: &mut App) {
     present_recovery(cx);
     // Last: the sheet would hold back what waits for its window.
     crate::sheets::import_midi::present(cx, |w, cx| !busy(Target::Window(w), cx));
+    crate::sheets::export_midi::present(cx, |w, cx| !busy(Target::Window(w), cx));
     crate::sheets::relink::present(cx, |w, cx| !busy(Target::Window(w), cx));
 }
 
