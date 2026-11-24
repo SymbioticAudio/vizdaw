@@ -42,12 +42,19 @@ fn app_path() -> PathBuf {
 
 impl App {
     fn start(home: &std::path::Path, demo: bool) -> App {
+        App::start_with(home, demo, &[])
+    }
+
+    /// As [`App::start`], with `extra` in the app's environment too.
+    fn start_with(home: &std::path::Path, demo: bool, extra: &[(&str, &str)]) -> App {
+        let mut env = vec![("VIZDAW_AUDIO".to_string(), "offline".to_string())];
+        env.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
         let launched = launch(&LaunchOptions {
             app: app_path(),
             home: Some(home.to_path_buf()),
             demo,
             timeout: Duration::from_secs(180),
-            env: vec![("VIZDAW_AUDIO".to_string(), "offline".to_string())],
+            env,
         })
         .unwrap_or_else(|e| panic!("launch: {e}"));
         let client = Client::connect(&launched.socket).unwrap();
@@ -1135,9 +1142,8 @@ fn gpui_g_toggles_snap() {
     app.quit();
 }
 
-// Slice 6a: the mixer over the channel. `midi_mix_reaches_state_get` is
-// not ported: it needs `destination.add_midi` and the MIDI destination
-// strips, which come with slice 6b.
+// Slice 6a: the mixer over the channel. Slice 6b's groups, VCAs, sends,
+// MIDI strips and the left pane's strip follow these.
 
 /// The pane `pane` of main view `main` in a `state.get layout` answer.
 fn layout_pane(layout: &Value, main: &str, pane: &str) -> Value {
@@ -1525,5 +1531,579 @@ fn gpui_new_track_strips_and_the_mixer_window_over_the_channel() {
             .starts_with("Mixer \u{2014} "),
         "{row}"
     );
+    app.quit();
+}
+
+// Slice 6b: mixer routing, groups, VCAs, MIDI strips and the left pane's
+// strip over the channel, on the real core (its undo names included).
+
+/// The strip of `state.get mixer` whose ID is `id`.
+fn strip_by_id(m: &Value, id: u64) -> Value {
+    m["strips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"].as_u64() == Some(id))
+        .unwrap_or_else(|| panic!("no strip {id} in {m}"))
+        .clone()
+}
+
+/// The strip of `state.get mixer` named `name`.
+fn strip_named(m: &Value, name: &str) -> Value {
+    m["strips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == name)
+        .unwrap_or_else(|| panic!("no strip {name:?} in {m}"))
+        .clone()
+}
+
+/// Strip `id`'s fader in dB.
+fn gain_of(m: &Value, id: u64) -> f64 {
+    strip_by_id(m, id)["gain_db"].as_f64().unwrap()
+}
+
+/// `state.get mixer` of window `w`.
+fn mixer_state(app: &mut App, w: &Value) -> Value {
+    app.call("state.get", json!({"target": "mixer", "window": w}))
+}
+
+/// `command.run id params` in window `w`; the answer (`undo`, `status`).
+fn run_in(app: &mut App, w: &Value, id: &str, params: Value) -> Value {
+    app.call(
+        "command.run",
+        json!({"id": id, "params": params, "window": w}),
+    )
+}
+
+/// A list of IDs, sorted (members may come in any order).
+fn sorted_ids(v: &Value) -> Vec<u64> {
+    let mut ids: Vec<u64> = v
+        .as_array()
+        .unwrap_or_else(|| panic!("not a list: {v}"))
+        .iter()
+        .filter_map(Value::as_u64)
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+fn close_to(a: f64, b: f64) -> bool {
+    (a - b).abs() < 1e-3
+}
+
+/// Ported from the groups and VCA parts of
+/// `groups_vcas_and_transport_bar_over_the_channel`, with the undo names
+/// the real core gives each step: a group's members move by one dB as one
+/// step ("Move Group ‹name›", undone and redone whole), `alone` moves one
+/// member only, a renamed group names its moves; a VCA's offset leaves
+/// the faders alone and its fader shows the level in the Mix view.
+/// Not ported: the transport bar's `command:` item (the GPUI bar does not
+/// draw command items yet) and the click settings (`transport.click`,
+/// `set_click_level`, `set_click_mode`: the recording slice).
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_groups_and_vcas_over_the_channel() {
+    let home = temp_home();
+    let (mut app, w) = start_demo(home.path());
+    // The demo has one strip besides Master; a second track gives two.
+    app.call("command.run", json!({"id": "track.new_audio", "window": w}));
+    let m = wait_for_state(&mut app, &w, "mixer", |m| {
+        m["strips"].as_array().unwrap().len() >= 3
+    });
+    let two: Vec<(u64, f64)> = m["strips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["kind_colour"] != "master")
+        .take(2)
+        .map(|s| (s["id"].as_u64().unwrap(), s["gain_db"].as_f64().unwrap()))
+        .collect();
+    assert_eq!(two.len(), 2, "{m}");
+    let (a, b) = (two[0].0, two[1].0);
+    let ids = format!("{a},{b}");
+
+    // A group of both strips: "New Group" (not the menu's "Group").
+    let r = run_in(&mut app, &w, "mixer.new_group", json!({"strips": ids}));
+    assert_eq!(r["undo"], "New Group", "{r}");
+    let m = mixer_state(&mut app, &w);
+    let groups = m["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 1, "{m}");
+    let group = groups[0]["id"].clone();
+    assert_eq!(groups[0]["name"], "Group 1", "{m}");
+    assert_eq!(
+        sorted_ids(&groups[0]["members"]),
+        sorted_ids(&json!([a, b])),
+        "{m}"
+    );
+    for id in [a, b] {
+        assert_eq!(strip_by_id(&m, id)["group"], group, "{m}");
+    }
+
+    // One move moves both by the same dB, one step.
+    let r = run_in(
+        &mut app,
+        &w,
+        "mixer.set_strip",
+        json!({"strip": a, "gain_db": "-3"}),
+    );
+    assert_eq!(r["undo"], "Move Group Group 1", "{r}");
+    let m = mixer_state(&mut app, &w);
+    let d0 = gain_of(&m, a) - two[0].1;
+    let d1 = gain_of(&m, b) - two[1].1;
+    assert!(close_to(gain_of(&m, a), -3.0), "{m}");
+    assert!(close_to(d0, d1), "both moved by {d0} / {d1}: {m}");
+    wait_for_undo(&mut app, &w, "Move Group Group 1");
+    let moved = (gain_of(&m, a), gain_of(&m, b));
+
+    // Undo takes both back at once; Redo moves both again.
+    app.call("command.run", json!({"id": "edit.undo", "window": w}));
+    wait_for_undo(&mut app, &w, "New Group");
+    let m = mixer_state(&mut app, &w);
+    assert!(close_to(gain_of(&m, a), two[0].1), "{m}");
+    assert!(close_to(gain_of(&m, b), two[1].1), "{m}");
+    app.call("command.run", json!({"id": "edit.redo", "window": w}));
+    wait_for_undo(&mut app, &w, "Move Group Group 1");
+    let m = mixer_state(&mut app, &w);
+    assert!(close_to(gain_of(&m, a), moved.0), "{m}");
+    assert!(close_to(gain_of(&m, b), moved.1), "{m}");
+
+    // `alone`: the group does not follow; the step is the command's.
+    let r = run_in(
+        &mut app,
+        &w,
+        "mixer.set_strip",
+        json!({"strip": b, "gain_db": "-10", "alone": true}),
+    );
+    assert_eq!(r["undo"], "Set Strip", "{r}");
+    let m = mixer_state(&mut app, &w);
+    assert!(close_to(gain_of(&m, b), -10.0), "{m}");
+    assert!(close_to(gain_of(&m, a), moved.0), "a stayed: {m}");
+
+    // A renamed group names its moves.
+    let r = run_in(
+        &mut app,
+        &w,
+        "mixer.rename_group",
+        json!({"group": group, "name": "Keys"}),
+    );
+    assert_eq!(r["undo"], "Rename Group", "{r}");
+    let before = mixer_state(&mut app, &w);
+    let r = run_in(
+        &mut app,
+        &w,
+        "mixer.set_strip",
+        json!({"strip": a, "gain_db": "-6"}),
+    );
+    assert_eq!(r["undo"], "Move Group Keys", "{r}");
+    let m = mixer_state(&mut app, &w);
+    let d0 = gain_of(&m, a) - gain_of(&before, a);
+    let d1 = gain_of(&m, b) - gain_of(&before, b);
+    assert!(close_to(d0, -3.0) && close_to(d0, d1), "{d0} / {d1}: {m}");
+
+    // A VCA: the offset shows, the faders stay.
+    let r = run_in(&mut app, &w, "mixer.new_vca", json!({"strips": ids}));
+    assert_eq!(r["undo"], "New VCA", "{r}");
+    let m = mixer_state(&mut app, &w);
+    let vcas = m["vcas"].as_array().unwrap();
+    assert_eq!(vcas.len(), 1, "{m}");
+    let vca = vcas[0]["id"].clone();
+    assert_eq!(
+        sorted_ids(&vcas[0]["members"]),
+        sorted_ids(&json!([a, b])),
+        "{m}"
+    );
+    let r = run_in(
+        &mut app,
+        &w,
+        "mixer.set_vca",
+        json!({"vca": vca, "gain_db": "-6"}),
+    );
+    assert_eq!(r["undo"], "Set VCA", "{r}");
+    let after = mixer_state(&mut app, &w);
+    assert!(
+        close_to(after["vcas"][0]["gain_db"].as_f64().unwrap(), -6.0),
+        "{after}"
+    );
+    for id in [a, b] {
+        let s = strip_by_id(&after, id);
+        assert!(close_to(s["vca_offset_db"].as_f64().unwrap(), -6.0), "{s}");
+        assert_eq!(s["vcas"], json!([vca]), "{s}");
+        assert!(
+            (gain_of(&after, id) - gain_of(&m, id)).abs() < 1e-6,
+            "{after}"
+        );
+    }
+    let r = run_in(
+        &mut app,
+        &w,
+        "mixer.rename_vca",
+        json!({"vca": vca, "name": "Drums"}),
+    );
+    assert_eq!(r["undo"], "Rename VCA", "{r}");
+
+    // The Mix view draws the VCA's fader at its level.
+    app.call("command.run", json!({"id": "ui.view_mix", "window": w}));
+    wait_for_value(&mut app, &w, "Fader of VCA Drums", "\u{2212}6.0 dB");
+    app.call("command.run", json!({"id": "edit.undo", "window": w}));
+    wait_for_undo(&mut app, &w, "Set VCA");
+    wait_for_node(&mut app, &w, "Fader of VCA 1");
+    app.quit();
+}
+
+/// Ported from the New Bus part of `default_eq_and_new_bus_over_the_channel`,
+/// then the send edits on the real core: New Bus from a strip is one step
+/// that takes the bus and its send together (undo and redo), a bus alone
+/// is "Add Bus", the master is refused; `mixer.set_send {index: 1}` edits
+/// the first send (1-based on the channel, 0-based in the FFI), and Add,
+/// Set and Remove Send are each one named step. Not ported: the default
+/// EQ (`plugins.default_eq` and the EQ install need the plug-in
+/// catalogue, a later Plug-in Manager slice).
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_new_bus_and_sends_over_the_channel() {
+    use core_control::ErrorCode;
+    let home = temp_home();
+    let mut app = App::start(home.path(), false);
+    let w = app.command("file.new", json!({}))["window"].clone();
+    wait_for_node(&mut app, &w, "Track Headers");
+    app.call("command.run", json!({"id": "track.new_audio", "window": w}));
+    let m = wait_for_state(&mut app, &w, "mixer", |m| {
+        m["strips"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["kind_colour"] == "channel")
+    });
+    let strips = m["strips"].as_array().unwrap();
+    let audio = strips
+        .iter()
+        .find(|s| s["kind_colour"] == "channel")
+        .unwrap()
+        .clone();
+    let master = strips
+        .iter()
+        .find(|s| s["kind_colour"] == "master")
+        .unwrap_or_else(|| panic!("no master in {m}"))
+        .clone();
+    let buses = |m: &Value| {
+        m["strips"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s["kind_colour"] == "bus")
+            .count()
+    };
+    let buses_before = buses(&m);
+    let audio_id = audio["id"].as_u64().unwrap();
+    let audio_name = audio["name"].as_str().unwrap().to_string();
+    let sends = |m: &Value| strip_by_id(m, audio_id)["sends"].clone();
+
+    // New Bus from the strip: "Bus 1", one step, a send to it.
+    let r = run_in(&mut app, &w, "mixer.new_bus", json!({"strip": audio_id}));
+    assert_eq!(r["status"], "Bus 1", "{r}");
+    assert_eq!(r["undo"], "New Bus", "{r}");
+    let m = mixer_state(&mut app, &w);
+    let bus1 = strip_named(&m, "Bus 1")["id"].clone();
+    assert_eq!(sends(&m).as_array().unwrap().len(), 1, "{m}");
+    assert_eq!(sends(&m)[0]["target"], bus1, "{m}");
+    assert_eq!(sends(&m)[0]["pre_fader"], false, "{m}");
+
+    // One Undo removes the bus and the send; Redo brings both back.
+    app.call("command.run", json!({"id": "edit.undo", "window": w}));
+    let m = mixer_state(&mut app, &w);
+    assert_eq!(buses(&m), buses_before, "the bus is gone: {m}");
+    assert_eq!(sends(&m), json!([]), "the send is gone: {m}");
+    app.call("command.run", json!({"id": "edit.redo", "window": w}));
+    wait_for_undo(&mut app, &w, "New Bus");
+    let m = mixer_state(&mut app, &w);
+    let bus1 = strip_named(&m, "Bus 1")["id"].clone();
+    assert_eq!(sends(&m)[0]["target"], bus1, "the send is back: {m}");
+
+    // Without a strip: a bus with no send, "Bus 2". The master is refused.
+    let r = run_in(&mut app, &w, "mixer.new_bus", json!({}));
+    assert_eq!(r["status"], "Bus 2", "{r}");
+    assert_eq!(r["undo"], "Add Bus", "{r}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "mixer.new_bus", "params": {"strip": master["id"]}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{e:?}");
+    let m = mixer_state(&mut app, &w);
+    let bus2 = strip_named(&m, "Bus 2")["id"].clone();
+    assert_eq!(sends(&m).as_array().unwrap().len(), 1, "{m}");
+
+    // A second send, to Bus 2.
+    let r = run_in(
+        &mut app,
+        &w,
+        "mixer.add_send",
+        json!({"strip": audio_id, "bus": bus2, "level_db": "-3"}),
+    );
+    assert_eq!(r["undo"], "Add Send", "{r}");
+    let m = mixer_state(&mut app, &w);
+    let s = sends(&m);
+    assert_eq!(s.as_array().unwrap().len(), 2, "{m}");
+    assert_eq!((&s[0]["target"], &s[1]["target"]), (&bus1, &bus2), "{m}");
+    assert!(close_to(s[1]["level_db"].as_f64().unwrap(), -3.0), "{m}");
+
+    // `index: 1` is the first send (to Bus 1); the second stays.
+    let r = run_in(
+        &mut app,
+        &w,
+        "mixer.set_send",
+        json!({"strip": audio_id, "index": 1, "level_db": "-6"}),
+    );
+    assert_eq!(r["undo"], "Set Send", "{r}");
+    let m = mixer_state(&mut app, &w);
+    let s = sends(&m);
+    assert_eq!(s[0]["target"], bus1, "{m}");
+    assert!(close_to(s[0]["level_db"].as_f64().unwrap(), -6.0), "{m}");
+    assert!(close_to(s[1]["level_db"].as_f64().unwrap(), -3.0), "{m}");
+    run_in(
+        &mut app,
+        &w,
+        "mixer.set_send",
+        json!({"strip": audio_id, "index": 2, "pre_fader": true}),
+    );
+    let m = mixer_state(&mut app, &w);
+    let s = sends(&m);
+    assert_eq!(
+        (&s[0]["pre_fader"], &s[1]["pre_fader"]),
+        (&json!(false), &json!(true)),
+        "{m}"
+    );
+
+    // Index 0 is refused before it reaches the core; a send the strip
+    // lacks is the core's refusal. Neither changes anything.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "mixer.set_send", "params": {"strip": audio_id, "index": 0, "level_db": "-1"}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{e:?}");
+    app.call_err(
+        "command.run",
+        json!({"id": "mixer.set_send", "params": {"strip": audio_id, "index": 3, "level_db": "-1"}, "window": w}),
+    );
+    assert_eq!(sends(&mixer_state(&mut app, &w)), s, "nothing changed");
+
+    // The Mix view shows both sends' boxes.
+    app.call("command.run", json!({"id": "ui.view_mix", "window": w}));
+    wait_for_node(&mut app, &w, &format!("Send 1 of {audio_name}"));
+    wait_for_node(&mut app, &w, &format!("Send 2 of {audio_name}"));
+
+    // Remove Send 1: Bus 2's send is left; Undo puts Bus 1's back first.
+    let r = run_in(
+        &mut app,
+        &w,
+        "mixer.remove_send",
+        json!({"strip": audio_id, "index": 1}),
+    );
+    assert_eq!(r["undo"], "Remove Send", "{r}");
+    let m = mixer_state(&mut app, &w);
+    let left = sends(&m);
+    assert_eq!(left.as_array().unwrap().len(), 1, "{m}");
+    assert_eq!(left[0]["target"], bus2, "{m}");
+    app.call("command.run", json!({"id": "edit.undo", "window": w}));
+    let m = mixer_state(&mut app, &w);
+    assert_eq!(sends(&m), s, "the send is back where it was: {m}");
+    app.quit();
+}
+
+/// Ported from `midi_mix_reaches_state_get`: `destination.set_midi_mix`
+/// over the channel; the mix shows in `state.get document`'s
+/// destinations, an absent key keeps its value and a null volume or pan
+/// unsets it; one step "Set MIDI Mix"; hostile values change nothing; the
+/// Mix view has the destination's MIDI strip. The Swift test adds the
+/// destination with `destination.add_midi`, which the GPUI channel does
+/// not run yet: the song is written with the destination already in it
+/// (as `records_mpe_as_per_note_expression` writes its own). Offline:
+/// nothing is sent.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_midi_mix_reaches_state_get() {
+    use core_control::ErrorCode;
+    use core_engine::fixtures::Builder;
+    let home = temp_home();
+    let mut app = App::start_with(home.path(), false, &[("VIZDAW_FAKE_SYNTH", "25")]);
+    let mut b = Builder::new();
+    let rack = b.dest("Rack", "Fake Synth", 3).unwrap();
+    b.sequence("Song", "Keys", Some(rack)).unwrap();
+    let path = home.path().join("Rack.vizdaw");
+    core_model::file::save(&b.finish(), &path).unwrap();
+    let w = app.call("app.open", json!({"path": path}))["window"].clone();
+    app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+
+    let dest = |app: &mut App| -> Value {
+        let doc = app.call("state.get", json!({"target": "document", "window": w}));
+        doc["destinations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["name"] == "Rack")
+            .cloned()
+            .unwrap_or_else(|| panic!("no Rack destination: {doc}"))
+    };
+    let d = dest(&mut app);
+    let id = d["id"].clone();
+    assert_eq!(id.as_u64(), Some(rack.0), "{d}");
+    assert_eq!(d["external"], true, "{d}");
+    assert_eq!(
+        (&d["midi_volume"], &d["midi_pan"], &d["midi_mute"]),
+        (&Value::Null, &Value::Null, &json!(false)),
+        "{d}"
+    );
+    let set = |app: &mut App, params: Value| -> Value {
+        let mut p = params;
+        p["dest"] = id.clone();
+        app.call(
+            "command.run",
+            json!({"id": "destination.set_midi_mix", "params": p, "window": w}),
+        )
+    };
+    let r = set(&mut app, json!({"volume": 90, "mute": true}));
+    assert_eq!(r["undo"], "Set MIDI Mix", "{r}");
+    let d = dest(&mut app);
+    assert_eq!(
+        (&d["midi_volume"], &d["midi_pan"], &d["midi_mute"]),
+        (&json!(90), &Value::Null, &json!(true)),
+        "{d}"
+    );
+    // Absent keeps volume and mute; null unsets.
+    set(&mut app, json!({"pan": 20}));
+    let d = dest(&mut app);
+    assert_eq!(
+        (&d["midi_volume"], &d["midi_pan"], &d["midi_mute"]),
+        (&json!(90), &json!(20), &json!(true)),
+        "{d}"
+    );
+    set(&mut app, json!({"volume": null, "mute": false}));
+    let d = dest(&mut app);
+    assert_eq!(
+        (&d["midi_volume"], &d["midi_pan"], &d["midi_mute"]),
+        (&Value::Null, &json!(20), &json!(false)),
+        "{d}"
+    );
+    // Hostile values are refused and change nothing.
+    for params in [
+        json!({"dest": id, "volume": 128}),
+        json!({"dest": id, "pan": "20"}),
+        json!({"dest": id}),
+        json!({"dest": 1_000_000, "volume": 1}),
+    ] {
+        let e = app.call_err(
+            "command.run",
+            json!({"id": "destination.set_midi_mix", "params": params, "window": w}),
+        );
+        assert_eq!(e.code, ErrorCode::InvalidParams, "{params}");
+    }
+    assert_eq!(dest(&mut app)["midi_pan"], 20);
+
+    // The Mix view has Rack's MIDI strip.
+    app.call("command.run", json!({"id": "ui.view_mix", "window": w}));
+    wait_for_node(&mut app, &w, "Fader of Rack");
+    app.quit();
+}
+
+/// The nodes inside the pane group `pane` ("Left Pane": the group, not
+/// the transport bar's toggle of that name), as a flat list.
+fn in_pane(nodes: &Value, pane: &str) -> Option<Value> {
+    let group = find_group(nodes, pane)?;
+    let path = path_of(&group)?.to_owned();
+    let inside = nodes.as_array()?.iter().filter(|n| under(n, &path));
+    Some(Value::Array(inside.cloned().collect()))
+}
+
+/// The labels inside pane `pane` that start with `prefix`.
+fn pane_labels(nodes: &Value, pane: &str, prefix: &str) -> Vec<String> {
+    in_pane(nodes, pane)
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|n| n["label"].as_str())
+        .filter(|l| l.starts_with(prefix))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The left-pane steps (Swift `window_views_and_panes_over_the_channel`'s
+/// defaults and `themes_and_the_strip_over_the_channel` 3b): the arrange
+/// view's left pane shows the Channel Strip view; with nothing focused it
+/// says so and draws no strip; a block clicked over the channel selects
+/// it and its track, and the pane draws that track's strip (the Built-in
+/// Synth's for Chords), one fader; a click on empty canvas clears the
+/// selection and the note is back. The track is focused through its
+/// block because a channel click on a track header row toggles its mute
+/// (Swift accessibility-press parity; real mouse clicks select).
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_the_left_pane_strip_follows_the_focused_track() {
+    const NOTE: &str = "Select a track to see its channel strip.";
+    let home = temp_home();
+    let (mut app, w) = start_demo(home.path());
+    let l = app.call("state.get", json!({"target": "layout", "window": w}));
+    let left = layout_pane(&l, "arrange", "left");
+    assert_eq!(
+        (left["shown"].clone(), left["view"].clone()),
+        (json!(true), json!("strip")),
+        "{l}"
+    );
+    let m = mixer_state(&mut app, &w);
+    let synth = m["strips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["kind_colour"] == "instrument")
+        .and_then(|s| s["name"].as_str())
+        .unwrap_or_else(|| panic!("no instrument strip in {m}"))
+        .to_string();
+
+    // Nothing focused: the note, no strip.
+    wait_in_tree(&mut app, &w, "the left pane's note", |n| {
+        in_pane(n, "Left Pane").and_then(|p| find_node(&p, NOTE))
+    });
+    let tree = app.call("ui.tree", json!({"window": w}));
+    assert!(
+        pane_labels(&tree["nodes"], "Left Pane", "Fader of ").is_empty()
+            && pane_labels(&tree["nodes"], "Left Pane", "Level of ").is_empty(),
+        "no strip in the left pane: {tree}"
+    );
+
+    // The Chords block: its track is focused, the pane draws its strip.
+    let (chords, _) = wait_in_tree(&mut app, &w, "the Chords block", |n| {
+        labelled_like(n, "Block on Chords")
+    });
+    app.call("ui.click", json!({"window": w, "element": chords}));
+    let s = selection(&mut app, &w);
+    assert_eq!(s["lanes"].as_array().unwrap().len(), 1, "{s}");
+    let fader = format!("Fader of {synth}");
+    wait_in_tree(&mut app, &w, "the left pane's strip", |n| {
+        in_pane(n, "Left Pane").and_then(|p| find_node(&p, &fader))
+    });
+    let tree = app.call("ui.tree", json!({"window": w}));
+    assert_eq!(
+        pane_labels(&tree["nodes"], "Left Pane", "Fader of "),
+        std::slice::from_ref(&fader),
+        "one strip: {tree}"
+    );
+    assert!(
+        find_node(&in_pane(&tree["nodes"], "Left Pane").unwrap(), NOTE).is_none(),
+        "no note beside the strip: {tree}"
+    );
+
+    // Empty canvas below the tracks: nothing selected, the note again.
+    let canvas = wait_for_node(&mut app, &w, "Arrangement");
+    let f = &canvas["frame"];
+    let x = f["x"].as_f64().unwrap() + 30.;
+    let y = f["y"].as_f64().unwrap() + f["height"].as_f64().unwrap() - 10.;
+    app.call("ui.click", json!({"window": w, "point": {"x": x, "y": y}}));
+    let s = selection(&mut app, &w);
+    assert!(s["lanes"].as_array().unwrap().is_empty(), "{s}");
+    wait_in_tree(&mut app, &w, "the note back", |n| {
+        let p = in_pane(n, "Left Pane")?;
+        let gone = pane_labels(n, "Left Pane", "Fader of ").is_empty();
+        find_node(&p, NOTE).filter(|_| gone)
+    });
     app.quit();
 }
