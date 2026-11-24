@@ -141,12 +141,13 @@ fn record_needs_a_sequence_and_no_step_entry() {
         Some((ErrorCode::Unavailable, "Select a sequence first.".into()))
     );
     m.select(Some(3));
-    m.set_step_entry_on(true);
+    m.select_track(30, false);
+    m.start_step_entry().unwrap();
     assert_eq!(
         code(m.toggle_record()),
         Some((ErrorCode::Failed, STEP_ENTRY_ON.into()))
     );
-    m.set_step_entry_on(false);
+    m.stop_step_entry();
     f.set_lanes(3, vec![lane_row(30, "Groove", false)]);
     assert_eq!(
         code(m.toggle_record()),
@@ -1235,4 +1236,52 @@ fn record_commands_refuse_extra_params_and_say_when_they_run() {
         assert!(!commands::enabled(id, &m), "{id}");
     }
     assert!(commands::enabled("midi.inject", &m));
+}
+
+/// Task 4 carry (data-loss class): only `import` imports and only `trash`
+/// moves to the Trash; any other text refuses and asks the core nothing.
+#[test]
+fn record_recover_takes_only_import_or_trash() {
+    let (f, mut m) = armed();
+    f.set_recovered_files(vec![vizdaw_ffi::record::RecoveredFileRow {
+        path: "Media/Recorded/a.caf".into(),
+        frames: 10,
+        size_known: false,
+        readable: true,
+    }]);
+    for hostile in ["Import", "TRASH", "", "import ", "delete"] {
+        assert_eq!(
+            fails(run("record.recover", &[("action", text(hostile))], &mut m)),
+            (
+                ErrorCode::InvalidParams,
+                "record.recover: `action` must be one of import, trash".into()
+            ),
+            "{hostile:?}"
+        );
+    }
+    assert_eq!(f.count("recover_recordings(false)"), 0);
+    assert_eq!(f.count("recover_recordings(true)"), 0);
+}
+
+/// A recording the core could not move to the Trash (Linux has no Trash
+/// support yet) stays where it is, and its problem line is the call's
+/// answer, never an alert.
+#[test]
+fn record_recover_trash_answers_what_was_not_moved() {
+    let (f, mut m) = armed();
+    f.set_recovered_files(vec![vizdaw_ffi::record::RecoveredFileRow {
+        path: "Media/Recorded/a.caf".into(),
+        frames: 10,
+        size_known: false,
+        readable: true,
+    }]);
+    let line =
+        "Media/Recorded/a.caf: not moved to the Trash (this platform has no Trash support yet)";
+    f.set_idle_problems(vec![line.into()]);
+    assert_eq!(
+        fails(run("record.recover", &[("action", text("trash"))], &mut m)),
+        (ErrorCode::Failed, line.into())
+    );
+    assert_eq!(f.count("recover_recordings(false)"), 1);
+    assert!(m.alert.is_none() && m.recovery_offer().is_none());
 }

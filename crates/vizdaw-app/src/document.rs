@@ -111,8 +111,8 @@ pub struct DocumentModel {
     recovery: recovery::RecoveryOffer,
     /// Recording: the options, the popover, the last record state.
     pub(crate) record: crate::record::RecordModel,
-    /// Step entry is on: Record is refused.
-    pub(crate) step_entry_on: bool,
+    /// Step entry: its state and target (off: none).
+    pub(crate) step: crate::step_entry::StepEntryModel,
     /// The Relink sheet's offer.
     pub(crate) relink: crate::relink::RelinkOffer,
     /// The Bounce sheet's state (slice 7b Task 6).
@@ -253,7 +253,7 @@ impl DocumentModel {
             midi_export: crate::interchange::MidiExport::default(),
             recovery: recovery::RecoveryOffer::default(),
             record: crate::record::RecordModel::default(),
-            step_entry_on: false,
+            step: crate::step_entry::StepEntryModel::default(),
             relink: crate::relink::RelinkOffer::default(),
             bounce: crate::bounce::Bounce::default(),
             for_daw: crate::for_daw::ForDaw::default(),
@@ -307,6 +307,8 @@ impl DocumentModel {
         }
         self.reset_infos();
         self.refresh_lanes();
+        // Step entry ends the moment its track is gone.
+        self.check_step_target();
         self.after_sync();
     }
 
@@ -333,29 +335,7 @@ impl DocumentModel {
     pub fn idle(&mut self) -> bool {
         let pending = self.gesture_pending() || self.has_pending_note_offs();
         self.tick();
-        let mut arrived = false;
-        if let Ok(news) = self.session.idle() {
-            if news.slots_changed {
-                self.mixer.slots_version += 1;
-                arrived = true;
-            }
-            if let Some(s) = news.snapshot {
-                self.apply(s);
-                arrived = true;
-            }
-            if self
-                .plugin_news
-                .take(news.params_changed, news.editor_resize)
-            {
-                arrived = true;
-            }
-            if news.media_changed {
-                self.media_version += 1;
-                self.refresh_project_info();
-                self.relink_due();
-                arrived = true;
-            }
-        }
+        let (mut arrived, _problems) = self.take_idle_news();
         // The device rate moved (the transport says so first): the
         // banner reads the project info again.
         let mismatch = self.last_transport().rate_mismatch;
@@ -378,6 +358,38 @@ impl DocumentModel {
         pending || arrived
     }
 
+    /// The session's idle news taken in: a snapshot, the slots or the
+    /// media changing. True when something arrived; the new problem
+    /// lines are the caller's (the idle tick has nowhere to show them
+    /// yet).
+    pub(crate) fn take_idle_news(&mut self) -> (bool, Vec<String>) {
+        let mut arrived = false;
+        let Ok(news) = self.session.idle() else {
+            return (false, vec![]);
+        };
+        if news.slots_changed {
+            self.mixer.slots_version += 1;
+            arrived = true;
+        }
+        if let Some(s) = news.snapshot {
+            self.apply(s);
+            arrived = true;
+        }
+        if self
+            .plugin_news
+            .take(news.params_changed, news.editor_resize)
+        {
+            arrived = true;
+        }
+        if news.media_changed {
+            self.media_version += 1;
+            self.refresh_project_info();
+            self.relink_due();
+            arrived = true;
+        }
+        (arrived, news.problems)
+    }
+
     /// The session's live answer; the snapshot's flag can lag. A session
     /// that cannot answer counts as unsaved.
     pub fn has_unsaved_changes(&self) -> bool {
@@ -395,6 +407,8 @@ impl DocumentModel {
         }
         self.selected_seq = seq;
         self.refresh_lanes();
+        // Step entry ends the moment another sequence is shown.
+        self.check_step_target();
     }
 
     /// The selection as the model holds it.

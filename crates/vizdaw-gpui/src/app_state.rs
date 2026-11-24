@@ -86,6 +86,9 @@ pub struct AppState {
     /// bar from them, so a change redraws them all. In memory until
     /// [`crate::run`] opens the launch home's.
     pub prefs: Prefs,
+    /// The keyboard layout id the windows use instead of the platform's
+    /// (tests; `None`: `cx.keyboard_layout().id()`).
+    pub keyboard_layout_override: Option<String>,
     /// Each document's transport, built from that document and only ever
     /// called with it.
     transports: HashMap<DocId, TransportModel>,
@@ -114,12 +117,20 @@ impl AppState {
             store,
             keymap: Keymap::default(),
             prefs: Prefs::in_memory(),
+            keyboard_layout_override: None,
             transports: HashMap::new(),
             windows: Vec::new(),
             next_token: 1,
             last_idle: HashMap::new(),
             plugin_windows: PluginWindows::default(),
         }
+    }
+
+    /// The keyboard layout's id: the override, else the platform's.
+    pub fn keyboard_layout_id(&self, cx: &App) -> String {
+        self.keyboard_layout_override
+            .clone()
+            .unwrap_or_else(|| cx.keyboard_layout().id().to_owned())
     }
 
     /// The app's state; panics before [`crate::install`].

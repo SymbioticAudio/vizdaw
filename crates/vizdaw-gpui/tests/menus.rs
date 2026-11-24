@@ -251,6 +251,26 @@ fn single_keys_are_off_in_text_fields() {
         if b.keystrokes().iter().any(|k| k.modifiers().modified()) {
             continue;
         }
+        // Step entry's keys act only while it is on, and never in a text
+        // field; Delete over the roll and the List too.
+        if b.action().name() == "vizdaw::StepKey" && b.predicate().as_deref() != Some(&want) {
+            let step = [
+                menus::STEP_KEYS.to_owned(),
+                menus::STEP_NUMBER_KEYS.to_owned(),
+                format!(
+                    "StepEntry > {} && !TextInput",
+                    vizdaw_gpui::piano_roll::CONTEXT
+                ),
+                format!(
+                    "StepEntry > {} && !TextInput",
+                    vizdaw_gpui::list_editor::CONTEXT
+                ),
+            ]
+            .map(|c| KeyBindingContextPredicate::parse(&c).unwrap());
+            let p = b.predicate();
+            assert!(step.iter().any(|c| p.as_deref() == Some(c)), "{p:?}");
+            continue;
+        }
         checked += 1;
         assert_eq!(
             b.predicate().as_deref(),
@@ -370,7 +390,14 @@ fn the_transport_menu_lists_every_transport_command() {
             .iter()
             .filter(|b| b.action().partial_eq(&menus::RunCommand::new(id)))
             .count();
-        assert_eq!(n, keymap.chords(id).len(), "{id}");
+        // ⇧`digit` is bound twice: as named and as the platforms deliver
+        // it (the shifted character, `alt-@`).
+        let shifted_digits = keymap
+            .chords(id)
+            .iter()
+            .filter(|c| c.mods & core_control::bindings::SHIFT != 0 && c.number_row())
+            .count();
+        assert_eq!(n, keymap.chords(id).len() + shifted_digits, "{id}");
     }
 }
 

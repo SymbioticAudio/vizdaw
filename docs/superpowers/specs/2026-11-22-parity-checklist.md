@@ -143,7 +143,7 @@ item (false: keys, the Keys settings and the control channel only).
 | transport.play_selection | Transport | Play Selection | ⌥Space | true | S3 | S3 |
 | transport.play_from_selection | Transport | Play from Selection | ⇧Space | true | S3 | S3 |
 | transport.play_from_edit_in | Transport | Play from Edit-In | Y | true | S3 | S3 |
-| transport.record | Transport | Record | R | true | | |
+| transport.record | Transport | Record | R | true | S8a (channel and R; the Record button is 8b) | S8a (channel and R; the Record button is 8b) |
 | transport.scrub | Transport | Scrub | K | true | S3 | S3 |
 | transport.return_to_start | Transport | Return to Start | Return | true | S3 | S3 |
 | transport.rewind | Transport | Rewind | ⇧, | true | S3 (keypad key: gap, see below) | S3 (keypad key: gap) |
@@ -151,37 +151,37 @@ item (false: keys, the Keys settings and the control channel only).
 | transport.previous_marker | Transport | Previous Marker | , | true | S3 | S3 |
 | transport.next_marker | Transport | Next Marker | . | true | S3 | S3 |
 | transport.loop | Transport | Loop | L | true | S3 | S3 |
-| transport.overdub | Transport | Overdub | O | true | | |
-| transport.punch | Transport | Punch | I | true | | |
-| transport.click | Transport | Click |  | true | | |
-| transport.set_click_level | Transport | Click Level |  | false | | |
-| transport.set_click_mode | Transport | Click Mode |  | false | | |
+| transport.overdub | Transport | Overdub | O | true | S8a (the check mark is 8b) | S8a (the check mark is 8b) |
+| transport.punch | Transport | Punch | I | true | S8a (the check mark is 8b) | S8a (the check mark is 8b) |
+| transport.click | Transport | Click |  | true | S8a (the check mark is 8b) | S8a (the check mark is 8b) |
+| transport.set_click_level | Transport | Click Level |  | false | S8a | S8a |
+| transport.set_click_mode | Transport | Click Mode |  | false | S8a | S8a |
 | transport.go_position | Transport | Go to Position Field | P | true | S3 | S3 |
 | transport.go_edit_in | Transport | Go to Edit-In Field | E | true | S3 | S3 |
 | transport.go_punch | Transport | Go to Punch Fields | U | true | | |
-| transport.arm_previous | Transport | Arm Previous Track | ⌥⇧↑ | true | | |
-| transport.arm_next | Transport | Arm Next Track | ⌥⇧↓ | true | | |
-| marker.add | Transport | Add Marker |  | false | | |
-| marker.rename | Transport | Rename Marker |  | false | | |
-| marker.remove | Transport | Remove Marker |  | false | | |
+| transport.arm_previous | Transport | Arm Previous Track | ⌥⇧↑ | true | S8a | S8a |
+| transport.arm_next | Transport | Arm Next Track | ⌥⇧↓ | true | S8a | S8a |
+| marker.add | Transport | Add Marker |  | false | S8a | S8a |
+| marker.rename | Transport | Rename Marker |  | false | S8a | S8a |
+| marker.remove | Transport | Remove Marker |  | false | S8a | S8a |
 
 ### Step
 
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
-| step.entry | Step | Step Entry | T | true | | |
-| step.whole | Step | Whole Note | 1 | true | | |
-| step.half | Step | Half Note | 2 | true | | |
-| step.quarter | Step | Quarter Note | 3 | true | | |
-| step.eighth | Step | Eighth Note | 4 | true | | |
-| step.sixteenth | Step | Sixteenth Note | 5 | true | | |
-| step.thirty_second | Step | Thirty-Second Note | 6 | true | | |
-| step.dot | Step | Dotted | . | true | | |
-| step.triplet | Step | Triplet | / | true | | |
-| step.tie | Step | Tie | = | true | | |
-| step.rest | Step | Rest | 0 | true | | |
-| step.delete_last | Step | Delete Last Step | Delete | true | | |
-| step.notes | Step | Enter Notes |  | false | | |
+| step.entry | Step | Step Entry | T | true | S8a (key and channel; the Step menu is 8b) | S8a (key and channel; the Step menu is 8b) |
+| step.whole | Step | Whole Note | 1 | true | S8a (key and channel; the Step menu is 8b; keypad twin: gap) | S8a (key and channel; the Step menu is 8b; keypad twin: gap) |
+| step.half | Step | Half Note | 2 | true | S8a (key and channel; the Step menu is 8b; keypad twin: gap) | S8a (key and channel; the Step menu is 8b; keypad twin: gap) |
+| step.quarter | Step | Quarter Note | 3 | true | S8a (key and channel; the Step menu is 8b; keypad twin: gap) | S8a (key and channel; the Step menu is 8b; keypad twin: gap) |
+| step.eighth | Step | Eighth Note | 4 | true | S8a (key and channel; the Step menu is 8b; keypad twin: gap) | S8a (key and channel; the Step menu is 8b; keypad twin: gap) |
+| step.sixteenth | Step | Sixteenth Note | 5 | true | S8a (key and channel; the Step menu is 8b; keypad twin: gap) | S8a (key and channel; the Step menu is 8b; keypad twin: gap) |
+| step.thirty_second | Step | Thirty-Second Note | 6 | true | S8a (key and channel; the Step menu is 8b; keypad twin: gap) | S8a (key and channel; the Step menu is 8b; keypad twin: gap) |
+| step.dot | Step | Dotted | . | true | S8a (key and channel; the Step menu is 8b; keypad twin: gap) | S8a (key and channel; the Step menu is 8b; keypad twin: gap) |
+| step.triplet | Step | Triplet | / | true | S8a (key and channel; the Step menu is 8b; keypad twin: gap) | S8a (key and channel; the Step menu is 8b; keypad twin: gap) |
+| step.tie | Step | Tie | = | true | S8a (key and channel; the Step menu is 8b; keypad twin: gap) | S8a (key and channel; the Step menu is 8b; keypad twin: gap) |
+| step.rest | Step | Rest | 0 | true | S8a (key and channel; the Step menu is 8b; keypad twin: gap) | S8a (key and channel; the Step menu is 8b; keypad twin: gap) |
+| step.delete_last | Step | Delete Last Step | Delete | true | S8a (key and channel; the Step menu is 8b) | S8a (key and channel; the Step menu is 8b) |
+| step.notes | Step | Enter Notes |  | false | S8a | S8a |
 
 ### Automation
 
@@ -268,45 +268,45 @@ item (false: keys, the Keys settings and the control channel only).
 
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
-| locator.go_0 | Locators | Go to Locator 0 | 0 | false | | |
-| locator.go_1 | Locators | Go to Locator 1 | 1 | false | | |
-| locator.go_2 | Locators | Go to Locator 2 | 2 | false | | |
-| locator.go_3 | Locators | Go to Locator 3 | 3 | false | | |
-| locator.go_4 | Locators | Go to Locator 4 | 4 | false | | |
-| locator.go_5 | Locators | Go to Locator 5 | 5 | false | | |
-| locator.go_6 | Locators | Go to Locator 6 | 6 | false | | |
-| locator.go_7 | Locators | Go to Locator 7 | 7 | false | | |
-| locator.go_8 | Locators | Go to Locator 8 | 8 | false | | |
-| locator.go_9 | Locators | Go to Locator 9 | 9 | false | | |
-| locator.set_0 | Locators | Set Locator 0 | ⌥0 | false | | |
-| locator.set_1 | Locators | Set Locator 1 | ⌥1 | false | | |
-| locator.set_2 | Locators | Set Locator 2 | ⌥2 | false | | |
-| locator.set_3 | Locators | Set Locator 3 | ⌥3 | false | | |
-| locator.set_4 | Locators | Set Locator 4 | ⌥4 | false | | |
-| locator.set_5 | Locators | Set Locator 5 | ⌥5 | false | | |
-| locator.set_6 | Locators | Set Locator 6 | ⌥6 | false | | |
-| locator.set_7 | Locators | Set Locator 7 | ⌥7 | false | | |
-| locator.set_8 | Locators | Set Locator 8 | ⌥8 | false | | |
-| locator.set_9 | Locators | Set Locator 9 | ⌥9 | false | | |
-| locator.clear_0 | Locators | Clear Locator 0 | ⌥⇧0 | false | | |
-| locator.clear_1 | Locators | Clear Locator 1 | ⌥⇧1 | false | | |
-| locator.clear_2 | Locators | Clear Locator 2 | ⌥⇧2 | false | | |
-| locator.clear_3 | Locators | Clear Locator 3 | ⌥⇧3 | false | | |
-| locator.clear_4 | Locators | Clear Locator 4 | ⌥⇧4 | false | | |
-| locator.clear_5 | Locators | Clear Locator 5 | ⌥⇧5 | false | | |
-| locator.clear_6 | Locators | Clear Locator 6 | ⌥⇧6 | false | | |
-| locator.clear_7 | Locators | Clear Locator 7 | ⌥⇧7 | false | | |
-| locator.clear_8 | Locators | Clear Locator 8 | ⌥⇧8 | false | | |
-| locator.clear_9 | Locators | Clear Locator 9 | ⌥⇧9 | false | | |
+| locator.go_0 | Locators | Go to Locator 0 | 0 | false | S8a | S8a |
+| locator.go_1 | Locators | Go to Locator 1 | 1 | false | S8a | S8a |
+| locator.go_2 | Locators | Go to Locator 2 | 2 | false | S8a | S8a |
+| locator.go_3 | Locators | Go to Locator 3 | 3 | false | S8a | S8a |
+| locator.go_4 | Locators | Go to Locator 4 | 4 | false | S8a | S8a |
+| locator.go_5 | Locators | Go to Locator 5 | 5 | false | S8a | S8a |
+| locator.go_6 | Locators | Go to Locator 6 | 6 | false | S8a | S8a |
+| locator.go_7 | Locators | Go to Locator 7 | 7 | false | S8a | S8a |
+| locator.go_8 | Locators | Go to Locator 8 | 8 | false | S8a | S8a |
+| locator.go_9 | Locators | Go to Locator 9 | 9 | false | S8a | S8a |
+| locator.set_0 | Locators | Set Locator 0 | ⌥0 | false | S8a | S8a |
+| locator.set_1 | Locators | Set Locator 1 | ⌥1 | false | S8a | S8a |
+| locator.set_2 | Locators | Set Locator 2 | ⌥2 | false | S8a | S8a |
+| locator.set_3 | Locators | Set Locator 3 | ⌥3 | false | S8a | S8a |
+| locator.set_4 | Locators | Set Locator 4 | ⌥4 | false | S8a | S8a |
+| locator.set_5 | Locators | Set Locator 5 | ⌥5 | false | S8a | S8a |
+| locator.set_6 | Locators | Set Locator 6 | ⌥6 | false | S8a | S8a |
+| locator.set_7 | Locators | Set Locator 7 | ⌥7 | false | S8a | S8a |
+| locator.set_8 | Locators | Set Locator 8 | ⌥8 | false | S8a | S8a |
+| locator.set_9 | Locators | Set Locator 9 | ⌥9 | false | S8a | S8a |
+| locator.clear_0 | Locators | Clear Locator 0 | ⌥⇧0 | false | S8a (US layout; see gaps) | S8a (US layout; see gaps) |
+| locator.clear_1 | Locators | Clear Locator 1 | ⌥⇧1 | false | S8a (US layout; see gaps) | S8a (US layout; see gaps) |
+| locator.clear_2 | Locators | Clear Locator 2 | ⌥⇧2 | false | S8a (US layout; see gaps) | S8a (US layout; see gaps) |
+| locator.clear_3 | Locators | Clear Locator 3 | ⌥⇧3 | false | S8a (US layout; see gaps) | S8a (US layout; see gaps) |
+| locator.clear_4 | Locators | Clear Locator 4 | ⌥⇧4 | false | S8a (US layout; see gaps) | S8a (US layout; see gaps) |
+| locator.clear_5 | Locators | Clear Locator 5 | ⌥⇧5 | false | S8a (US layout; see gaps) | S8a (US layout; see gaps) |
+| locator.clear_6 | Locators | Clear Locator 6 | ⌥⇧6 | false | S8a (US layout; see gaps) | S8a (US layout; see gaps) |
+| locator.clear_7 | Locators | Clear Locator 7 | ⌥⇧7 | false | S8a (US layout; see gaps) | S8a (US layout; see gaps) |
+| locator.clear_8 | Locators | Clear Locator 8 | ⌥⇧8 | false | S8a (US layout; see gaps) | S8a (US layout; see gaps) |
+| locator.clear_9 | Locators | Clear Locator 9 | ⌥⇧9 | false | S8a (US layout; see gaps) | S8a (US layout; see gaps) |
 
 ### Record
 
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
-| record.keep_pass | Record | Keep Loop Pass |  | false | | |
-| record.discard_pass | Record | Discard Since Last Keep |  | false | | |
-| record.set | Record | Record Options |  | false | | |
-| record.recover | Record | Recover Recordings |  | false | | |
+| record.keep_pass | Record | Keep Loop Pass |  | false | S8a | S8a |
+| record.discard_pass | Record | Discard Since Last Keep |  | false | S8a | S8a |
+| record.set | Record | Record Options |  | false | S8a | S8a |
+| record.recover | Record | Recover Recordings |  | false | S8a | S8a (import; Trash: gap H4) |
 
 ### Media
 
@@ -319,7 +319,7 @@ item (false: keys, the Keys settings and the control channel only).
 
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
-| midi.inject | MIDI | Inject MIDI |  | false | | |
+| midi.inject | MIDI | Inject MIDI |  | false | S8a | S8a |
 
 ### Audio
 
@@ -440,7 +440,7 @@ Maps is opened from two places.
 
 | Alert | Where | Mac | Linux |
 |---|---|---|---|
-| Recovered Recordings | document | | |
+| Recovered Recordings | document | S7b, S8a (`record.recover`; never shown under the channel) | S7b, S8a (Move to Trash: gap H4) |
 | Document alert (its title is set per error) | document | | |
 | Replace question (MIDI import and export) | MidiSheets | | |
 | MIDI Learn alert (title set per error) | MIDI Learn Maps | | |
@@ -542,10 +542,10 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 | demo_play_screenshot_stop | S3, S4 (List step restored) | S3, S4 (List step restored) |
 | click_play_and_press_space | S3 | S3 |
 | drum_grid_paints_and_erases_by_element | | |
-| keys_drive_step_entry_locators_and_bindings | partial S4 (G toggles snap: `gpui_g_toggles_snap`); step entry, locators, bindings later | partial S4 |
+| keys_drive_step_entry_locators_and_bindings | partial S4 (G toggles snap: `gpui_g_toggles_snap`), S8a (step entry and locators: `gpui_keys_drive_step_entry_and_locators`); the bindings file waits for Keys settings | partial S4, S8a |
 | audio_import_plays_and_reports_media | | |
 | regions_normalize_relink_and_trash | | |
-| records_audio_loop_takes_and_midi | | |
+| records_audio_loop_takes_and_midi | S8a (`gpui_records_audio_loop_takes_and_midi`; `record.recover`: `gpui_record_recover_trash_over_the_channel`) | S8a (offline device, fake input; Trash: gap H4) |
 | tracks_the_fake_synth | | |
 | arms_meters_counts_in_and_draws_the_take | | |
 | touch_writes_a_fader_over_the_channel | S6a (mixer parts) | S6a (mixer parts) |
@@ -559,7 +559,7 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 | transport_jumps_readouts_and_fields_over_the_channel | S3 (steps 0–6; step 7 Punch/Record: later slice) | S3 (steps 0–6; step 7 Punch/Record: later slice) |
 | new_project_tracks_over_the_channel | S3 (passed with the screen locked once the channel draws a fresh frame) | S2 |
 | loop_wraps_at_the_end | S3 | S3 |
-| arpeggiates_an_injected_chord_while_recording | | |
+| arpeggiates_an_injected_chord_while_recording | S8a | S8a |
 | midi_mix_reaches_state_get | S6b | S6b |
 | records_mpe_as_per_note_expression | | |
 | midi_files_round_trip_over_the_channel | | |
@@ -595,5 +595,7 @@ unknown.
 | Co-Producer approvals are stored in the Mac Keychain | The Secret Service password store on Linux | |
 | AU inserts in Mac projects | Shown as placeholders that keep their settings (design section 10); no automatic swap | |
 | `ui.screenshot` of a native Wayland window (the GPUI pin has no offscreen render off macOS) | X11 `GetImage` of the window (XWayland, Xvfb); a native Wayland window answers `unavailable` "Screenshots need an X11 window on Linux." until GPUI or the compositor gives a capture | |
-| Keypad − and + as Rewind and Fast Forward keys (GPUI at the pin does not tell keypad keys from main keys; Mac too) | The ⇧, and ⇧. keys and the buttons; the control channel's `keypad_minus`/`keypad_plus` work. Closes when GPUI reports the keypad | |
+| Keypad − and + as Rewind and Fast Forward keys, and step entry's keypad twins (Keypad1–6 note values, Keypad. Dotted, Keypad/ Triplet, Keypad+ Tie, Keypad0 Rest) (GPUI at the pin does not tell keypad keys from main keys; Mac too) | The ⇧, and ⇧. keys and the buttons; the number row and `.`, `/`, `=` for step entry (with "reserve number row" on, the note values and Rest have no key: the Step menu and the channel); the control channel's `keypad_minus`/`keypad_plus` work. Closes when GPUI reports the keypad | |
 | Media import on Linux (only VizDAW CAF files import, with no resampler: `media.import` answers `failed` "… not a VizDAW CAF file" for WAV/AIFF and "… resampling needs the system importer" across rates; the e2e import steps assert those refusals on Linux) | Host track H4: Linux audio import reads WAV/AIFF and other formats (Symphonia) and adds a resampler | |
+| Live audio/MIDI input on Linux (input device list and channel names, duplex PipeWire input, ALSA MIDI input, step entry from a played keyboard) | Host track H3; until then recording on Linux uses the offline device (`VIZDAW_AUDIO=offline`, fake input `VIZDAW_AUDIO_INPUT=fake`) and MIDI by `midi.inject` | |
+| Move to Trash for recovered recordings (`record.recover action: trash`, and Recovered Recordings' Move to Trash) | Host track H4: Linux Trash support. Until then the file stays where it is (kept for the next open) and the call answers `failed` with the problem line `<path>: not moved to the Trash (this platform has no Trash support yet)`; `gpui_record_recover_trash_over_the_channel` asserts it on Linux | |

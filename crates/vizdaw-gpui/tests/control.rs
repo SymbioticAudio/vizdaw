@@ -320,7 +320,7 @@ fn commands_outside_the_slice_are_unavailable(cx: &mut TestAppContext) {
             "command.run",
             json!({"id": "mixer.make_mine", "params": {"strip": 1}}),
         ),
-        ("state.get", json!({"target": "record"})),
+        ("state.get", json!({"target": "surfaces"})),
         (
             "ui.drag",
             json!({"from": {"x": 1, "y": 1}, "to": {"x": 2, "y": 2}}),
@@ -328,7 +328,7 @@ fn commands_outside_the_slice_are_unavailable(cx: &mut TestAppContext) {
     ] {
         let e = call(&s, cx, cmd, params).unwrap_err();
         assert_eq!(e.code, ErrorCode::Unavailable, "{cmd}");
-        assert!(e.message.contains("slice 7a"), "{cmd}: {}", e.message);
+        assert!(e.message.contains("slice 8a"), "{cmd}: {}", e.message);
     }
 }
 
@@ -405,8 +405,8 @@ fn state_get_document_matches_the_swift_fields(cx: &mut TestAppContext) {
             "snap": {"enabled": true, "division": "quarter"}, "exact_mode": false,
             "gesture": false, "status": null, "step": null,
             "transport": {
-                "locators": [], "punch_in": 0, "punch_out": 0, "punch": false,
-                "overdub": false,
+                "locators": [null, null, null, null, null, null, null, null, null, null], "punch_in": 0, "punch_out": 4 * BAR,
+                "punch": false, "overdub": true,
             },
         })
     );
@@ -2225,4 +2225,471 @@ fn new_bus_over_the_channel(cx: &mut TestAppContext) {
     );
     let e = call(&s, cx, "state.get", json!({"target": "mixer"})).unwrap_err();
     assert_eq!(e.code, ErrorCode::Busy);
+}
+
+// Slice 8a: recording and step entry over the channel.
+
+/// The demo with Song (3)'s two tracks armed: Groove an audio input,
+/// Chords a MIDI one.
+fn armed_fake() -> FakeSession {
+    use vizdaw_ffi::edit::LaneInputRow;
+    let f = demo_fake();
+    let mut groove = lane_row(30, "Groove", false);
+    groove.arm = true;
+    groove.input = Some(LaneInputRow::Audio {
+        first: 0,
+        stereo: true,
+        return_of: None,
+    });
+    let mut chords = lane_row(31, "Chords", false);
+    chords.arm = true;
+    chords.input = Some(LaneInputRow::Midi {
+        port: None,
+        channel: None,
+    });
+    f.set_lanes(3, vec![groove, chords]);
+    f
+}
+
+fn run_id(
+    s: &Setup,
+    cx: &mut TestAppContext,
+    id: &str,
+    params: Value,
+) -> Result<Value, ControlError> {
+    call(s, cx, "command.run", json!({"id": id, "params": params}))
+}
+
+fn refusal(r: Result<Value, ControlError>) -> (ErrorCode, String) {
+    let e = r.expect_err("a refusal");
+    (e.code, e.message)
+}
+
+/// No alert anywhere: the windows', the document's.
+fn no_alert(s: &Setup, cx: &mut TestAppContext) {
+    let w = ok(call(s, cx, "state.get", json!({"target": "windows"})));
+    let d = ok(call(s, cx, "state.get", json!({"target": "document"})));
+    assert_eq!(
+        (w["alerts"].clone(), d["alert"].clone()),
+        (json!([]), Value::Null)
+    );
+}
+
+/// Record, its loop passes and Record Options: each id's answer and
+/// refusal kind; `state.get record` follows the pass.
+#[gpui::test]
+fn record_commands_answer_over_the_channel(cx: &mut TestAppContext) {
+    let s = setup(cx, armed_fake());
+    ok(call(&s, cx, "app.new_demo", json!({})));
+    let idle = ok(call(&s, cx, "state.get", json!({"target": "record"})));
+    assert_eq!(idle["recording"], false, "{idle}");
+    assert!(idle.get("doc").is_some(), "{idle}");
+
+    // Record Options: all or nothing.
+    ok(run_id(
+        &s,
+        cx,
+        "record.set",
+        json!({"replace": true, "count_in": 2, "pre_roll": 1, "loop": false}),
+    ));
+    for hostile in [
+        json!({"count_in": 9}),
+        json!({"pre_roll": -1}),
+        json!({"replace": "yes"}),
+        json!({"loudness": 3}),
+    ] {
+        assert_eq!(
+            refusal(run_id(&s, cx, "record.set", hostile.clone())).0,
+            ErrorCode::InvalidParams,
+            "{hostile}"
+        );
+    }
+    // Keep and discard act on loop passes only.
+    assert_eq!(
+        refusal(run_id(&s, cx, "record.keep_pass", json!({}))),
+        (
+            ErrorCode::Unavailable,
+            "Keep and discard act on loop passes while recording.".into()
+        )
+    );
+
+    ok(run_id(&s, cx, "transport.record", json!({})));
+    assert_eq!(s.fake.count("record(3)"), 1);
+    let r = ok(call(&s, cx, "state.get", json!({"target": "record"})));
+    assert_eq!(r["recording"], true, "{r}");
+    assert_eq!(r["spec"]["replace"], true, "{r}");
+    assert_eq!(r["spec"]["count_in"], 2, "{r}");
+    assert_eq!(r["spec"]["pre_roll"], 1, "{r}");
+    // Record Options wait while a pass records.
+    assert_eq!(
+        refusal(run_id(&s, cx, "record.set", json!({"replace": false}))),
+        (ErrorCode::Unavailable, "Stop recording first.".into())
+    );
+    ok(run_id(&s, cx, "transport.record", json!({})));
+    let r = ok(call(&s, cx, "state.get", json!({"target": "record"})));
+    assert_eq!(r["recording"], false, "{r}");
+    no_alert(&s, cx);
+}
+
+/// `record.recover`: nothing to recover is unavailable; Trash answers and
+/// never shows the Recovered Recordings alert; a hostile action is
+/// refused before the core is asked.
+#[gpui::test]
+fn record_recover_answers_without_the_alert(cx: &mut TestAppContext) {
+    let s = setup(cx, armed_fake());
+    ok(call(&s, cx, "app.new_demo", json!({})));
+    assert_eq!(
+        refusal(run_id(
+            &s,
+            cx,
+            "record.recover",
+            json!({"action": "import"})
+        )),
+        (
+            ErrorCode::Unavailable,
+            "There are no recovered recordings.".into()
+        )
+    );
+    let file = vizdaw_ffi::record::RecoveredFileRow {
+        path: "Media/Recorded/a.caf".into(),
+        frames: 10,
+        size_known: false,
+        readable: true,
+    };
+    s.fake.set_recovered_files(vec![file.clone()]);
+    for hostile in [json!({}), json!({"action": "Trash"}), json!({"action": 1})] {
+        assert_eq!(
+            refusal(run_id(&s, cx, "record.recover", hostile.clone())).0,
+            ErrorCode::InvalidParams,
+            "{hostile}"
+        );
+    }
+    assert_eq!(s.fake.count("recover_recordings(false)"), 0);
+    ok(run_id(&s, cx, "record.recover", json!({"action": "trash"})));
+    assert_eq!(s.fake.count("recover_recordings(false)"), 1);
+    no_alert(&s, cx);
+    // A file left in place: its problem line is the answer.
+    s.fake.set_recovered_files(vec![file]);
+    let line =
+        "Media/Recorded/a.caf: not moved to the Trash (this platform has no Trash support yet)";
+    s.fake.set_idle_problems(vec![line.into()]);
+    assert_eq!(
+        refusal(run_id(&s, cx, "record.recover", json!({"action": "trash"}))),
+        (ErrorCode::Failed, line.into())
+    );
+    no_alert(&s, cx);
+}
+
+/// The marker chores and MIDI injection: one undo step each for the
+/// markers; hostile params refused; injection with nothing to take it is
+/// unavailable, bad hex invalid.
+#[gpui::test]
+fn markers_and_midi_inject_over_the_channel(cx: &mut TestAppContext) {
+    let s = setup(cx, armed_fake());
+    ok(call(&s, cx, "app.new_demo", json!({})));
+    let added = ok(run_id(
+        &s,
+        cx,
+        "marker.add",
+        json!({"seq": 3, "tick": BAR, "name": "Verse"}),
+    ));
+    assert_eq!(added["undo"], "Add Marker", "{added}");
+    let renamed = ok(run_id(
+        &s,
+        cx,
+        "marker.rename",
+        json!({"seq": 3, "index": 1, "name": "Chorus"}),
+    ));
+    assert_eq!(renamed["undo"], "Rename Marker", "{renamed}");
+    let removed = ok(run_id(
+        &s,
+        cx,
+        "marker.remove",
+        json!({"seq": 3, "index": 1}),
+    ));
+    assert_eq!(removed["undo"], "Remove Marker", "{removed}");
+    assert_eq!(s.fake.chores_run().len(), 3);
+    for (id, hostile) in [
+        ("marker.add", json!({"seq": 3, "tick": 0, "name": ""})),
+        ("marker.add", json!({"seq": 3, "tick": -1, "name": "A"})),
+        (
+            "marker.add",
+            json!({"seq": 3, "tick": 0, "name": "x".repeat(65)}),
+        ),
+        ("marker.rename", json!({"seq": 3, "index": 0, "name": "A"})),
+        ("marker.remove", json!({"seq": "3", "index": 1})),
+    ] {
+        assert_eq!(
+            refusal(run_id(&s, cx, id, hostile.clone())).0,
+            ErrorCode::InvalidParams,
+            "{id} {hostile}"
+        );
+    }
+    assert_eq!(s.fake.chores_run().len(), 3);
+
+    assert_eq!(
+        refusal(run_id(
+            &s,
+            cx,
+            "midi.inject",
+            json!({"port": "Keys", "bytes": "90 3c 64"})
+        )),
+        (
+            ErrorCode::Unavailable,
+            "Play or record first: this document does not hold the audio engine.".into()
+        )
+    );
+    s.fake.set_inject_taken(true);
+    ok(run_id(
+        &s,
+        cx,
+        "midi.inject",
+        json!({"port": "Keys", "bytes": "90 3c 64"}),
+    ));
+    assert_eq!(
+        s.fake.injected().last(),
+        Some(&("Keys".to_owned(), vec![0x90, 0x3c, 0x64]))
+    );
+    for hostile in [
+        json!({"port": "Keys", "bytes": "9g"}),
+        json!({"port": "Keys", "bytes": "903"}),
+        json!({"port": "Keys"}),
+    ] {
+        assert_eq!(
+            refusal(run_id(&s, cx, "midi.inject", hostile.clone())).0,
+            ErrorCode::InvalidParams,
+            "{hostile}"
+        );
+    }
+    assert_eq!(s.fake.injected().len(), 2);
+    no_alert(&s, cx);
+}
+
+/// The click over the channel: `state.get transport` shows it; a level
+/// out of range ("6") is refused and changes nothing.
+#[gpui::test]
+fn the_click_reaches_state_get_transport(cx: &mut TestAppContext) {
+    use vizdaw_ffi::{ClickModeRow, ClickRow};
+    let fake = armed_fake();
+    fake.set_click_row(ClickRow {
+        on: false,
+        level_db: -6.0,
+        mode: ClickModeRow::PlayAndRecord,
+    });
+    let s = setup(cx, fake);
+    ok(call(&s, cx, "app.new_demo", json!({})));
+    ok(run_id(&s, cx, "transport.click", json!({"on": true})));
+    ok(run_id(
+        &s,
+        cx,
+        "transport.set_click_level",
+        json!({"level_db": "-12"}),
+    ));
+    ok(run_id(
+        &s,
+        cx,
+        "transport.set_click_mode",
+        json!({"mode": "record_only"}),
+    ));
+    let t = ok(call(&s, cx, "state.get", json!({"target": "transport"})));
+    assert_eq!(
+        t["click"],
+        json!({"on": true, "level_db": -12.0, "mode": "record_only"}),
+        "{t}"
+    );
+    let runs = s.fake.clicks_run().len();
+    assert_eq!(
+        refusal(run_id(
+            &s,
+            cx,
+            "transport.set_click_level",
+            json!({"level_db": "6"})
+        ))
+        .0,
+        ErrorCode::InvalidParams
+    );
+    assert_eq!(s.fake.clicks_run().len(), runs);
+    let t = ok(call(&s, cx, "state.get", json!({"target": "transport"})));
+    assert_eq!(t["click"]["level_db"], -12.0, "{t}");
+}
+
+/// `state.get input`: the input's facts and each channel's peak since the
+/// last read.
+#[gpui::test]
+fn state_get_input_reads_the_input(cx: &mut TestAppContext) {
+    let s = setup(cx, armed_fake());
+    ok(call(&s, cx, "app.new_demo", json!({})));
+    s.fake.set_input_levels(vec![0.5, 0.25, 0.0]);
+    let i = ok(call(&s, cx, "state.get", json!({"target": "input"})));
+    assert!(
+        i.get("channels").is_some() && i.get("device").is_some(),
+        "{i}"
+    );
+    assert_eq!(i["levels"], json!([0.5, 0.25, 0.0]), "{i}");
+    let again = ok(call(&s, cx, "state.get", json!({"target": "input"})));
+    assert_eq!(again["levels"], json!([0.0, 0.0, 0.0]), "{again}");
+}
+
+/// Step entry over the channel: `state.get editor` shows it and the
+/// transport marks; `step.notes` enters a chord; a bad pitch list is
+/// refused; each step id answers, and refuses while step entry is off.
+#[gpui::test]
+fn step_entry_and_the_marks_reach_state_get_editor(cx: &mut TestAppContext) {
+    use vizdaw_ffi::step::StepInputRow;
+    let s = setup(cx, armed_fake());
+    ok(call(&s, cx, "app.new_demo", json!({})));
+    let e = ok(call(&s, cx, "state.get", json!({"target": "editor"})));
+    assert_eq!(e["step"], Value::Null, "{e}");
+    // A new document overdubs; the punch is 4 bars from 0.
+    assert_eq!(e["transport"]["overdub"], true, "{e}");
+    assert_eq!(e["transport"]["punch_out"], 4 * BAR, "{e}");
+    assert_eq!(
+        refusal(run_id(&s, cx, "step.eighth", json!({}))),
+        (
+            ErrorCode::Unavailable,
+            "Step entry is off (Step > Step Entry).".into()
+        )
+    );
+    ok(run_id(&s, cx, "transport.fast_forward", json!({})));
+    ok(run_id(&s, cx, "locator.set_2", json!({})));
+    ok(run_id(&s, cx, "transport.punch", json!({"on": true})));
+    let e = ok(call(&s, cx, "state.get", json!({"target": "editor"})));
+    assert_eq!(e["transport"]["locators"][2], BAR, "{e}");
+    assert_eq!(e["transport"]["locators"][1], Value::Null, "{e}");
+    assert_eq!(e["transport"]["punch"], true, "{e}");
+
+    ok(run_id(&s, cx, "step.entry", json!({})));
+    let e = ok(call(&s, cx, "state.get", json!({"target": "editor"})));
+    assert_eq!(e["step"]["seq"], 3, "{e}");
+    assert_eq!(e["step"]["value"], "quarter", "{e}");
+    assert_eq!(e["step"]["tick"], BAR, "{e}");
+    ok(run_id(&s, cx, "step.eighth", json!({})));
+    ok(run_id(&s, cx, "step.dot", json!({})));
+    let e = ok(call(&s, cx, "state.get", json!({"target": "editor"})));
+    assert_eq!(
+        (e["step"]["value"].clone(), e["step"]["dotted"].clone()),
+        (json!("eighth"), json!(true)),
+        "{e}"
+    );
+    let entered = ok(run_id(&s, cx, "step.notes", json!({"pitches": "C4 E4 G4"})));
+    assert_eq!(entered["undo"], "Step Entry", "{entered}");
+    assert!(matches!(
+        s.fake.step_inputs().last(),
+        Some((3, _, StepInputRow::Notes { .. }))
+    ));
+    let e = ok(call(&s, cx, "state.get", json!({"target": "editor"})));
+    assert_eq!(e["step"]["steps"], 1, "{e}");
+    let steps = s.fake.step_inputs().len();
+    assert_eq!(
+        refusal(run_id(&s, cx, "step.notes", json!({"pitches": "C4 H9"}))).0,
+        ErrorCode::Failed
+    );
+    assert_eq!(
+        refusal(run_id(&s, cx, "step.notes", json!({}))).0,
+        ErrorCode::InvalidParams
+    );
+    assert_eq!(s.fake.step_inputs().len(), steps);
+    ok(run_id(&s, cx, "step.entry", json!({"on": false})));
+    let e = ok(call(&s, cx, "state.get", json!({"target": "editor"})));
+    assert_eq!(e["step"], Value::Null, "{e}");
+    no_alert(&s, cx);
+}
+
+/// `ui.key` finds a key's command as the keyboard does: step entry's
+/// chords first while it is on, the number row the locators' while
+/// "reserve number row" is on; Delete is Delete Last Step even with the
+/// Piano Roll's keyboard.
+#[gpui::test]
+fn ui_key_looks_up_step_entry_and_the_reserved_row(cx: &mut TestAppContext) {
+    use vizdaw_ffi::step::{NoteValueRow, StepInputRow};
+    let s = setup(cx, armed_fake());
+    ok(call(&s, cx, "app.new_demo", json!({})));
+    ok(run_id(&s, cx, "transport.fast_forward", json!({})));
+    ok(run_id(&s, cx, "locator.set_2", json!({})));
+    ok(run_id(&s, cx, "transport.return_to_start", json!({})));
+    // Off: 2 goes to locator 2.
+    ok(call(&s, cx, "ui.key", json!({"key": "2"})));
+    assert_eq!(tick_now(&s, cx), BAR);
+    ok(run_id(&s, cx, "transport.return_to_start", json!({})));
+    // T: step entry on; 2 is a half note, not the locator.
+    ok(call(&s, cx, "ui.key", json!({"key": "t"})));
+    let e = ok(call(&s, cx, "state.get", json!({"target": "editor"})));
+    assert_eq!(e["step"]["value"], "quarter", "{e}");
+    ok(call(&s, cx, "ui.key", json!({"key": "2"})));
+    assert_eq!(tick_now(&s, cx), 0);
+    assert_eq!(
+        s.fake.step_inputs().last().map(|i| i.2.clone()),
+        Some(StepInputRow::Value {
+            value: NoteValueRow::Half
+        })
+    );
+    // 0 a rest, Delete takes it back.
+    ok(call(&s, cx, "ui.key", json!({"key": "0"})));
+    assert_eq!(
+        s.fake.step_inputs().last().map(|i| i.2.clone()),
+        Some(StepInputRow::Rest)
+    );
+    ok(call(&s, cx, "ui.key", json!({"key": "delete"})));
+    assert_eq!(
+        s.fake.step_inputs().last().map(|i| i.2.clone()),
+        Some(StepInputRow::DeleteLast)
+    );
+    // Reserved: 2 is the locator's again, step entry still on.
+    cx.update(|cx| {
+        AppState::global(cx).update(cx, |a, _| a.prefs.set_reserve_number_row(true).unwrap());
+    });
+    let steps = s.fake.step_inputs().len();
+    ok(call(&s, cx, "ui.key", json!({"key": "2"})));
+    assert_eq!(tick_now(&s, cx), BAR);
+    assert_eq!(s.fake.step_inputs().len(), steps);
+    // `.` is still Dotted (not on the number row).
+    ok(call(&s, cx, "ui.key", json!({"key": "."})));
+    assert_eq!(
+        s.fake.step_inputs().last().map(|i| i.2.clone()),
+        Some(StepInputRow::Dot)
+    );
+    ok(call(&s, cx, "ui.key", json!({"key": "t"})));
+    let e = ok(call(&s, cx, "state.get", json!({"target": "editor"})));
+    assert_eq!(e["step"], Value::Null, "{e}");
+}
+
+/// During step entry the channel's Delete is Delete Last Step even while
+/// the Piano Roll has the keyboard; Forward Delete still deletes notes.
+#[gpui::test]
+fn channel_delete_is_delete_last_step_over_the_roll(cx: &mut TestAppContext) {
+    use vizdaw_ffi::step::StepInputRow;
+    let s = setup(cx, vizdaw_app::testing::roll_fake());
+    ok(call(&s, cx, "app.new_demo", json!({})));
+    let chords = node_id(&s, cx, "button", "Block on Chords, bar 1, 1 event");
+    ok(call(&s, cx, "ui.click", json!({"element": chords})));
+    ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "editors.piano_roll"}),
+    ));
+    let tree = ok(call(&s, cx, "ui.tree", json!({})));
+    let note = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| {
+            n["role"] == "button"
+                && n["label"]
+                    .as_str()
+                    .is_some_and(|l| l.starts_with("Note E4, bar 1 beat 2"))
+        })
+        .cloned()
+        .unwrap_or_else(|| panic!("no E4 note in {tree}"));
+    ok(call(&s, cx, "ui.click", json!({"element": note["id"]})));
+    ok(run_id(&s, cx, "step.entry", json!({"on": true})));
+    s.fake.clear_calls();
+    ok(call(&s, cx, "ui.key", json!({"key": "delete"})));
+    assert!(s.fake.edits().is_empty(), "{:?}", s.fake.edits());
+    assert_eq!(
+        s.fake.step_inputs().last().map(|i| i.2.clone()),
+        Some(StepInputRow::DeleteLast)
+    );
+    ok(call(&s, cx, "ui.key", json!({"key": "forward_delete"})));
+    assert_eq!(s.fake.edits().len(), 1, "{:?}", s.fake.edits());
 }

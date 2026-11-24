@@ -47,6 +47,9 @@ pub struct IdleNews {
     /// Open editors that asked for a new size (points), the latest per
     /// slot: their windows follow.
     pub editor_resize: Vec<EditorResize>,
+    /// New problem lines (a file not moved to the Trash, a failed
+    /// autosave).
+    pub problems: Vec<String>,
 }
 
 /// What the app logic needs from a core session. The real `Session`
@@ -438,6 +441,7 @@ impl DocSession for Session {
             media_changed: u.media_changed,
             params_changed: u.params_changed,
             editor_resize: u.editor_resize,
+            problems: u.problems,
         })
     }
     fn lanes(&self, seq: u64) -> Result<Vec<LaneRow>, VizError> {

@@ -3264,3 +3264,523 @@ fn gpui_dawproject_merge_over_the_channel() {
     assert_eq!(made["lanes"].as_array().unwrap().len(), tracks, "{made}");
     app.quit();
 }
+
+// Slice 8a: recording and step entry over the channel. The offline
+// device's fake input and `midi.inject`: no hardware, so they run on
+// Linux CI too.
+
+/// Polls `state.get record` until `ok` holds; returns it (copied from
+/// `e2e.rs`).
+fn wait_for_record(app: &mut App, window: &Value, ok: impl Fn(&Value) -> bool) -> Value {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let r = app.call("state.get", json!({"target": "record", "window": window}));
+        if ok(&r) {
+            return r;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "record state within {WAIT_MS} ms: {r}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The track named `name` in `state.get document` (copied from `e2e.rs`).
+fn lane_named(app: &mut App, window: &Value, name: &str) -> Value {
+    let doc = app.call("state.get", json!({"target": "document", "window": window}));
+    doc["lanes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["name"] == name)
+        .unwrap_or_else(|| panic!("no track {name} in {doc}"))
+        .clone()
+}
+
+/// A project of one sequence "Take" at 120 BPM, `bars` bars long: "Keys"
+/// (MIDI from source "Keys" on the built-in synth) and "Mic" (fake input
+/// 1, heard never). Saved at `path`.
+fn record_fixture(path: &std::path::Path, bars: i64) {
+    use core_engine::fixtures::{Builder, Q};
+    use core_model::command::{Command, LaneCmd, RoutingCmd, SequenceCmd};
+    use core_model::ids::AnyId;
+    use core_model::lane::{InputChannels, LaneInput, MonitorMode};
+    use core_model::sequence::SeqLength;
+    use core_model::tempo::{Bpm, TempoMap, TempoPoint};
+    use core_model::time::Tick;
+    let mut b = Builder::new();
+    let synth = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, keys) = b.sequence("Take", "Keys", Some(synth)).unwrap();
+    let mic = b.lane(seq, "Mic", None).unwrap();
+    let r = b
+        .run(Command::Routing(RoutingCmd::AddOutput {
+            name: "Audio 1".into(),
+            reference: "audio:1-2".into(),
+        }))
+        .unwrap();
+    let out = r
+        .created
+        .iter()
+        .find_map(|id| match id {
+            AnyId::Output(o) => Some(*o),
+            _ => None,
+        })
+        .unwrap();
+    for c in [
+        LaneCmd::SetOutput {
+            seq,
+            lane: mic,
+            output: Some(out),
+        },
+        LaneCmd::SetInput {
+            seq,
+            lane: keys,
+            input: Some(LaneInput::Midi {
+                port: Some("Keys".into()),
+                channel: None,
+            }),
+        },
+        LaneCmd::SetInput {
+            seq,
+            lane: mic,
+            input: Some(LaneInput::Audio {
+                channels: InputChannels::Mono(0),
+                return_of: None,
+            }),
+        },
+        LaneCmd::SetMonitor {
+            seq,
+            lane: mic,
+            monitor: MonitorMode::Off,
+        },
+    ] {
+        b.run(Command::Lane(c)).unwrap();
+    }
+    b.run(Command::Sequence(SequenceCmd::SetTempo {
+        seq,
+        tempo: TempoMap::new(vec![TempoPoint {
+            tick: Tick(0),
+            bpm: Bpm::whole(120),
+            ramp: false,
+        }])
+        .unwrap(),
+    }))
+    .unwrap();
+    b.run(Command::Sequence(SequenceCmd::SetLength {
+        seq,
+        length: SeqLength::Locked(Tick(bars * 4 * Q)),
+    }))
+    .unwrap();
+    core_model::file::save(&b.finish(), path).unwrap();
+}
+
+/// Ported from `records_audio_loop_takes_and_midi` (README steps 130, 134
+/// and 137): the offline device's fake input records onto an armed track
+/// as one undo step "Record" with a recorded media item; loop recording
+/// with a keep after pass 1 and a discard after pass 2 leaves two new
+/// takes; MIDI injected into an armed track while recording lands as a
+/// note. No audio device is opened and no microphone permission is
+/// asked.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_records_audio_loop_takes_and_midi() {
+    let home = temp_home();
+    let mut app = App::start_with(home.path(), false, &[("VIZDAW_AUDIO_INPUT", "fake")]);
+    // Four bars at 120 BPM: eight seconds a pass, so a keep or discard
+    // lands in the pass it means even on a loaded machine.
+    let path = home.path().join("Rec.vizdaw");
+    record_fixture(&path, 4);
+    let w = app.call("app.open", json!({"path": path}))["window"].clone();
+    app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+
+    // Audio: arm Mic (none armed: the last track), record to the end.
+    app.command("transport.arm_previous", json!({}));
+    assert_eq!(lane_named(&mut app, &w, "Mic")["arm"], true);
+    app.command(
+        "record.set",
+        json!({"replace": true, "loop": false, "pre_roll": 0}),
+    );
+    app.command("transport.record", json!({}));
+    wait_for_record(&mut app, &w, |r| r["recording"] == true);
+    // The sequence ends after eight seconds: the pass ends by itself.
+    wait_for_record(&mut app, &w, |r| r["recording"] == false);
+    wait_for_undo(&mut app, &w, "Record");
+    let m = app.call("state.get", json!({"target": "media", "window": w}));
+    let item = m["items"][0].clone();
+    assert_eq!(item["origin"], "recorded", "{m}");
+    assert!(
+        item["path"]
+            .as_str()
+            .unwrap()
+            .starts_with("Media/Recorded/Mic "),
+        "{item}"
+    );
+    assert_eq!(
+        (item["offline"].clone(), item["rate"].clone()),
+        (json!(false), json!(48_000))
+    );
+    assert_eq!(lane_named(&mut app, &w, "Mic")["regions"], 1);
+    let input = app.call("state.get", json!({"target": "input", "window": w}));
+    assert_eq!(input["channels"], 3, "{input}");
+
+    // Loop: keep after pass 1, discard after pass 2, stop in pass 3.
+    app.command("record.set", json!({"loop": true, "passes_as_takes": true}));
+    app.command("transport.record", json!({}));
+    wait_for_record(&mut app, &w, |r| r["pass"].as_u64() >= Some(2));
+    app.command("record.keep_pass", json!({}));
+    wait_for_record(&mut app, &w, |r| r["pass"].as_u64() >= Some(3));
+    app.command("record.discard_pass", json!({}));
+    // Only the total: which pass each press lands on is timing.
+    let r = app.call("state.get", json!({"target": "record", "window": w}));
+    assert_eq!(
+        r["kept"].as_u64().unwrap() + r["discarded"].as_u64().unwrap(),
+        2,
+        "{r}"
+    );
+    // Half a second into pass 3, counted from the pass's start.
+    assert_eq!(r["pass"], 3, "{r}");
+    let at = r["pass_start_file_frame"].as_u64().unwrap();
+    wait_for_record(&mut app, &w, |r| r["frames"].as_u64() >= Some(at + 24_000));
+    app.command("transport.record", json!({}));
+    wait_for_record(&mut app, &w, |r| r["recording"] == false);
+    wait_for_undo(&mut app, &w, "Record");
+    let lane = lane_named(&mut app, &w, "Mic");
+    assert_eq!(
+        (lane["takes"].clone(), lane["active_take"].clone()),
+        (json!(3), json!("Take 3")),
+        "{lane}"
+    );
+
+    // MIDI: arm Keys instead, record from the start, play a note in.
+    app.command("record.set", json!({"loop": false}));
+    app.command("transport.arm_previous", json!({}));
+    assert_eq!(lane_named(&mut app, &w, "Keys")["arm"], true);
+    app.command("transport.return_to_start", json!({}));
+    wait_for_tick(&mut app, &w, 0);
+    app.command("transport.record", json!({}));
+    wait_for_record(&mut app, &w, |r| {
+        r["recording"] == true && r["frames"].as_u64() >= Some(2_400)
+    });
+    app.command("midi.inject", json!({"port": "Keys", "bytes": "90 3c 64"}));
+    wait_for_record(&mut app, &w, |r| r["frames"].as_u64() >= Some(9_600));
+    app.command("midi.inject", json!({"port": "Keys", "bytes": "80 3c 00"}));
+    wait_for_record(&mut app, &w, |r| r["recording"] == false);
+    wait_for_undo(&mut app, &w, "Record");
+    assert_eq!(lane_named(&mut app, &w, "Keys")["events"], 1);
+    app.quit();
+}
+
+/// Ported from `arpeggiates_an_injected_chord_while_recording` (spec
+/// §12.3; README 239): a C major chord held for a bar into "Keys" with an
+/// Up arpeggiator at 1/16 records as C, E, G repeating, each on a
+/// sixteenth and half a sixteenth long. Offline device, no MIDI port.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_arpeggiates_an_injected_chord_while_recording() {
+    use core_engine::fixtures::{Builder, Q};
+    use core_model::command::{Command, LaneCmd, SequenceCmd};
+    use core_model::event::EventBody;
+    use core_model::input_fx::{Arp, InputFx, InputFxKind};
+    use core_model::lane::LaneInput;
+    use core_model::sequence::SeqLength;
+    use core_model::time::Tick;
+    let home = temp_home();
+    let mut app = App::start(home.path(), false);
+    let mut b = Builder::new();
+    let synth = b.dest("Synth", "builtin:synth", 0).unwrap();
+    let (seq, keys) = b.sequence("Arp", "Keys", Some(synth)).unwrap();
+    for c in [
+        LaneCmd::SetInput {
+            seq,
+            lane: keys,
+            input: Some(LaneInput::Midi {
+                port: Some("Keys".into()),
+                channel: None,
+            }),
+        },
+        LaneCmd::SetInputFx {
+            seq,
+            lane: keys,
+            chain: vec![InputFx::new(InputFxKind::Arpeggiator(Arp::default()))],
+        },
+        LaneCmd::SetFlags {
+            seq,
+            lane: keys,
+            mute: None,
+            solo: None,
+            arm: Some(true),
+        },
+    ] {
+        b.run(Command::Lane(c)).unwrap();
+    }
+    b.run(Command::Sequence(SequenceCmd::SetLength {
+        seq,
+        length: SeqLength::Locked(Tick(8 * Q)),
+    }))
+    .unwrap();
+    let path = home.path().join("Arp.vizdaw");
+    core_model::file::save(&b.finish(), &path).unwrap();
+    let w = app.call("app.open", json!({"path": path}))["window"].clone();
+    app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+    let lane = lane_named(&mut app, &w, "Keys");
+    assert_eq!(
+        lane["input_fx"][0]["kind"]["arpeggiator"]["rate"]["division"], 16,
+        "{lane}"
+    );
+    assert_eq!(lane["arm"], true, "{lane}");
+    app.command(
+        "record.set",
+        json!({"replace": true, "loop": false, "pre_roll": 0, "count_in": 0}),
+    );
+    app.command("transport.record", json!({}));
+    wait_for_record(&mut app, &w, |r| {
+        r["recording"] == true && r["frames"].as_u64() >= Some(24_000)
+    });
+    app.command(
+        "midi.inject",
+        json!({"port": "Keys", "bytes": "90 3c 64 90 40 64 90 43 64"}),
+    );
+    wait_for_record(&mut app, &w, |r| r["frames"].as_u64() >= Some(24_000 * 5));
+    app.command(
+        "midi.inject",
+        json!({"port": "Keys", "bytes": "80 3c 00 80 40 00 80 43 00"}),
+    );
+    wait_for_record(&mut app, &w, |r| r["recording"] == false);
+    wait_for_undo(&mut app, &w, "Record");
+    let input = app.call("state.get", json!({"target": "input", "window": w}));
+    assert_eq!(input["midi_fx_dropped"], 0, "{input}");
+    app.command("file.save", json!({}));
+    let doc = core_model::file::load(&path).unwrap();
+    let l = doc
+        .sequence(seq)
+        .unwrap()
+        .lanes
+        .iter()
+        .find(|l| l.id == keys)
+        .unwrap();
+    let notes: Vec<(i64, u8, i64)> = l
+        .active()
+        .unwrap()
+        .events
+        .values()
+        .filter_map(|e| match &e.body {
+            EventBody::Note {
+                pitch, duration, ..
+            } => Some((e.tick.0, *pitch, duration.0)),
+            _ => None,
+        })
+        .collect();
+    assert!(notes.len() >= 12, "about a bar of sixteenths: {notes:?}");
+    let first = [60u8, 64, 67]
+        .iter()
+        .position(|p| *p == notes[0].1)
+        .expect("a chord note");
+    for (k, (tick, pitch, duration)) in notes.iter().enumerate() {
+        assert_eq!(*pitch, [60, 64, 67][(first + k) % 3], "{notes:?}");
+        let off = tick % (Q / 4);
+        assert!(
+            off.min(Q / 4 - off) <= 2,
+            "{tick} is off the sixteenths: {notes:?}"
+        );
+        assert!(
+            (duration - Q / 8).abs() <= 2,
+            "{duration} is not half a sixteenth: {notes:?}"
+        );
+    }
+    app.quit();
+}
+
+/// Ported from `keys_drive_step_entry_locators_and_bindings` (README
+/// steps 99–104), the step entry and locator half (the bindings file
+/// waits for Keys settings; G is `gpui_g_toggles_snap`): T on, 4 an
+/// eighth, a typed chord, 0 a rest, Delete takes steps back; P gives the
+/// Position field the keyboard and a typed bar moves there, ⌥2 sets a
+/// locator there, Return goes to the start and 2 jumps to the locator.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_keys_drive_step_entry_and_locators() {
+    use core_engine::fixtures::Builder;
+    const Q: i64 = 15_360;
+    let home = temp_home();
+    let mut app = App::start(home.path(), false);
+    let mut b = Builder::new();
+    let synth = b.dest("Synth", "builtin:synth", 0).unwrap();
+    b.sequence("Tune", "Keys", Some(synth)).unwrap();
+    let path = home.path().join("Tune.vizdaw");
+    core_model::file::save(&b.finish(), &path).unwrap();
+    let window = app.call("app.open", json!({"path": path}))["window"].clone();
+    app.wait(
+        &window,
+        json!({"condition": "documents_at_least", "count": 1}),
+    );
+    let key = |app: &mut App, k: &str, mods: Value| {
+        app.call(
+            "ui.key",
+            json!({"window": window, "key": k, "modifiers": mods}),
+        );
+    };
+
+    // Step entry: T, then 4 for eighths.
+    key(&mut app, "t", json!([]));
+    wait_for_editor(&mut app, &window, "step entry on", |e| {
+        e["step"]["value"] == "quarter"
+    });
+    key(&mut app, "4", json!([]));
+    wait_for_editor(&mut app, &window, "eighths", |e| {
+        e["step"]["value"] == "eighth"
+    });
+    // A chord (MIDI input's stand-in), then a rest: the position moves on.
+    app.call(
+        "command.run",
+        json!({"id": "step.notes", "params": {"pitches": "C4 E4 G4"}, "window": window}),
+    );
+    wait_for_undo(&mut app, &window, "Step Entry");
+    let sel = app.call(
+        "state.get",
+        json!({"target": "selection", "window": window}),
+    );
+    assert_eq!(
+        sel["events"].as_array().unwrap().len(),
+        3,
+        "the chord is selected: {sel}"
+    );
+    wait_for_tick(&mut app, &window, Q / 2);
+    key(&mut app, "0", json!([]));
+    wait_for_editor(&mut app, &window, "a rest", |e| e["step"]["tick"] == Q);
+    // Delete takes the rest back, then the chord.
+    key(&mut app, "delete", json!([]));
+    wait_for_editor(&mut app, &window, "the rest back", |e| {
+        e["step"]["tick"] == Q / 2
+    });
+    key(&mut app, "delete", json!([]));
+    wait_for_undo(&mut app, &window, "Delete Last Step");
+    wait_for_tick(&mut app, &window, 0);
+    key(&mut app, "t", json!([]));
+    wait_for_editor(&mut app, &window, "step entry off", |e| e["step"].is_null());
+
+    // P gives the Position field the keyboard, a typed bar and Return
+    // move there; ⌥2 sets locator 2 there. A short bar keeps Position on
+    // it (the default bar can fold it into » on a small screen).
+    app.call(
+        "command.run",
+        json!({"id": "ui.set_transport_bar", "params": {"items": "cluster,position_field"}}),
+    );
+    wait_for_node(&mut app, &window, "Position");
+    key(&mut app, "p", json!([]));
+    app.call("ui.key", json!({"window": window, "text": "3\n"}));
+    wait_for_tick(&mut app, &window, 8 * Q);
+    key(&mut app, "2", json!(["option"]));
+    wait_for_editor(&mut app, &window, "locator 2", |e| {
+        e["transport"]["locators"][2] == 8 * Q
+    });
+    key(&mut app, "return", json!([]));
+    wait_for_tick(&mut app, &window, 0);
+    key(&mut app, "2", json!([]));
+    wait_for_tick(&mut app, &window, 8 * Q);
+    app.quit();
+}
+
+/// `record.recover` over the channel (slice 8a; Linux gap H4): a take
+/// left in the project's `Media/Recorded` that no region uses is offered
+/// at the next open, without the Recovered Recordings alert while the
+/// channel is on. Trash moves it to the trash folder on macOS (the e2e's
+/// own, never the real Trash); on Linux the file stays and the problem
+/// line is the call's answer.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_record_recover_trash_over_the_channel() {
+    let home = temp_home();
+    let trash = home.path().join("Trash");
+    let trash_env = trash.to_string_lossy().into_owned();
+    let mut env = vec![("VIZDAW_AUDIO_INPUT", "fake")];
+    // macOS: never the real Trash. Linux: no folder, so the platform's
+    // (missing) Trash is what answers.
+    if cfg!(target_os = "macos") {
+        env.push(("VIZDAW_TRASH_DIR", &trash_env));
+    }
+    let mut app = App::start_with(home.path(), false, &env);
+    let path = home.path().join("Left.vizdaw");
+    record_fixture(&path, 1);
+    let w = app.call("app.open", json!({"path": path}))["window"].clone();
+    app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+    let err = app.call_err(
+        "command.run",
+        json!({"id": "record.recover", "params": {"action": "trash"}, "window": w}),
+    );
+    assert_eq!(
+        (err.code, err.message.as_str()),
+        (
+            core_control::ErrorCode::Unavailable,
+            "There are no recovered recordings."
+        )
+    );
+    // One pass to the end (two seconds), saved.
+    app.command("transport.arm_previous", json!({}));
+    app.command(
+        "record.set",
+        json!({"replace": true, "loop": false, "pre_roll": 0, "count_in": 0}),
+    );
+    app.command("transport.record", json!({}));
+    wait_for_record(&mut app, &w, |r| r["recording"] == true);
+    wait_for_record(&mut app, &w, |r| r["recording"] == false);
+    wait_for_undo(&mut app, &w, "Record");
+    app.command("file.save", json!({}));
+    // Quit (closing moves unused media to the trash, and has finished
+    // once the app is gone), leave a second copy of the take that nothing
+    // names, then open the project in a new app.
+    app.quit();
+    let recorded = path.join("Media/Recorded");
+    let take = std::fs::read_dir(&recorded)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|x| x == "caf"))
+        .unwrap_or_else(|| panic!("no take in {}", recorded.display()));
+    let left = recorded.join("Left Behind.caf");
+    std::fs::copy(&take, &left).unwrap();
+    let mut app = App::start_with(home.path(), false, &env);
+    let w = app.call("app.open", json!({"path": path}))["window"].clone();
+    app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+    let r = app.call("state.get", json!({"target": "record", "window": w}));
+    assert_eq!(
+        r["recovered"],
+        json!(["Media/Recorded/Left Behind.caf"]),
+        "{r}"
+    );
+    let shown = app.call("state.get", json!({"target": "windows"}));
+    assert_eq!(
+        shown["alerts"],
+        json!([]),
+        "no alert under the channel: {shown}"
+    );
+    let d = app.call("state.get", json!({"target": "document", "window": w}));
+    assert_eq!(d["alert"], Value::Null, "{d}");
+
+    let answer = app.client.call(
+        "command.run",
+        json!({"id": "record.recover", "params": {"action": "trash"}, "window": w}),
+        Duration::from_millis(WAIT_MS),
+    );
+    if cfg!(target_os = "macos") {
+        answer.unwrap_or_else(|e| panic!("record.recover: {e:?}"));
+        assert!(!left.exists(), "moved out of the project");
+        assert!(
+            trash.join("Left Behind.caf").is_file(),
+            "into the trash folder"
+        );
+    } else {
+        match answer {
+            Err(CallError::Reply(e)) => assert_eq!(
+                e.message,
+                "Media/Recorded/Left Behind.caf: not moved to the Trash (this platform has no \
+                 Trash support yet)"
+            ),
+            other => panic!("expected the problem line, got {other:?}"),
+        }
+        assert!(left.is_file(), "the file stays where it was");
+    }
+    let shown = app.call("state.get", json!({"target": "windows"}));
+    assert_eq!(shown["alerts"], json!([]), "{shown}");
+    app.quit();
+}

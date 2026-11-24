@@ -27,8 +27,9 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable,
     InteractiveElement, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke, MouseButton,
-    ParentElement, PromptLevel, Render, StatefulInteractiveElement, Styled, Subscription, Task,
-    Window, WindowBounds, WindowHandle, WindowOptions, canvas, div, px, rgb, size,
+    ParentElement, PromptLevel, Render, SharedString, StatefulInteractiveElement, Styled,
+    Subscription, Task, Window, WindowBounds, WindowHandle, WindowOptions, canvas, div, px, rgb,
+    size,
 };
 use vizdaw_app::alerts::{AlertItem, error_message};
 use vizdaw_app::commands;
@@ -49,7 +50,7 @@ use crate::frame_stats::{self, FrameStats};
 use crate::list_editor::{ListEditor, ListState};
 use crate::menu_bar::MenuBar;
 use crate::menus::{
-    self, CloseWindow, FileCommand, MixerMenuItem, PlayStop, RunCommand, Save, SaveAs,
+    self, CloseWindow, FileCommand, MixerMenuItem, PlayStop, RunCommand, Save, SaveAs, StepKey,
     StopAndReturn,
 };
 use crate::mixer_view::{self, MixerView};
@@ -99,6 +100,9 @@ pub struct DocumentWindow {
     _hold: Option<Task<()>>,
     /// The transport bar's » menu is open.
     more_open: bool,
+    /// The step key last run whose key has not come up: a key-down for it
+    /// before then is the key repeating.
+    step_key_down: Option<SharedString>,
     /// The pane whose picker menu is open.
     pub(crate) pane_menu: Option<PaneSide>,
     /// A pane divider being dragged.
@@ -307,6 +311,8 @@ impl DocumentWindow {
                     // hold ends where it got to, a held key lands.
                     this.cancel_field(window, cx);
                     this.end_shuttle(cx);
+                    // A step key let go elsewhere still counts as up.
+                    this.step_key_down = None;
                     this.cancel_ruler_drag(cx);
                     this.cancel_pane_drag(cx);
                     // A press whose release may never come is dropped; a
@@ -320,6 +326,14 @@ impl DocumentWindow {
                 }
             }),
         ];
+        // A keyboard layout change redraws the window, whose key context
+        // says whether the layout is a US one.
+        let me = cx.entity().downgrade();
+        subscriptions.push(cx.on_keyboard_layout_change(move |cx| {
+            if let Some(me) = me.upgrade() {
+                me.update(cx, |_, cx| cx.notify());
+            }
+        }));
         let state = app.clone();
         subscriptions.push(cx.on_release(move |this: &mut Self, cx| {
             this._hold = None;
@@ -387,6 +401,7 @@ impl DocumentWindow {
             shuttle: Shuttle::new(),
             _hold: None,
             more_open: false,
+            step_key_down: None,
             pane_menu: None,
             pane_drag: None,
             views_seen,
@@ -580,6 +595,20 @@ impl DocumentWindow {
             _ => {}
         }
         cx.notify();
+    }
+
+    /// A step entry key: runs its command, except that a held key repeats
+    /// only rest, tie and Delete Last Step (Swift `KeyDispatch.repeating`).
+    pub fn step_key(&mut self, action: &StepKey, window: &mut Window, cx: &mut Context<Self>) {
+        if self.step_key_down.as_ref() == Some(&action.id)
+            && !vizdaw_app::step_entry::repeats(&action.id)
+        {
+            return;
+        }
+        self.step_key_down = Some(action.id.clone());
+        self.run_command(&RunCommand::new(action.id.clone()), window, cx);
+        // A step moves the transport: the readouts read it now.
+        self.after_transport(window, cx);
     }
 
     /// A Mixer menu item, on this window's document and its selected
@@ -1048,6 +1077,7 @@ impl DocumentWindow {
 
     /// The held key is up: one landing if it stepped.
     fn key_up(&mut self, event: &KeyUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_key_down = None;
         let k = event.keystroke.key.as_str();
         if matches!(k, "," | "." | "<" | ">") {
             self.with_shuttle(cx, |sh, d| sh.key_up(d));
@@ -1508,11 +1538,25 @@ impl Focusable for DocumentWindow {
 }
 
 impl DocumentWindow {
+    /// The root's key context: step entry on adds [`menus::STEP_CONTEXT`],
+    /// "reserve number row" [`menus::RESERVE_CONTEXT`], a US keyboard
+    /// layout [`menus::US_LAYOUT_CONTEXT`] (read each render; a layout
+    /// change redraws the window).
+    fn key_context(&self, cx: &App) -> String {
+        let s = self.app.read(cx);
+        let step = s
+            .store
+            .document(self.doc)
+            .is_some_and(DocumentModel::step_entry_on);
+        let us = menus::us_layout(&s.keyboard_layout_id(cx));
+        menus::window_context(step, s.prefs.reserve_number_row(), us)
+    }
+
     /// The window's root: its key context, focus, key handlers and
     /// actions, filling the window.
     fn root(&self, cx: &mut Context<Self>) -> gpui::Div {
         div()
-            .key_context(menus::WINDOW_CONTEXT)
+            .key_context(self.key_context(cx).as_str())
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))
             .on_key_up(cx.listener(Self::key_up))
@@ -1523,6 +1567,7 @@ impl DocumentWindow {
                 cx.listener(|this, _, _, cx| this.shuttle_release(false, cx)),
             )
             .on_action(cx.listener(Self::run_command))
+            .on_action(cx.listener(Self::step_key))
             .on_action(cx.listener(Self::run_mixer_item))
             .on_action(cx.listener(Self::play_stop))
             .on_action(cx.listener(Self::stop_and_return))

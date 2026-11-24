@@ -17,6 +17,9 @@ pub const LIST_KEY: &str = "list";
 /// The format File › New makes (Swift "defaultProjectFormat",
 /// `<rate>/<16|24|32f>`).
 pub const DEFAULT_FORMAT_KEY: &str = "defaultProjectFormat";
+/// The number row jumps to locators even during step entry, whose note
+/// values then have only the keypad (Swift "VizDAW.reserveNumberRow").
+pub const RESERVE_NUMBER_ROW_KEY: &str = "reserveNumberRow";
 /// The stored value of the default bar: it follows the default when a
 /// later version changes it.
 const STANDARD: &str = "standard";
@@ -176,6 +179,20 @@ impl Prefs {
             DEFAULT_FORMAT_KEY,
             Value::String(format!("{}/{depth}", f.sample_rate)),
         )
+    }
+
+    /// The number row stays the locators' during step entry (default
+    /// off; a damaged value is off).
+    pub fn reserve_number_row(&self) -> bool {
+        self.map
+            .get(RESERVE_NUMBER_ROW_KEY)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    /// Writes "reserve the number row"; on a failure nothing changes.
+    pub fn set_reserve_number_row(&mut self, on: bool) -> Result<(), String> {
+        self.set_raw(RESERVE_NUMBER_ROW_KEY, Value::Bool(on))
     }
 
     /// Sets `key` and writes; on a failure the old value stays.

@@ -71,3 +71,45 @@
 **Files:** `crates/vizdaw-gpui/src/control.rs` (and `control/` as needed), `crates/vizctl/tests/e2e_gpui.rs` (helpers `wait_for_record`, `lane_named` copied from `e2e.rs:967-1000`), `docs/superpowers/specs/2026-11-22-parity-checklist.md`; tests `crates/vizdaw-gpui/tests/control.rs`.
 **Produces:** every 8a id answered (no `not_yet`); `state.get record` and `state.get input`; `state.get editor` real `step` and `marks`; `state.get transport` `click`; `ui.key` lookup with `step_entry` and the reserve flag (`G/control.rs:1269`); e2e `gpui_records_audio_loop_takes_and_midi`, `gpui_arpeggiates_an_injected_chord_while_recording`, `gpui_keys_drive_step_entry_and_locators` (keys t, 4, 0, delete, p, ⌥2, return, 2 and `step.notes`; the bindings-file part waits for Keys settings); the controller runs Linux over ssh and ticks Mac and Linux for the rows that pass, and adds the two Linux-gaps rows (H3 live input, H4 Trash) and the step keypad twins to the keypad gap row.
 - [ ] Tests (each id's success and refusal kind; hostile params for `record.set`, `record.recover`, `marker.*`, `midi.inject`, `set_click_level` `"6"`; `record.recover` under the channel shows no alert); implement; e2e green on both platforms; commit `gpui: recording and step entry over the control channel`.
+
+## Outcome (2026-11-24)
+
+All six tasks done (commits on `next` from 3652c23b to a5c1b384). Every recording, step-entry, click, record-arm, punch, overdub, locator and marker command works from the keyboard and the control channel in the GPUI app on the Swift model; `G/control.rs` answers `not_yet` for no slice 8 id. Evidence: vizdaw-app 1005 and vizdaw-gpui 547 green on the Mac at the end, app+gpui 1551/1551 on Linux; GPUI e2e 32/32 on the Mac (the three ports plus `gpui_record_recover_trash_over_the_channel`); the Linux e2e runs in CI (the test box has no X server). Final whole-branch review: ready, no Critical/Important.
+
+**Not yet seen on screen or on a real device:** ⌥⇧digit (Clear Locator) on a US Mac (`alt-@` aliases, US layouts only; other layouts have no key), and every view (8b).
+
+### Rulings
+
+- Task 1: Ruling: audio_input_channels / midi_source_ports left off the seam — not in the brief; the input picker is 8c, which adds them — cost: 8c adds two seam calls
+- Task 1: Ruling (implementer, accepted): step_state_new/step_parse_pitches/audio_settings are CoreCalls default methods — cost: the fake core can't script audio_settings
+- Task 2: Ruling (implementer, accepted): a field key with no item holding its field anywhere answers "The window shows no transport fields." (controller ruling, Swift opens » at a made view) — cost: one variant if Swift's case is wanted
+- Task 3: Ruling: reviewer Minor 'close prompt offers Don't Save while a save is owed' re-graded Important (data loss: the take the user saved is dropped) — fix round 1 to the implementer; Swift sheetText(savePending:)
+- Task 3: Ruling (implementer, accepted): RecordDefaults (Swift 0/0/false) since AudioSettingsRow lacks count-in/pre-roll/MIDI-passes — Settings slice calls apply_record_defaults — cost: preferences ignored until then
+- Task 4: Ruling (implementer, accepted): record.recover with no action refuses (registry wording) instead of Swift's quiet Trash — safer; cost: a string differs from Swift
+- Task 5: Rulings (implementer, accepted): repeat inferred without GPUI's repeat flag (lost key-up swallows one press); Delete = Delete Last Step while step entry is on even in Piano Roll/List (Swift parity); keypad twins unbound
+- Task 6: Rulings (implementer, accepted): Trash that moved nothing answers failed (core already cleared the offer; file kept); record.recover reads idle news itself (IdleNews.problems added; other lines that tick dropped as before)
+- Final: Ruling: Stop finishing a pass can block the UI thread up to 2 s (FINISH_WAIT) — stands: Swift parity and the existing Play/Stop pattern; the engine stops at once, only the take's finish waits — cost: a hitch at Stop after long passes
+- Final: Ruling: file.close over the channel keeps a save made during recording — stands: the safer reading (no take lost) — cost: a channel close may save when Swift would not
+- Final: Ruling: a step key in the same frame as T uses the old key context — stands: not humanly reachable; the channel reads the model — cost: none in practice
+- Final: Ruling: transport.go_punch answers "The window shows no transport fields." until 8b draws the punch item — by plan
+
+### Carried
+
+- Task 2: carry to Task 5: GPUI test must press 2, ⌥2 and ⌥⇧2 (locator go/set/clear) with step entry off — reviewer could not verify GPUI dispatch of locator keys (⌥⇧digit on macOS unproven)
+- Task 2: carry to 8b: Overdub/Punch menu check marks; punch label widths placeholders
+- Task 3: carry to Task 4: punch-draft refusal ahead of the text gate in transport.record's menu path; replace the set_step_entry_on stand-in in Task 5; metering fast poll in 8c
+- Task 4: carry to Task 6: recover_from_channel must match action exactly (import|trash, else refuse) — today any other text means Trash (registry blocks it, but data-loss class); GPUI test that R does not record while a punch field has focus; channel routes RECORD_COMMANDS
+- Task 4: carry to 8b: Click/Overdub/Punch menu check marks
+- Task 5: carry to Task 6: wire step_state_row into state.get editor
+- Final: carry to 8b: bar punch field calls bar_punch_ended on every end path incl. focus loss; set_punch_text ignores writes while the popover is closed; Overdub/Punch/Click menu check marks; punch label widths
+- Final: carry to Settings: apply_record_defaults for new documents; Keys toggle for reserve number row
+
+### Deferred minors
+
+- Task 1: minor (deferred): SAFETY comment overclaims; fake record skips some refusals; fake next_pass during count-in; arm_move duplicated; fake click-level text differs; weak input_levels assertion; pre-existing untitled-save text differs
+- Task 3: minor (deferred): normal close question text differs from Swift (pre-existing: 'Save changes to “X”?'); quit text adds 'Some documents have unsaved changes.'; no test of quit wording or normal Save/Don't Save mapping
+- Task 3: minor (deferred): 4 Minors in task-3-review.md
+- Task 4: minor (deferred): other Minors in task-4-review.md
+- Task 5: minor (deferred): Linux US variants (intl/dead keys) rejected; Windows KLID ids rejected; other Minors in task-5-review.md
+- Task 6: minor (deferred): retry after failed Trash says no recoveries until reopen; Linux e2e text needs a build without test-hooks (CI rebuild ok); GPUI e2e launch doesn't default VIZDAW_TRASH_DIR; channel_delete_is_delete_last_step_over_the_roll passes without its code; other Minor
+- Final: minor (deferred): a pass stopping by itself never says why (core lines dropped by idle) — folded into the 8b Faults backlog row; step entry can start during a count-in
