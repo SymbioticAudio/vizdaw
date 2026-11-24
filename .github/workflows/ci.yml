@@ -11,6 +11,11 @@ jobs:
   rust:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    env:
+      # Line tables only: full debug info for every test binary of the
+      # workspace outgrows the hosted runners' disk.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     strategy:
       fail-fast: false
       matrix:

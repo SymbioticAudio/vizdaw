@@ -77,7 +77,12 @@ configure=(cmake -G Ninja -S "$src" -B "$build"
     -DSMTG_CREATE_PLUGIN_LINK=OFF
     -DSMTG_RUN_VST_VALIDATOR=OFF
     -DSMTG_BUILD_UNIVERSAL_BINARY=OFF
-    -DSMTG_ENABLE_AUV2_BUILDS=OFF)
+    -DSMTG_ENABLE_AUV2_BUILDS=OFF
+    # The samples need only the VSTGUI library, not its standalone apps and
+    # tools (those need gtkmm on Linux).
+    -DVSTGUI_STANDALONE=OFF
+    -DVSTGUI_STANDALONE_EXAMPLES=OFF
+    -DVSTGUI_TOOLS=OFF)
 # VSTGUI builds with -Werror, and newer standard libraries deprecate what
 # it uses (std::wstring_convert): keep those warnings, not as errors.
 lenient="-Wno-error=deprecated-declarations"
