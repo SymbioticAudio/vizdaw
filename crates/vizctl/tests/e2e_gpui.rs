@@ -2661,20 +2661,18 @@ fn gpui_exports_for_another_daw_over_the_channel() {
     let doc = app.call("state.get", json!({"target": "document", "window": w}));
     let seq = doc["selected_seq"].as_u64().unwrap();
     if cfg!(target_os = "linux") {
-        // Linux gap, answered by host track H4 (Linux audio import adds a
-        // resampler): the stem needs resampling into the demo's rate, so
-        // the import is refused and the steps that need it (the stems back
-        // in, the later exports and their undo labels) are skipped. When H4
-        // lands this assertion fails and forces the update.
+        // Linux gap, answered by host track H4 (Linux audio import reads
+        // WAV/AIFF and other formats, with a resampler): today the Linux
+        // engine imports only VizDAW CAF files, so the WAV stem is refused
+        // and the steps that need it (the stems back in, the later exports
+        // and their undo labels) are skipped. When H4 lands this assertion
+        // fails and forces the update.
         let e = app.call_err(
             "command.run",
             json!({"id": "media.import", "params": {"path": stems[0], "seq": seq, "tick": 0}, "window": w}),
         );
         assert_eq!(e.code, ErrorCode::Failed, "{e:?}");
-        assert!(
-            e.message.contains("resampling needs the system importer"),
-            "{e:?}"
-        );
+        assert!(e.message.contains("not a VizDAW CAF file"), "{e:?}");
         assert_eq!(lanes(&mut app), before + tracks, "nothing was added");
     } else {
         for (k, stem) in stems.iter().enumerate() {
