@@ -206,14 +206,18 @@ pub(crate) struct ProcessorSetup {
     pub first: Vec<(ParamID, f64)>,
     /// Edits from the controller (normalised), for the next block.
     pub edits: Arc<ArrayQueue<(ParamID, f64)>>,
-    /// Where a dropped processor leaves the edit it popped but had no
-    /// queue for (capacity 1; older than anything left in `edits`).
+    /// Where a processor dropped before its first block leaves `first`,
+    /// then the edit it popped but had no queue for (capacity
+    /// `1 + first.len()`; older than anything left in `edits`).
     pub returned: Arc<ArrayQueue<(ParamID, f64)>>,
     /// Values for the controller (normalised): host values and what the
     /// processor reported.
     pub echoes: Arc<ArrayQueue<(ParamID, f64)>>,
     /// Cleared when the processor is dropped.
     pub alive: Arc<AtomicBool>,
+    /// Set by a state load: what the processor still has from before it
+    /// (`first`, the held edit) is older than the load and is dropped.
+    pub stale: Arc<AtomicBool>,
 }
 
 /// The real-time half of a [`super::Vst3Instance`].
@@ -241,6 +245,7 @@ pub struct Vst3Processor {
     returned: Arc<ArrayQueue<(ParamID, f64)>>,
     echoes: Arc<ArrayQueue<(ParamID, f64)>>,
     alive: Arc<AtomicBool>,
+    stale: Arc<AtomicBool>,
     continuous: i64,
 }
 
@@ -309,6 +314,7 @@ impl Vst3Processor {
             returned: s.returned,
             echoes: s.echoes,
             alive: s.alive,
+            stale: s.stale,
             continuous: 0,
         }
     }
@@ -397,6 +403,12 @@ impl Vst3Processor {
     fn fill_changes(&mut self, ctx: &ProcessCtx<'_>, n: usize) {
         let last = i32::try_from(n.saturating_sub(1)).unwrap_or(i32::MAX);
         let at = |frame: u32| i32::try_from(frame).unwrap_or(i32::MAX).min(last).max(0);
+        // A state load since the last block: what is still here from
+        // before it would land on the loaded state.
+        if self.stale.swap(false, Ordering::AcqRel) {
+            self.first_sent = true;
+            self.held = None;
+        }
         let params = self.data.params_in();
         params.clear();
         if !self.first_sent {
@@ -601,8 +613,17 @@ impl Drop for Vst3Processor {
         if self.started {
             self.data.set_processing(false);
         }
-        if let Some(e) = self.held.take() {
-            let _ = self.returned.push(e);
+        // What it never sent goes back, oldest first (`returned` has room
+        // for all of it), unless a state load made it stale.
+        if !self.stale.swap(false, Ordering::AcqRel) {
+            if !self.first_sent {
+                for v in self.first.iter() {
+                    let _ = self.returned.push(*v);
+                }
+            }
+            if let Some(e) = self.held.take() {
+                let _ = self.returned.push(e);
+            }
         }
         self.alive.store(false, Ordering::Release);
     }

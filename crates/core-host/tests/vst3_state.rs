@@ -9,9 +9,13 @@
 
 use core_engine::backend::BlockInfo;
 use core_host::vst3::Vst3Instance;
-use core_host::{AudioProcessor, HostError, ParamOut, PluginInstance, ProcessCtx};
+use core_host::{
+    AudioProcessor, HostError, ParamChange, ParamEvent, ParamOut, PluginInstance, ProcessCtx,
+};
 use core_model::mixer::ParamId;
-use test_plugins::{VST3_GAIN_ID, VST3_PARAM_GAIN, VST3_SYNTH_ID, Vst3Mode, Vst3Probe};
+use test_plugins::{
+    VST3_GAIN_ID, VST3_PARAM_GAIN, VST3_PARAMS, VST3_SYNTH_ID, Vst3Edit, Vst3Mode, Vst3Probe,
+};
 
 /// A private copy of the test bundle, and a probe on its image.
 fn private() -> (tempfile::TempDir, std::path::PathBuf, Vst3Probe) {
@@ -31,6 +35,11 @@ fn close(a: f64, b: f64) -> bool {
 /// Runs one 64-frame block of 1.0 through an active Test Gain and returns
 /// the first output sample (the component's gain, linear).
 fn level(p: &mut dyn AudioProcessor) -> f32 {
+    level_with(p, &[])
+}
+
+/// [`level`] with host values `params` in the block.
+fn level_with(p: &mut dyn AudioProcessor, params: &[ParamChange]) -> f32 {
     let mut input: Vec<Box<[f32]>> = (0..2).map(|_| vec![1.0f32; 64].into()).collect();
     let mut sidechain: Vec<Box<[f32]>> = (0..2).map(|_| vec![0.0f32; 64].into()).collect();
     let mut outputs: Vec<Box<[f32]>> = (0..2).map(|_| vec![0.0f32; 64].into()).collect();
@@ -41,7 +50,7 @@ fn level(p: &mut dyn AudioProcessor) -> f32 {
         sidechain: &mut sidechain,
         outputs: &mut outputs,
         events: &[],
-        params_in: &[],
+        params_in: params,
         params_out: &mut out,
         transport: &BlockInfo::default(),
     };
@@ -237,4 +246,146 @@ fn a_plug_in_that_seeks_past_the_end_round_trips() {
     let mut p = b.activate(48_000.0, 64).unwrap();
     assert!((level(p.as_mut()) - db(-6.0)).abs() < 1e-5);
     b.deactivate(p);
+}
+
+/// Review fix 1: values set while inactive that a processor took for its
+/// first block come back when it goes before that block (deactivated or
+/// dropped), and reach the next processor and the next save.
+#[test]
+fn values_set_while_inactive_survive_a_processor_that_never_ran() {
+    let (_d, copy, probe) = private();
+    let want = gain_at(&probe, &copy, -6.0, 1).save_state().unwrap();
+    for drop_it in [false, true] {
+        probe.set_memo(1);
+        let mut inst = Vst3Instance::load(&copy, VST3_GAIN_ID).unwrap();
+        inst.set_params(&[(GAIN, -6.0)]).unwrap();
+        let p = inst.activate(48_000.0, 64).unwrap();
+        if drop_it {
+            drop(p);
+            inst.idle();
+        } else {
+            inst.deactivate(p);
+        }
+        assert!(!inst.is_active());
+        let mut p = inst.activate(48_000.0, 64).unwrap();
+        assert!(
+            (level(p.as_mut()) - db(-6.0)).abs() < 1e-5,
+            "dropped: {drop_it}"
+        );
+        inst.deactivate(p);
+        assert_eq!(inst.save_state().unwrap(), want, "dropped: {drop_it}");
+    }
+}
+
+/// Makes the probe's controller perform `ids` (normalised `v`).
+fn perform(probe: &Vst3Probe, ids: std::ops::Range<u32>, v: f64) {
+    for id in ids {
+        assert_eq!(probe.edit(Vst3Edit::Perform(id, v)), 0);
+    }
+}
+
+fn norm(gain_db: f64) -> f64 {
+    VST3_PARAMS[0].to_normalized(gain_db)
+}
+
+/// Review fix 2: a load while active is not overwritten by older values:
+/// the processor's unsent first block, a host value the controller has
+/// not been given yet, an edit the processor holds and a controller edit
+/// not yet read. Gestures still reach the host, without their values.
+#[test]
+fn a_load_while_active_is_not_overwritten_by_older_values() {
+    let (_d, copy, probe) = private();
+    let other = gain_at(&probe, &copy, -6.0, 9).save_state().unwrap();
+
+    // (a) The first block's -12 dB is older than the load.
+    let mut inst = gain_at(&probe, &copy, 0.0, 9);
+    inst.set_params(&[(GAIN, -12.0)]).unwrap();
+    let mut p = inst.activate(48_000.0, 64).unwrap();
+    inst.load_state(&other).unwrap();
+    for _ in 0..2 {
+        assert!((level(p.as_mut()) - db(-6.0)).abs() < 1e-5, "first block");
+    }
+    inst.idle();
+    assert!(close(inst.param_value(GAIN).unwrap(), -6.0));
+    assert_eq!(inst.save_state().unwrap(), other);
+    inst.deactivate(p);
+
+    // A host value the processor ran before the load, which the
+    // controller has not been given yet (an echo), is older too.
+    let mut p = inst.activate(48_000.0, 64).unwrap();
+    let host = [ParamChange {
+        frame: 0,
+        id: GAIN,
+        value: -24.0,
+    }];
+    assert!((level_with(p.as_mut(), &host) - db(-24.0)).abs() < 1e-5);
+    inst.load_state(&other).unwrap();
+    inst.idle();
+    assert!(close(inst.param_value(GAIN).unwrap(), -6.0), "an echo");
+    assert!((level(p.as_mut()) - db(-6.0)).abs() < 1e-5);
+    inst.deactivate(p);
+
+    // (b) An edit the processor holds (every queue was taken), and (c) a
+    // controller edit (with its gesture) not read yet.
+    let mut inst = gain_at(&probe, &copy, 0.0, 9);
+    let mut p = inst.activate(48_000.0, 64).unwrap();
+    level(p.as_mut());
+    perform(&probe, 1000..1128, 0.5);
+    assert_eq!(
+        probe.edit(Vst3Edit::Perform(VST3_PARAM_GAIN, norm(-30.0))),
+        0
+    );
+    inst.gestures();
+    level(p.as_mut());
+    assert_eq!(probe.edit(Vst3Edit::Begin(VST3_PARAM_GAIN)), 0);
+    assert_eq!(
+        probe.edit(Vst3Edit::Perform(VST3_PARAM_GAIN, norm(-40.0))),
+        0
+    );
+    assert_eq!(probe.edit(Vst3Edit::End(VST3_PARAM_GAIN)), 0);
+    inst.load_state(&other).unwrap();
+    let g = inst.gestures();
+    assert_eq!(
+        g,
+        [ParamEvent::Begin(GAIN), ParamEvent::End(GAIN)],
+        "the gesture without its older value"
+    );
+    for _ in 0..3 {
+        assert!((level(p.as_mut()) - db(-6.0)).abs() < 1e-5, "held edit");
+    }
+    inst.idle();
+    assert!(close(inst.param_value(GAIN).unwrap(), -6.0));
+    assert_eq!(inst.save_state().unwrap(), other);
+    inst.deactivate(p);
+    let mut p = inst.activate(48_000.0, 64).unwrap();
+    assert!(
+        (level(p.as_mut()) - db(-6.0)).abs() < 1e-5,
+        "next activation"
+    );
+    inst.deactivate(p);
+}
+
+/// Review fix 3: an empty controller chunk still reaches the controller's
+/// `setState` (as the SDK's `loadPreset` does); refusing it is not fatal.
+#[test]
+fn an_empty_controller_chunk_reaches_the_controller() {
+    let (_d, copy, probe) = private();
+    let mut b = Vec::new();
+    b.extend_from_slice(b"VST3");
+    b.extend_from_slice(&1i32.to_le_bytes());
+    b.extend_from_slice(VST3_GAIN_ID.as_bytes());
+    b.extend_from_slice(&(48i64 + 8).to_le_bytes());
+    b.extend_from_slice(&norm(-6.0).to_le_bytes());
+    b.extend_from_slice(b"List");
+    b.extend_from_slice(&2i32.to_le_bytes());
+    for (id, off, n) in [(b"Comp", 48i64, 8i64), (b"Cont", 56, 0)] {
+        b.extend_from_slice(id);
+        b.extend_from_slice(&off.to_le_bytes());
+        b.extend_from_slice(&n.to_le_bytes());
+    }
+    let mut inst = Vst3Instance::load(&copy, VST3_GAIN_ID).unwrap();
+    let before = probe.counters().controller_set_states;
+    inst.load_state(&b).unwrap();
+    assert_eq!(probe.counters().controller_set_states, before + 1);
+    assert!(close(inst.param_value(GAIN).unwrap(), -6.0));
 }

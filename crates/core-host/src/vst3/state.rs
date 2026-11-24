@@ -171,10 +171,11 @@ fn apply(plugin: &Plugin, p: &Preset<'_>) -> Result<(), &'static str> {
     if !plugin.sync_controller(p.component) {
         return Err("the plug-in's controller refused the component's state");
     }
-    // An empty controller chunk is a controller with nothing to keep
-    // (its `getState` wrote nothing).
-    if let Some(c) = p.controller.filter(|c| !c.is_empty()) {
-        if !plugin.set_controller_state(c) {
+    // Whenever the blob has a controller chunk, as the SDK's
+    // `loadPreset`; an empty one (a controller whose `getState` wrote
+    // nothing) the controller may refuse.
+    if let Some(c) = p.controller {
+        if !plugin.set_controller_state(c) && !c.is_empty() {
             return Err("the plug-in's controller refused its state");
         }
     }

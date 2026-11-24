@@ -1319,8 +1319,6 @@ impl Plugin {
     }
 }
 
-/// The speaker arrangement of `channels` channels: mono, else the first
-/// `channels` speakers (stereo for 2).
 /// A state call's result that the SDK's preset files take as success
 /// (`vstpresetfile.cpp`'s `verify`): done, or nothing to do.
 fn state_ok(r: tresult) -> bool {
@@ -1394,6 +1392,8 @@ impl Plugin {
     }
 }
 
+/// The speaker arrangement of `channels` channels: mono, else the first
+/// `channels` speakers (stereo for 2).
 fn arrangement_of(channels: i32) -> SpeakerArrangement {
     match channels {
         c if c <= 1 => SpeakerArr::kMono,

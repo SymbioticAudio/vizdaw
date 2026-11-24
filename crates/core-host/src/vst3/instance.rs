@@ -81,6 +81,8 @@ struct Active {
     echoes: Arc<ArrayQueue<(u32, f64)>>,
     /// Cleared when the processor is dropped (by `deactivate` or not).
     alive: Arc<AtomicBool>,
+    /// Set by a state load (the processor drops what it has from before).
+    stale: Arc<AtomicBool>,
 }
 
 /// A loaded VST3 plug-in (main-thread half). Not `Send`: the VST3 SDK
@@ -104,6 +106,9 @@ pub struct Vst3Instance {
     /// been sent yet (set while inactive; the processor sends them with
     /// its first block), by `ParamID`.
     pending: BTreeMap<u32, f64>,
+    /// Gesture begins and ends read (and their values dropped) by a state
+    /// load, for the next [`PluginInstance::gestures`].
+    kept_gestures: Vec<Edit>,
     /// Declared last: the module outlives every object made from it.
     _module: Rc<Module>,
 }
@@ -157,6 +162,7 @@ impl Vst3Instance {
             offline: false,
             setup: DEFAULT_SETUP,
             pending: BTreeMap::new(),
+            kept_gestures: Vec::new(),
             _module: module,
         };
         me.read_info();
@@ -345,13 +351,16 @@ impl PluginInstance for Vst3Instance {
         };
         let in_counts: Vec<u16> = self.info.inputs.iter().map(|p| p.channels).collect();
         let out_counts: Vec<u16> = self.info.outputs.iter().map(|p| p.channels).collect();
+        let first = self.take_pending();
         let active = Active {
             edits: Arc::new(ArrayQueue::new(EDIT_QUEUE)),
-            returned: Arc::new(ArrayQueue::new(1)),
+            // Room for the first block's values and the held edit, which
+            // a processor dropped early hands back.
+            returned: Arc::new(ArrayQueue::new(1 + first.len())),
             echoes: Arc::new(ArrayQueue::new(ECHO_QUEUE)),
             alive: Arc::new(AtomicBool::new(true)),
+            stale: Arc::new(AtomicBool::new(false)),
         };
-        let first = self.take_pending();
         let setup = ProcessorSetup {
             data: RtData::new(processor, &in_counts, &out_counts, first.len()),
             sample_rate,
@@ -364,6 +373,7 @@ impl PluginInstance for Vst3Instance {
             returned: active.returned.clone(),
             echoes: active.echoes.clone(),
             alive: active.alive.clone(),
+            stale: active.stale.clone(),
         };
         let proc = Vst3Processor::new(setup, &self.info);
         self.active = Some(active);
@@ -390,15 +400,27 @@ impl PluginInstance for Vst3Instance {
 
     /// Loads a blob from [`PluginInstance::save_state`] (or a
     /// `.vstpreset` of this class); active or not, as the CLAP host
-    /// loads. Values set or edited before a load that the component has
-    /// not been sent are dropped: they would land on the loaded state.
+    /// loads. Values set or edited before a load that the component (or
+    /// the controller) has not been given are dropped: they would land on
+    /// the loaded state. That is `pending`, the processor's queues, what
+    /// the processor itself still has (its unsent first block and held
+    /// edit, dropped at its next block) and controller edits not read
+    /// yet, whose gestures still reach the host, without their values.
     fn load_state(&mut self, data: &[u8]) -> Result<(), HostError> {
         self.reclaim();
         state::load(&self.plugin, &self.class_id, data)?;
         self.pending.clear();
+        let unread = self.handler.take_edits();
+        self.kept_gestures.extend(
+            unread
+                .into_iter()
+                .filter(|e| !matches!(e, Edit::Perform(..))),
+        );
         if let Some(a) = &self.active {
+            a.stale.store(true, Ordering::Release);
             while a.edits.pop().is_some() {}
             while a.returned.pop().is_some() {}
+            while a.echoes.pop().is_some() {}
         }
         Ok(())
     }
@@ -485,7 +507,8 @@ impl PluginInstance for Vst3Instance {
                 self.pending.remove(&id);
             }
         }
-        let edits = self.handler.take_edits();
+        let mut edits = std::mem::take(&mut self.kept_gestures);
+        edits.extend(self.handler.take_edits());
         let mut out = Vec::with_capacity(edits.len());
         for e in edits {
             out.push(match e {
