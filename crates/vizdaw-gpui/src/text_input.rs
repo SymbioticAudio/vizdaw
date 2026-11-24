@@ -552,6 +552,10 @@ impl Element for TextElement {
 
         let (display_text, text_color) = if content.is_empty() {
             (input.placeholder.clone(), hsla(0., 0., 0., 0.2))
+        } else if content.contains(['\n', '\r']) {
+            // One line: a line break (a loaded comment, a paste) shows as
+            // a space of the same length, so offsets stay the content's.
+            (content.replace(['\n', '\r'], " ").into(), style.color)
         } else {
             (content, style.color)
         };

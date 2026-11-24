@@ -1071,6 +1071,11 @@ impl FakeSession {
         self.st().files.song_info.clone()
     }
 
+    /// What `song_info` answers (default: no texts).
+    pub fn set_song(&self, info: SongInfoRow) {
+        self.st().files.song_info = info;
+    }
+
     pub fn set_recovered_files(&self, rows: Vec<RecoveredFileRow>) {
         self.st().files.recovered = rows;
     }

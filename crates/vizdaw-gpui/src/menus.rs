@@ -825,10 +825,10 @@ struct ShownMenus {
 impl Global for ShownMenus {}
 
 /// Shows `model` in the platform menus, unless they already show it.
-/// While a file panel is up every item is off (Swift's panels were
-/// app-modal).
+/// While a file panel or the New Project format panel is up every item
+/// is off (Swift's panels and its format alert were app-modal).
 pub fn show(model: MenuModel, cx: &mut App) {
-    let blocked = crate::file_panels::is_up(cx);
+    let blocked = crate::file_panels::is_up(cx) || crate::file_menu::format_panel_up(cx);
     if cx
         .try_global::<ShownMenus>()
         .is_some_and(|s| s.model == model && s.blocked == blocked)

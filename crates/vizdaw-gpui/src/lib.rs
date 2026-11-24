@@ -24,6 +24,7 @@ pub mod piano_roll;
 pub mod registry;
 pub mod screenshot;
 pub mod sheet_host;
+pub mod sheets;
 pub mod shell;
 pub mod strip_palette;
 pub mod text_input;

@@ -23,8 +23,8 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, AppContext, Context, Div, EventEmitter, FocusHandle, Focusable,
     InteractiveElement, IntoElement, KeyDownEvent, Keystroke, ParentElement, PromptButton,
-    PromptHandle, PromptLevel, PromptResponse, Render, RenderablePromptHandle, Stateful,
-    StatefulInteractiveElement, Styled, Window, div, px, rgb, rgba,
+    PromptHandle, PromptLevel, PromptResponse, Render, RenderablePromptHandle, SharedString,
+    Stateful, StatefulInteractiveElement, Styled, Window, div, px, rgb, rgba,
 };
 
 use crate::registry::RegistryScope;
@@ -65,6 +65,9 @@ pub struct SheetButton {
     pub label: String,
     pub role: ButtonRole,
     pub enabled: bool,
+    /// The button's help (Swift `.help`): its tooltip, and its `value` in
+    /// the tree.
+    pub help: Option<String>,
 }
 
 impl SheetButton {
@@ -73,7 +76,14 @@ impl SheetButton {
             label: label.into(),
             role,
             enabled: true,
+            help: None,
         }
+    }
+
+    /// The same button with `help` as its tooltip.
+    pub fn with_help(mut self, help: impl Into<String>) -> Self {
+        self.help = Some(help.into());
+        self
     }
 
     /// The same button, shown disabled.
@@ -377,7 +387,13 @@ fn buttons_row(
         .justify_end()
         .gap_2()
         .children(buttons.iter().enumerate().map(|(i, b)| {
-            let face = button_face(i, b).child(scope.control("button", &b.label, b.enabled));
+            let face = button_face(i, b).child(scope.control_with(
+                "button",
+                &b.label,
+                b.enabled,
+                b.help.as_deref(),
+                false,
+            ));
             if b.enabled { wire(i, face) } else { face }
         }))
 }
@@ -406,7 +422,33 @@ fn button_face(i: usize, b: &SheetButton) -> Stateful<Div> {
             colors::DISABLED
         }))
         .when(b.enabled, |d| d.cursor_pointer())
+        .when_some(b.help.clone(), |d, help| {
+            let help = SharedString::from(help);
+            d.tooltip(move |_, cx| {
+                let help = help.clone();
+                cx.new(|_| HelpTip(help)).into()
+            })
+        })
         .child(b.label.clone())
+}
+
+/// A button's help, shown while the pointer rests on it.
+struct HelpTip(SharedString);
+
+impl Render for HelpTip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .max_w(px(280.))
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(colors::BORDER))
+            .bg(rgb(CARD))
+            .text_color(rgb(colors::TEXT))
+            .text_xs()
+            .child(self.0.clone())
+    }
 }
 
 // ---------------------------------------------------------------------

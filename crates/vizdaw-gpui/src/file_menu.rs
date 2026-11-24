@@ -10,7 +10,10 @@
 //! - Create Demo Project with Audio: the demo with audio.
 //! - Import Project › DAWproject… and AAF…: their panel, then the store's
 //!   open (a DAWproject or AAF file opens as a new project).
-//! - Import Audio…: its panel, then the import job on the document.
+//! - Import Audio…: its panel (several files), then the import job on the
+//!   document at Swift's import target (one file: the selected track of
+//!   the shown sequence, else new tracks; at the transport's tick).
+//! - Project Settings…: its sheet ([`crate::sheets::project_settings`]).
 //! - Import MIDI File…: its panel, then the import sheet's read of the
 //!   file (Swift `beginImport`; a file that cannot be read is the alert
 //!   "Import Failed"; the sheet itself is slice 7c's).
@@ -22,8 +25,7 @@
 
 use std::path::PathBuf;
 
-use gpui::{App, Global, Window};
-use vizdaw_app::DocId;
+use gpui::{App, Context, Global, Window};
 use vizdaw_app::panels::{self, PanelSpec};
 use vizdaw_ffi::ProjectFormatRow;
 
@@ -36,11 +38,9 @@ use crate::shell::DocumentWindow;
 
 /// The File items whose sheet or flow lands later; their menu item does
 /// nothing yet: Open Co-Producer Copy… and Relink Media… (Task 5),
-/// Project Settings… (Task 4), Bounce… (Task 6), the Export items and the
-/// report (slice 7c).
+/// Bounce… (Task 6), the Export items and the report (slice 7c).
 pub const LATER: &[&str] = &[
     "file.open_copy",
-    "file.project_settings",
     "file.bounce",
     "file.export_dawproject",
     "file.export_aaf",
@@ -74,9 +74,16 @@ fn run_app(id: &str, cx: &mut App) {
     }
 }
 
-/// File item `action` on `doc`, the document of the window it came from.
-pub(crate) fn run_in_window(action: &FileCommand, doc: DocId, window: &mut Window, cx: &mut App) {
+/// File item `action` on `view`'s document (the window it came from).
+pub(crate) fn run_in_window(
+    action: &FileCommand,
+    view: &mut DocumentWindow,
+    window: &mut Window,
+    cx: &mut Context<DocumentWindow>,
+) {
+    let doc = view.doc();
     match action.id.as_ref() {
+        "file.project_settings" => crate::sheets::project_settings::show(view, window, cx),
         "media.import" => choose(&panels::IMPORT_AUDIO, window, cx, move |paths, cx| {
             let paths = paths
                 .into_iter()
@@ -178,10 +185,12 @@ fn ask_format(cx: &mut App) {
         return;
     }
     cx.set_global(FormatPanelUp(true));
+    crate::menus::refresh(cx);
     cx.spawn(async move |cx| {
         let chosen = answer.await;
         cx.update(|cx| {
             cx.set_global(FormatPanelUp(false));
+            crate::menus::refresh(cx);
             if let Ok(format) = chosen {
                 make(format, cx);
             }

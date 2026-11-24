@@ -84,7 +84,7 @@ fn tree_label(which: Popup) -> &'static str {
 }
 
 /// Pop-up `which`: its face, and its items while open.
-fn popup(
+pub(crate) fn popup(
     which: Popup,
     state: &Entity<FormatState>,
     scope: &mut RegistryScope,

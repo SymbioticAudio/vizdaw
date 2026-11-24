@@ -1221,6 +1221,95 @@ mod file_flows {
         assert_eq!(new_project_calls(&s), ["new_project(48000,Int24)"]);
     }
 
+    fn menus_on(s: &mut Setup) -> bool {
+        fn on(i: &vizdaw_gpui::menus::ItemSpec) -> bool {
+            use vizdaw_gpui::menus::ItemSpec;
+            match i {
+                ItemSpec::Command { enabled, .. } | ItemSpec::Mixer { enabled, .. } => *enabled,
+                ItemSpec::Submenu { enabled, items, .. } => *enabled || items.iter().any(on),
+                _ => false,
+            }
+        }
+        s.cx.update(|_, cx| {
+            vizdaw_gpui::menus::shown(cx)
+                .unwrap()
+                .menus
+                .iter()
+                .any(|m| m.items.iter().any(on))
+        })
+    }
+
+    /// Swift's format alert was app-modal: while the New Project format
+    /// panel is up (as a sheet or as its dialog window) every menu item
+    /// is off.
+    #[gpui::test]
+    fn the_menus_are_off_while_the_format_panel_is_up(cx: &mut TestAppContext) {
+        let mut s = setup(cx);
+        assert!(menus_on(&mut s));
+        s.cx.dispatch_action(NewDocument);
+        s.cx.run_until_parked();
+        assert_eq!(sheet_label(&mut s).as_deref(), Some("New Project"));
+        assert!(!menus_on(&mut s), "the sheet");
+        s.cx.simulate_keystrokes("escape");
+        s.cx.run_until_parked();
+        assert!(menus_on(&mut s));
+        // The dialog window (the front window shows a sheet).
+        s.window
+            .update(&mut s.cx, |v, window, cx| {
+                let ask = vizdaw_gpui::sheet_host::Ask::alert(gpui::PromptLevel::Info, "Busy", "");
+                let (sheet, _) = vizdaw_gpui::sheet_host::AskSheet::new(ask);
+                assert!(v.show_sheet(Box::new(sheet), window, cx).is_ok());
+            })
+            .unwrap();
+        s.cx.dispatch_action(NewDocument);
+        s.cx.run_until_parked();
+        let shown = dialogs(&mut s.cx);
+        assert_eq!(shown.len(), 1);
+        assert!(!menus_on(&mut s), "the dialog window");
+        let mut dcx = VisualTestContext::from_window(shown[0].into(), &s.cx);
+        dcx.simulate_keystrokes("escape");
+        dcx.run_until_parked();
+        assert!(menus_on(&mut s));
+    }
+
+    /// With no window open nothing draws: the panel's coming and going
+    /// sets the menus itself.
+    #[gpui::test]
+    fn with_no_window_the_menus_are_off_while_the_format_dialog_is_up(cx: &mut TestAppContext) {
+        let s = setup(cx);
+        let window = s.window;
+        drop(s);
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+        let on = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                vizdaw_gpui::menus::shown(cx)
+                    .unwrap()
+                    .menus
+                    .iter()
+                    .flat_map(|m| &m.items)
+                    .any(|i| {
+                        matches!(
+                            i,
+                            vizdaw_gpui::menus::ItemSpec::Command { enabled: true, .. }
+                        )
+                    })
+            })
+        };
+        assert!(on(cx));
+        cx.update(vizdaw_gpui::file_menu::new_project);
+        cx.run_until_parked();
+        let shown = dialogs(cx);
+        assert_eq!(shown.len(), 1);
+        assert!(!on(cx));
+        let mut dcx = VisualTestContext::from_window(shown[0].into(), cx);
+        dcx.simulate_keystrokes("escape");
+        dcx.run_until_parked();
+        assert!(on(cx));
+    }
+
     fn dialogs(cx: &mut TestAppContext) -> Vec<WindowHandle<SheetDialog>> {
         cx.update(|cx| {
             cx.windows()

@@ -1498,7 +1498,7 @@ impl DocumentWindow {
             .on_action(cx.listener(Self::save_as))
             .on_action(cx.listener(Self::close_window))
             .on_action(cx.listener(|this, a: &FileCommand, window, cx| {
-                crate::file_menu::run_in_window(a, this.doc, window, cx);
+                crate::file_menu::run_in_window(a, this, window, cx);
             }))
             .size_full()
             .flex()
