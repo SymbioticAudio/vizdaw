@@ -7,8 +7,8 @@ use core_host::{HostError, PluginKind, vst3};
 use core_model::mixer::PluginFormat;
 use std::path::{Path, PathBuf};
 use test_plugins::{
-    VST3_CONTROLLER_ID, VST3_CRASHER_ID, VST3_GAIN_ID, VST3_HANGER_ID, VST3_PROCESS_CRASHER_ID,
-    VST3_SYNTH_ID,
+    VST3_CONTROLLER_ID, VST3_CRASHER_ID, VST3_GAIN_ID, VST3_HANGER_ID, VST3_NAN_ID,
+    VST3_PROCESS_CRASHER_ID, VST3_SYNTH_ID,
 };
 
 fn temp() -> tempfile::TempDir {
@@ -44,6 +44,7 @@ fn lists_every_plugin_class_of_the_test_bundle() {
                 "Test Process Crasher",
                 PluginKind::Effect
             ),
+            (VST3_NAN_ID, "Test NaN", PluginKind::Effect),
         ]
     );
     for (p, _) in &list {

@@ -1,6 +1,8 @@
 //! Shared test helpers: load a test plugin and shelve its processor.
 #![allow(dead_code)]
 
+pub mod vst3;
+
 use core_host::adapt::{PluginEffect, PluginSynth, Returned};
 use core_host::clap::ClapFormat;
 use core_host::queue::{GestureReceiver, ParamSender, param_queues};

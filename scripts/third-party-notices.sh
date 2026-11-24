@@ -17,6 +17,10 @@
 #     vizdaw-scan and vizdaw-mcp (vizctl is not bundled). Proc-macro crates
 #     run in the compiler only, and are left out with their own dependencies;
 #   - the vendored DAWproject XSDs and the AAF MetaDictionary tables;
+#   - the VST 3 SDK, whose interface headers the vst3 crate's bindings are
+#     generated from (MIT; the text is kept in scripts/licence-texts/vst3sdk,
+#     copied from the SDK tag v3.8.0_build_66, the version those bindings
+#     follow);
 #   - the Swift packages in app/Package.resolved.
 # It reads the registry sources only (cargo metadata --offline) and fails if
 # a crate has no licence text and is not in EXCEPTIONS below.
@@ -216,6 +220,21 @@ for pkg in crates:
 if failures:
     sys.exit("third-party-notices: no licence text in " + ", ".join(failures)
              + " (add the text's source to EXCEPTIONS in scripts/third-party-notices.sh)")
+
+if any(p["name"] == "vst3" for p in crates):
+    rule("=")
+    lines.append("VST 3 SDK")
+    rule("=")
+    lines.append("")
+    rule()
+    lines.append("VST 3 SDK 3.8.0 (the vst3 crate's bindings are generated from its interface headers)")
+    lines.append("Licence: MIT")
+    lines.append("Source: https://github.com/steinbergmedia/vst3sdk (tag v3.8.0_build_66)")
+    rule()
+    sdk = os.path.join(VENDORED, "vst3sdk", "LICENSE.txt")
+    if not os.path.isfile(sdk):
+        sys.exit(f"third-party-notices: missing {sdk}")
+    texts("the VST 3 SDK", [("LICENSE.txt", sdk)])
 
 rule("=")
 lines.append("Data files")

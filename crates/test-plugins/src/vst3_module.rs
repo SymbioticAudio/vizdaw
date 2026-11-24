@@ -14,6 +14,7 @@
 //! | [`VST3_CRASHER_ID`] | Test Crasher | `Fx` | crashes (SIGSEGV) in `createInstance` |
 //! | [`VST3_HANGER_ID`] | Test Hanger | `Fx` | never returns from `createInstance` |
 //! | [`VST3_PROCESS_CRASHER_ID`] | Test Process Crasher | `Fx` | Test Gain that crashes (SIGSEGV) in `process` |
+//! | [`VST3_NAN_ID`] | Test NaN | `Fx` | Test Gain whose first output sample of every block is NaN |
 //! | [`VST3_CONTROLLER_ID`] | Test Controller | (controller class) | Test Gain's controller; not a plug-in |
 //!
 //! Like a plug-in built with the SDK, the factory is only handed out after
@@ -96,6 +97,8 @@ pub const VST3_CRASHER_ID: &str = "56495A44565354337E570000ABCD0003";
 pub const VST3_HANGER_ID: &str = "56495A44565354337E570000ABCD0004";
 /// Class ID of "Test Process Crasher" (Test Gain that crashes in `process`).
 pub const VST3_PROCESS_CRASHER_ID: &str = "56495A44565354337E570000ABCD0005";
+/// Class ID of "Test NaN" (Test Gain that writes NaN audio).
+pub const VST3_NAN_ID: &str = "56495A44565354337E570000ABCD0006";
 /// Class ID of the controller class (not a plug-in, never listed).
 pub const VST3_CONTROLLER_ID: &str = "56495A44565354337E570000ABCD00FF";
 
@@ -104,6 +107,7 @@ const SYNTH: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_0002);
 const CRASHER: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_0003);
 const HANGER: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_0004);
 const PROCESS_CRASHER: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_0005);
+const NAN: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_0006);
 const CONTROLLER: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_00FF);
 
 const AUDIO_MODULE: &str = "Audio Module Class";
@@ -258,7 +262,7 @@ struct ClassDef {
     sub_categories: &'static str,
 }
 
-const CLASSES: [ClassDef; 6] = [
+const CLASSES: [ClassDef; 7] = [
     ClassDef {
         cid: GAIN,
         category: AUDIO_MODULE,
@@ -293,6 +297,12 @@ const CLASSES: [ClassDef; 6] = [
         cid: PROCESS_CRASHER,
         category: AUDIO_MODULE,
         name: "Test Process Crasher",
+        sub_categories: "Fx",
+    },
+    ClassDef {
+        cid: NAN,
+        category: AUDIO_MODULE,
+        name: "Test NaN",
         sub_categories: "Fx",
     },
 ];
@@ -989,10 +999,12 @@ struct Proc {
     synth: bool,
     /// Crashes in `process` (Test Process Crasher).
     crash: bool,
+    /// Writes NaN as each output channel's first sample (Test NaN).
+    nan: bool,
 }
 
 impl Proc {
-    fn new(synth: bool, crash: bool) -> Proc {
+    fn new(synth: bool, crash: bool, nan: bool) -> Proc {
         Proc {
             gain: AtomicU64::new(VST3_COMPONENT_GAIN.to_bits()),
             active: AtomicBool::new(false),
@@ -1000,6 +1012,7 @@ impl Proc {
             notes: AtomicI32::new(0),
             synth,
             crash,
+            nan,
         }
     }
 
@@ -1273,9 +1286,15 @@ impl Proc {
                     unsafe {
                         let x = input.map_or(0.0, |p| p.add(i).read());
                         let s = side.map_or(0.0, |p| p.add(i).read());
-                        let y = x * g + s;
+                        let y = if self.nan && i == 0 {
+                            f32::NAN
+                        } else {
+                            x * g + s
+                        };
                         out.add(i).write(y);
-                        peak = peak.max(y.abs());
+                        if y.is_finite() {
+                            peak = peak.max(y.abs());
+                        }
                     }
                 }
             }
@@ -1810,17 +1829,17 @@ impl IPluginFactoryTrait for Factory {
             }
         }
         mark_thread();
-        let made = if cid == GAIN || cid == PROCESS_CRASHER {
+        let made = if cid == GAIN || cid == PROCESS_CRASHER || cid == NAN {
             ComWrapper::new(Component {
                 host: Mutex::new(None),
                 peer: Mutex::new(None),
-                proc: Proc::new(false, cid == PROCESS_CRASHER),
+                proc: Proc::new(false, cid == PROCESS_CRASHER, cid == NAN),
             })
             .to_com_ptr::<FUnknown>()
         } else if cid == SYNTH {
             ComWrapper::new(Synth {
                 ctl: Ctl::new(),
-                proc: Proc::new(true, false),
+                proc: Proc::new(true, false, false),
             })
             .to_com_ptr::<FUnknown>()
         } else if cid == CONTROLLER {

@@ -136,9 +136,10 @@ pub struct CatalogConfig {
     pub include_au: bool,
     /// Time each scan may take, in ms (`None`: 10 s, AU v3 30 s).
     pub timeout_ms: Option<u64>,
-    /// Also find VST3 bundles (off for the app until VST3 plug-ins can
-    /// load, host track H1).
-    #[uniffi(default = false)]
+    /// Also find VST3 bundles (on unless the app says otherwise: the
+    /// scanner activates each class and processes a block before it is
+    /// marked Ok, host track H1).
+    #[uniffi(default = true)]
     pub include_vst3: bool,
     /// Folders searched for VST3 bundles when `include_vst3` (empty: the
     /// standard ones).

@@ -10,7 +10,8 @@ use core_model::mixer::PluginFormat;
 use std::path::Path;
 use std::time::Duration;
 use test_plugins::{
-    VST3_CRASHER_ID, VST3_GAIN_ID, VST3_HANGER_ID, VST3_PROCESS_CRASHER_ID, VST3_SYNTH_ID,
+    VST3_CRASHER_ID, VST3_GAIN_ID, VST3_HANGER_ID, VST3_NAN_ID, VST3_PROCESS_CRASHER_ID,
+    VST3_SYNTH_ID,
 };
 
 fn exe() -> &'static Path {
@@ -42,6 +43,7 @@ fn lists_every_class_and_checks_one() {
             (VST3_CRASHER_ID, PluginKind::Effect),
             (VST3_HANGER_ID, PluginKind::Effect),
             (VST3_PROCESS_CRASHER_ID, PluginKind::Effect),
+            (VST3_NAN_ID, PluginKind::Effect),
         ]
     );
     // A class that loads is scanned: its info comes from the instance.
@@ -124,7 +126,7 @@ fn a_full_scan_records_each_class() {
     test_plugins::copy_vst3_bundle(&copy);
     let src = Source::vst3_bundle(&copy);
     let entries = scan_source(exe(), &src, Duration::from_millis(3000));
-    assert_eq!(entries.len(), 5);
+    assert_eq!(entries.len(), 6);
     let mut cat = Catalog::new();
     assert_eq!(
         cat.mark_found(std::slice::from_ref(&src)),
@@ -149,6 +151,9 @@ fn a_full_scan_records_each_class() {
         status(VST3_PROCESS_CRASHER_ID),
         PluginStatus::Blocklisted("crashed (signal 11)".into())
     );
+    // NaN audio is the engine's to catch (it bypasses the insert), not a
+    // reason to blocklist, as for the CLAP nan kind.
+    assert_eq!(status(VST3_NAN_ID), PluginStatus::Ok);
     let synth = cat.get(PluginFormat::Vst3, VST3_SYNTH_ID).unwrap();
     assert_eq!(synth.kind, Some(PluginKind::Instrument));
     assert_eq!(synth.status, ScanStatus::Ok);
@@ -157,5 +162,5 @@ fn a_full_scan_records_each_class() {
         .into_iter()
         .map(|r| r.plugin.name)
         .collect();
-    assert_eq!(names, ["Test Gain"]);
+    assert_eq!(names, ["Test Gain", "Test NaN"]);
 }

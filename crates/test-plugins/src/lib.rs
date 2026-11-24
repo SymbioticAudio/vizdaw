@@ -33,9 +33,9 @@ pub use bundle::{bundle, copy_bundle, copy_vst3_bundle, scanner, vst3_bundle};
 pub use editor::{BASE_SIZE, MAX_SIZE, MIN_SIZE};
 pub use vst3_module::{
     VST3_COMPONENT_GAIN, VST3_CONTROLLER_ID, VST3_CRASHER_ID, VST3_GAIN_ID, VST3_HANGER_ID,
-    VST3_PARAM_BEND, VST3_PARAM_GAIN, VST3_PARAM_METER, VST3_PARAM_MOD, VST3_PARAM_MODE,
-    VST3_PARAM_PRESSURE, VST3_PARAM_SECRET, VST3_PARAMS, VST3_PROCESS_CRASHER_ID, VST3_SYNTH_ID,
-    Vst3Counters, Vst3Edit, Vst3Mode, Vst3ParamDef, Vst3Probe, vst3_restart,
+    VST3_NAN_ID, VST3_PARAM_BEND, VST3_PARAM_GAIN, VST3_PARAM_METER, VST3_PARAM_MOD,
+    VST3_PARAM_MODE, VST3_PARAM_PRESSURE, VST3_PARAM_SECRET, VST3_PARAMS, VST3_PROCESS_CRASHER_ID,
+    VST3_SYNTH_ID, Vst3Counters, Vst3Edit, Vst3Mode, Vst3ParamDef, Vst3Probe, vst3_restart,
 };
 
 use clack_plugin::entry::prelude::*;
