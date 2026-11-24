@@ -285,29 +285,48 @@ pub(crate) fn present(cx: &mut App, free: impl Fn(gpui::AnyWindowHandle, &mut Ap
     }
 }
 
-/// No window of the app was active (it was in the background).
+/// When the app went to the background (no window of it active, and
+/// none of its own panels or prompts holding the keyboard).
 #[derive(Default)]
-struct AppInactive(bool);
+struct AppInactive(Option<std::time::Instant>);
 
 impl gpui::Global for AppInactive {}
 
-/// A window lost the keyboard: once no window of the app is active, the
-/// app is in the background (GPUI has no app-activation event on the
-/// desktop).
+/// A return within this long of leaving is focus churn, not the app
+/// coming back: no recheck (a recheck re-verifies every media file).
+pub const RETURN_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// One of the app's own panels or prompts has the keyboard: a window lost
+/// it to the app itself, not to another app (Swift's
+/// `applicationDidBecomeActive` never fires for in-app panels).
+fn own_modal_up(cx: &App) -> bool {
+    crate::file_panels::is_up(cx) || crate::alerts::prompting(cx)
+}
+
+/// A window lost the keyboard: once no window of the app is active and
+/// none of its panels or prompts is up, the app is in the background
+/// (GPUI has no app-activation event on the desktop).
 pub(crate) fn window_deactivated(cx: &mut App) {
+    if own_modal_up(cx) {
+        return;
+    }
     cx.defer(|cx| {
-        if cx.active_window().is_none() {
-            cx.set_global(AppInactive(true));
+        if cx.active_window().is_none() && !own_modal_up(cx) {
+            let now = cx.background_executor().now();
+            cx.set_global(AppInactive(Some(now)));
         }
     });
 }
 
-/// A window became active: when the app was in the background, files may
-/// have changed on disk meanwhile ([`recheck_all`], Swift
-/// `applicationDidBecomeActive`).
+/// A window became active: when the app was in the background for longer
+/// than [`RETURN_DEBOUNCE`], files may have changed on disk meanwhile
+/// ([`recheck_all`], Swift `applicationDidBecomeActive`).
 pub(crate) fn window_activated(cx: &mut App) {
-    if cx.try_global::<AppInactive>().is_some_and(|a| a.0) {
-        cx.set_global(AppInactive(false));
+    let Some(since) = cx.try_global::<AppInactive>().and_then(|a| a.0) else {
+        return;
+    };
+    cx.set_global(AppInactive(None));
+    if cx.background_executor().now().duration_since(since) >= RETURN_DEBOUNCE {
         cx.defer(recheck_all);
     }
 }
@@ -316,7 +335,9 @@ pub(crate) fn window_activated(cx: &mut App) {
 /// changed reads its media again and is offered the sheet for new items.
 pub fn recheck_all(cx: &mut App) {
     let app = AppState::global(cx);
-    let docs: Vec<DocId> = app.read(cx).document_windows().map(|w| w.doc).collect();
+    // One recheck per document, however many windows it has.
+    let docs: std::collections::BTreeSet<DocId> =
+        app.read(cx).windows().iter().map(|w| w.doc).collect();
     app.update(cx, |s, cx| {
         let mut changed = false;
         for doc in docs {

@@ -413,6 +413,7 @@ fn coming_back_to_the_app_rechecks_the_media(cx: &mut TestAppContext) {
     f.set_media(vec![media(1, "a", None)]);
     let mut s = setup_with(cx, f, false);
     s.cx.deactivate_window();
+    s.cx.executor().advance_clock(Duration::from_secs(5));
     s.cx.run_until_parked();
     s.fake
         .set_media(vec![media(1, "a", Some(OfflineReasonRow::Missing))]);
@@ -423,4 +424,118 @@ fn coming_back_to_the_app_rechecks_the_media(cx: &mut TestAppContext) {
     s.cx.run_until_parked();
     assert!(s.fake.calls().iter().any(|c| c == "recheck_media"));
     assert_eq!(s.sheet().as_deref(), Some(TITLE));
+}
+
+fn rechecks(s: &Setup) -> usize {
+    s.fake
+        .calls()
+        .iter()
+        .filter(|c| *c == "recheck_media")
+        .count()
+}
+
+fn activate(s: &mut Setup) {
+    s.window
+        .update(&mut s.cx, |_, window, _| window.activate_window())
+        .unwrap();
+    s.cx.run_until_parked();
+}
+
+/// Review fix: a file panel taking the keyboard is not the app leaving.
+#[gpui::test]
+fn a_file_panel_is_not_the_app_leaving(cx: &mut TestAppContext) {
+    let f = demo_fake();
+    f.set_media(vec![media(1, "a", None)]);
+    let mut s = setup_with(cx, f, false);
+    s.menu("media.import");
+    assert_eq!(s.panels.rows(), ["7"]);
+    s.cx.deactivate_window();
+    s.cx.executor().advance_clock(Duration::from_secs(5));
+    s.cx.run_until_parked();
+    s.panels.answer(&[]);
+    s.cx.run_until_parked();
+    activate(&mut s);
+    assert_eq!(rechecks(&s), 0, "no recheck after a panel");
+}
+
+/// Review fix: an alert of ours up is not the app leaving either.
+#[gpui::test]
+fn a_prompt_is_not_the_app_leaving(cx: &mut TestAppContext) {
+    let f = demo_fake();
+    f.set_media(vec![media(1, "a", None)]);
+    let mut s = setup_with(cx, f, false);
+    s.app.update(&mut s.cx, |a, cx| {
+        a.store
+            .post_alert(vizdaw_app::AlertItem::new("Some Alert", "text"));
+        cx.notify();
+    });
+    s.cx.run_until_parked();
+    assert!(s.cx.has_pending_prompt());
+    s.cx.deactivate_window();
+    s.cx.executor().advance_clock(Duration::from_secs(5));
+    s.cx.run_until_parked();
+    s.cx.simulate_prompt_answer("OK");
+    s.cx.run_until_parked();
+    activate(&mut s);
+    assert_eq!(rechecks(&s), 0, "no recheck after a prompt");
+}
+
+/// Review fix: focus churn (back within a moment) does not recheck; a
+/// real app switch rechecks once.
+#[gpui::test]
+fn only_a_real_return_rechecks_once(cx: &mut TestAppContext) {
+    let f = demo_fake();
+    f.set_media(vec![media(1, "a", None)]);
+    let mut s = setup_with(cx, f, false);
+    s.cx.deactivate_window();
+    activate(&mut s);
+    assert_eq!(rechecks(&s), 0, "back at once: no recheck");
+    s.cx.deactivate_window();
+    s.cx.executor().advance_clock(Duration::from_secs(5));
+    s.cx.run_until_parked();
+    activate(&mut s);
+    assert_eq!(rechecks(&s), 1);
+    activate(&mut s);
+    assert_eq!(rechecks(&s), 1, "once");
+}
+
+/// Review fix: a document with two windows is rechecked once.
+#[gpui::test]
+fn a_document_with_two_windows_is_rechecked_once(cx: &mut TestAppContext) {
+    let f = demo_fake();
+    f.set_media(vec![media(1, "a", None)]);
+    let mut s = setup_with(cx, f, false);
+    let doc = s.doc();
+    let app = s.app.clone();
+    s.cx.update(|_, cx| {
+        DocumentWindow::open_mixer(&app, doc, cx).unwrap();
+    });
+    s.cx.run_until_parked();
+    let windows = s.app.read_with(&s.cx, |a, _| a.windows().len());
+    assert_eq!(windows, 2);
+    s.cx.update(|_, cx| vizdaw_gpui::sheets::relink::recheck_all(cx));
+    s.cx.run_until_parked();
+    assert_eq!(rechecks(&s), 1);
+}
+
+/// Review: each row's Locate… relinks its own item.
+#[gpui::test]
+fn locate_relinks_the_row_it_is_on(cx: &mut TestAppContext) {
+    let f = demo_fake();
+    f.set_media(vec![
+        media(1, "a", Some(OfflineReasonRow::Missing)),
+        media(5, "c", Some(OfflineReasonRow::Changed)),
+    ]);
+    let mut s = setup_with(cx, f, false);
+    s.click("button", "Locate c");
+    assert_eq!(s.panels.place(0).name, "c");
+    s.panels.answer(&["/x/c.caf"]);
+    s.cx.run_until_parked();
+    assert_eq!(
+        s.started(),
+        [JobRequest::Relink {
+            media: 5,
+            path: "/x/c.caf".into()
+        }]
+    );
 }

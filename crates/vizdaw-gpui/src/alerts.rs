@@ -67,6 +67,13 @@ impl Presenter {
     }
 }
 
+/// One of our prompts is up, or an app question waits for its window (a
+/// window losing the keyboard to it is not the app leaving).
+pub(crate) fn prompting(cx: &App) -> bool {
+    cx.try_global::<Presenter>()
+        .is_some_and(|p| !p.busy.is_empty() || !p.asks.is_empty())
+}
+
 /// What each window shows of ours now.
 pub fn showing(cx: &App) -> Vec<(AnyWindowHandle, Showing)> {
     cx.try_global::<Presenter>()
