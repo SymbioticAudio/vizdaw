@@ -154,16 +154,15 @@ impl Prefs {
     }
 
     /// The default project format; a missing or damaged value is 48 kHz,
-    /// 24-bit.
+    /// 24-bit, and a rate alone keeps 24-bit (Swift).
     pub fn default_format(&self) -> ProjectFormatRow {
         self.map
             .get(DEFAULT_FORMAT_KEY)
             .and_then(Value::as_str)
-            .and_then(parse_format)
-            .unwrap_or(ProjectFormatRow {
-                sample_rate: 48_000,
-                depth: BitDepthRow::Int24,
-            })
+            .map_or(
+                crate::formats::FALLBACK_FORMAT,
+                crate::formats::parse_stored,
+            )
     }
 
     /// Writes the default project format; on a failure nothing changes.
@@ -205,22 +204,6 @@ impl Prefs {
         std::fs::write(&tmp, text).map_err(fail)?;
         std::fs::rename(&tmp, path).map_err(fail)
     }
-}
-
-/// `<rate>/<16|24|32f>` with a project rate.
-fn parse_format(s: &str) -> Option<ProjectFormatRow> {
-    let (rate, depth) = s.split_once('/')?;
-    let sample_rate: u32 = rate.parse().ok()?;
-    if !vizdaw_ffi::project_rates().contains(&sample_rate) {
-        return None;
-    }
-    let depth = match depth {
-        "16" => BitDepthRow::Int16,
-        "24" => BitDepthRow::Int24,
-        "32f" => BitDepthRow::Float32,
-        _ => return None,
-    };
-    Some(ProjectFormatRow { sample_rate, depth })
 }
 
 fn decode(v: &Value) -> Option<TransportLayout> {

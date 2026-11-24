@@ -3,12 +3,18 @@
 //! from `idle` while any is listed, and answers each ended one through
 //! [`answer`], the one answer the UI and the control channel share.
 
+use core_control::error::ControlError;
+use core_control::registry::ArgValue;
 use vizdaw_ffi::{
-    BounceResultRow, ImportTargetRow, JobKindRow, JobRow, JobStateRow, ProjectFormatRow, VizError,
+    AafExportRequestRow, AafImportRequestRow, BounceRequestRow, BounceResultRow,
+    ClipExportRequestRow, DawprojectExportRequestRow, DawprojectImportRequestRow,
+    DawprojectMergeRequestRow, ForDawRequestRow, ImportTargetRow, JobKindRow, JobRow, JobStateRow,
+    MidiImportRequestRow, ProjectFormatRow, SmfExportRequestRow, VizError,
 };
 
 use crate::alerts::AlertItem;
 use crate::document::DocumentModel;
+use crate::formats::{int, text};
 use crate::session::DocSession;
 
 /// How long a job's control call waits for the job to end (the server's
@@ -189,6 +195,170 @@ pub fn job_text(kind: JobKindRow) -> &'static str {
         K::ExportAaf => "Exporting AAF…",
         K::ImportAaf => "Importing AAF…",
     }
+}
+
+/// A job a File command starts, as its typed request: what the control
+/// channel parsed (or a sheet filled in), started on a document's
+/// session by [`FileJob::start`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum FileJob {
+    /// `media.import`.
+    Import {
+        paths: Vec<String>,
+        target: Option<ImportTargetRow>,
+    },
+    /// `media.convert`.
+    Convert,
+    /// `file.project_settings` with a new format.
+    Format(ProjectFormatRow),
+    /// `media.relink`.
+    Relink { media: u64, path: String },
+    /// `file.bounce`.
+    Bounce(BounceRequestRow),
+    /// `file.import_midi`.
+    ImportMidi(MidiImportRequestRow),
+    /// `file.export_midi`.
+    ExportMidi(SmfExportRequestRow),
+    /// `file.export_midi_clip`.
+    ExportMidiClip(ClipExportRequestRow),
+    /// `file.export_for_daw`.
+    ForDaw(ForDawRequestRow),
+    /// `file.export_dawproject`.
+    ExportDawproject(DawprojectExportRequestRow),
+    /// `file.import_dawproject` into a new project.
+    ImportDawproject(DawprojectImportRequestRow),
+    /// `file.import_dawproject` with `mode` merge.
+    MergeDawproject(DawprojectMergeRequestRow),
+    /// `file.import_aaf`.
+    ImportAaf(AafImportRequestRow),
+    /// `file.export_aaf`.
+    ExportAaf(AafExportRequestRow),
+}
+
+impl FileJob {
+    /// The kind of job it starts.
+    pub fn kind(&self) -> JobKindRow {
+        use JobKindRow as K;
+        match self {
+            FileJob::Import { .. } => K::Import,
+            FileJob::Convert => K::Convert,
+            FileJob::Format(_) => K::Format,
+            FileJob::Relink { .. } => K::Relink,
+            FileJob::Bounce(_) => K::Bounce,
+            FileJob::ImportMidi(_) => K::ImportMidi,
+            FileJob::ExportMidi(_) | FileJob::ExportMidiClip(_) => K::ExportMidi,
+            FileJob::ForDaw(_) => K::ExportProject,
+            FileJob::ExportDawproject(_) => K::ExportDawproject,
+            FileJob::ImportDawproject(_) => K::ImportProject,
+            FileJob::MergeDawproject(_) => K::MergeDawproject,
+            FileJob::ImportAaf(_) => K::ImportAaf,
+            FileJob::ExportAaf(_) => K::ExportAaf,
+        }
+    }
+
+    /// The title of the alert (the channel: of the failure, "<title>:
+    /// <message>") when the session refuses to start it (Swift's
+    /// `.thrown(error, …)` titles per command).
+    pub fn refusal_title(&self) -> &'static str {
+        match self {
+            FileJob::Import { .. }
+            | FileJob::ImportMidi(_)
+            | FileJob::ImportDawproject(_)
+            | FileJob::ImportAaf(_) => "Import Failed",
+            FileJob::Convert => "Convert Failed",
+            FileJob::Format(_) => "Project Settings Failed",
+            FileJob::Relink { .. } => "Relink Failed",
+            FileJob::Bounce(_) => "Bounce Failed",
+            FileJob::ExportMidi(_)
+            | FileJob::ExportMidiClip(_)
+            | FileJob::ForDaw(_)
+            | FileJob::ExportDawproject(_)
+            | FileJob::ExportAaf(_) => "Export Failed",
+            FileJob::MergeDawproject(_) => "DAWproject Merge Failed",
+        }
+    }
+
+    /// Starts it on `s`: the job's ID, or the session's refusal.
+    pub fn start(&self, s: &dyn DocSession) -> Result<u64, VizError> {
+        match self.clone() {
+            FileJob::Import { paths, target } => s.import_audio(paths, target),
+            FileJob::Convert => s.convert_media(),
+            FileJob::Format(f) => s.set_project_format(f),
+            FileJob::Relink { media, path } => s.relink_media(media, path),
+            FileJob::Bounce(r) => s.bounce(r),
+            FileJob::ImportMidi(r) => s.import_midi(r),
+            FileJob::ExportMidi(r) => s.export_midi(r),
+            FileJob::ExportMidiClip(r) => s.export_midi_clip(r),
+            FileJob::ForDaw(r) => s.export_for_daw(r),
+            FileJob::ExportDawproject(r) => s.export_dawproject(r),
+            FileJob::ImportDawproject(r) => s.import_dawproject(r),
+            FileJob::MergeDawproject(r) => s.merge_dawproject(r),
+            FileJob::ImportAaf(r) => s.import_aaf(r),
+            FileJob::ExportAaf(r) => s.export_aaf(r),
+        }
+    }
+}
+
+/// The refusal of a `media` that names no media item.
+pub const NOT_A_MEDIA_ITEM: &str =
+    "media.relink: `media` must name a media item (see state.get media)";
+
+/// `media.import` over the channel: one file (`path`; none is the "Open"
+/// dialog), placed at `seq`/`lane`/`tick` when `seq` is given, else into
+/// the pool only.
+pub fn media_import_request(args: &[(String, ArgValue)]) -> Result<FileJob, ControlError> {
+    let id = "media.import";
+    let Some(path) = text(id, args, "path")? else {
+        return Err(ControlError::dialog("Open", &["path"]));
+    };
+    let id_arg = |name: &str| -> Result<Option<u64>, ControlError> {
+        int(id, args, name)?
+            .map(|n| {
+                u64::try_from(n).map_err(|_| ControlError::params(id, format!("`{name}` is an ID")))
+            })
+            .transpose()
+    };
+    let target = match id_arg("seq")? {
+        Some(seq) => Some(ImportTargetRow {
+            seq,
+            lane: id_arg("lane")?,
+            tick: int(id, args, "tick")?.unwrap_or(0),
+        }),
+        None => None,
+    };
+    Ok(FileJob::Import {
+        paths: vec![path.to_owned()],
+        target,
+    })
+}
+
+/// `media.relink` over the channel: `media` (an item `doc`'s session
+/// lists) relinked to `path` (none is the "Relink" dialog).
+pub fn relink_request(
+    args: &[(String, ArgValue)],
+    doc: &DocumentModel,
+) -> Result<FileJob, ControlError> {
+    let id = "media.relink";
+    let Some(path) = text(id, args, "path")? else {
+        return Err(ControlError::dialog("Relink", &["path"]));
+    };
+    let media = int(id, args, "media")?
+        .and_then(|n| u64::try_from(n).ok())
+        .filter(|m| {
+            doc.session()
+                .media()
+                .is_ok_and(|rows| rows.iter().any(|r| r.id == *m))
+        })
+        .ok_or_else(|| {
+            ControlError::new(
+                core_control::error::ErrorCode::InvalidParams,
+                NOT_A_MEDIA_ITEM,
+            )
+        })?;
+    Ok(FileJob::Relink {
+        media,
+        path: path.to_owned(),
+    })
 }
 
 fn running(id: u64, kind: JobKindRow) -> JobRow {

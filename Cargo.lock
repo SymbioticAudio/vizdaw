@@ -6387,6 +6387,7 @@ dependencies = [
  "core-control",
  "core-ffi",
  "core-model",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
