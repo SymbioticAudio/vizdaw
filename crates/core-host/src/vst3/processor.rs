@@ -206,6 +206,9 @@ pub(crate) struct ProcessorSetup {
     pub first: Vec<(ParamID, f64)>,
     /// Edits from the controller (normalised), for the next block.
     pub edits: Arc<ArrayQueue<(ParamID, f64)>>,
+    /// Where a dropped processor leaves the edit it popped but had no
+    /// queue for (capacity 1; older than anything left in `edits`).
+    pub returned: Arc<ArrayQueue<(ParamID, f64)>>,
     /// Values for the controller (normalised): host values and what the
     /// processor reported.
     pub echoes: Arc<ArrayQueue<(ParamID, f64)>>,
@@ -233,6 +236,9 @@ pub struct Vst3Processor {
     first: Box<[(ParamID, f64)]>,
     first_sent: bool,
     edits: Arc<ArrayQueue<(ParamID, f64)>>,
+    /// An edit popped while every queue was taken: sent first next block.
+    held: Option<(ParamID, f64)>,
+    returned: Arc<ArrayQueue<(ParamID, f64)>>,
     echoes: Arc<ArrayQueue<(ParamID, f64)>>,
     alive: Arc<AtomicBool>,
     continuous: i64,
@@ -299,6 +305,8 @@ impl Vst3Processor {
             first: s.first.into_boxed_slice(),
             first_sent: false,
             edits: s.edits,
+            held: None,
+            returned: s.returned,
             echoes: s.echoes,
             alive: s.alive,
             continuous: 0,
@@ -392,13 +400,19 @@ impl Vst3Processor {
         let params = self.data.params_in();
         params.clear();
         if !self.first_sent {
+            // The list has a queue for each of them (`RtData::new`).
             for (id, v) in self.first.iter() {
                 params.add(*id, 0, *v, false);
             }
             self.first_sent = true;
         }
-        while let Some((id, v)) = self.edits.pop() {
-            params.add(id, 0, v, false);
+        // Edits in order; one with no queue left waits for the next block,
+        // and so do the ones after it.
+        while let Some((id, v)) = self.held.take().or_else(|| self.edits.pop()) {
+            if !params.add(id, 0, v, false) {
+                self.held = Some((id, v));
+                break;
+            }
         }
         for p in ctx.params_in.iter().take(MAX_PARAM_EVENTS) {
             let Ok(id) = ParamID::try_from(p.id.0) else {
@@ -532,7 +546,9 @@ impl Vst3Processor {
             }
         }
         for q in self.data.params_out().queues() {
-            let Some((_, v)) = q.last() else {
+            // A plug-in's NaN or infinity reaches neither the host's
+            // document nor the controller.
+            let Some((_, v)) = q.last().filter(|(_, v)| v.is_finite()) else {
                 continue;
             };
             let _ = self.echoes.push((q.id(), v));
@@ -584,6 +600,9 @@ impl Drop for Vst3Processor {
     fn drop(&mut self) {
         if self.started {
             self.data.set_processing(false);
+        }
+        if let Some(e) = self.held.take() {
+            let _ = self.returned.push(e);
         }
         self.alive.store(false, Ordering::Release);
     }

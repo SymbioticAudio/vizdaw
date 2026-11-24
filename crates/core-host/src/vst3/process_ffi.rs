@@ -25,8 +25,10 @@ use vst3::{Class, ComPtr, ComWrapper};
 /// Most points one parameter's queue holds in a block; a later point that
 /// does not fit replaces the last one (the latest value wins).
 pub(crate) const QUEUE_POINTS: usize = 32;
-/// Most parameters with changes in one block, each way; changes of more
-/// are dropped.
+/// Most parameters with changes in one block, each way, beyond the
+/// values a first block carries (the input list gets a queue for each of
+/// those too); host changes of more are dropped, controller edits wait
+/// for the next block.
 pub(crate) const QUEUES: usize = 128;
 /// Most events the plug-in may add to the output event list in a block.
 pub(crate) const OUT_EVENTS: usize = 128;
@@ -159,9 +161,9 @@ pub(crate) struct ParamChanges {
 }
 
 impl ParamChanges {
-    fn new() -> ParamChanges {
+    fn new(queues: usize) -> ParamChanges {
         ParamChanges {
-            queues: (0..QUEUES)
+            queues: (0..queues)
                 .map(|_| ComWrapper::new(ParamQueue::new()))
                 .collect(),
             used: Cell::new(0),
@@ -390,19 +392,22 @@ pub(crate) struct RtData {
 unsafe impl Send for RtData {}
 
 impl RtData {
-    /// Allocates the lists, the context and buses with `in_counts` and
-    /// `out_counts` channels (main thread).
+    /// Allocates the lists (the input changes with room for `first`
+    /// parameters beyond [`QUEUES`], so a first block's values all fit),
+    /// the context and buses with `in_counts` and `out_counts` channels
+    /// (main thread).
     pub(crate) fn new(
         processor: ComPtr<IAudioProcessor>,
         in_counts: &[u16],
         out_counts: &[u16],
+        first: usize,
     ) -> RtData {
         RtData {
             processor,
             ins: Buses::new(in_counts),
             outs: Buses::new(out_counts),
-            params_in: ComWrapper::new(ParamChanges::new()),
-            params_out: ComWrapper::new(ParamChanges::new()),
+            params_in: ComWrapper::new(ParamChanges::new(QUEUES.saturating_add(first))),
+            params_out: ComWrapper::new(ParamChanges::new(QUEUES)),
             events_in: ComWrapper::new(EventList::new(crate::process::MAX_EVENTS)),
             events_out: ComWrapper::new(EventList::new(OUT_EVENTS)),
             // SAFETY: an all-zero `ProcessContext` is a valid plain value

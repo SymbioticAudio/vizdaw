@@ -123,6 +123,10 @@ fn activation_follows_the_sdk_order_and_deactivation_reverses_it() {
     assert_eq!(c.last_setup_block, 256, "{c:?}");
     assert_eq!(c.last_process_mode, 0, "real time: {c:?}");
     assert!(c.arrangements >= 1, "{c:?}");
+    assert!(
+        c.last_arrangement < c.last_setup,
+        "arrangements first: {c:?}"
+    );
     // Main in, sidechain in, main out.
     assert_eq!(c.buses_on, 3, "{c:?}");
     assert_eq!(c.sidechain_on, 1, "{c:?}");
@@ -465,5 +469,109 @@ fn the_render_mode_is_set_up_at_activation_and_kept_when_a_switch_is_refused() {
     b.quiet(proc.as_mut(), 64);
     let c = probe.counters();
     assert_eq!((c.last_process_mode, c.last_data_mode), (0, 0), "{c:?}");
+    inst.deactivate(proc);
+}
+
+/// Makes the probe's controller perform `ids` (normalised `v`).
+fn perform(probe: &Vst3Probe, ids: std::ops::Range<u32>, v: f64) {
+    for id in ids {
+        assert_eq!(probe.edit(Vst3Edit::Perform(id, v)), 0);
+    }
+}
+
+#[test]
+fn more_first_block_values_than_queues_all_reach_the_component() {
+    let (_d, copy, probe) = private();
+    let mut inst = Vst3Instance::load(&copy, VST3_GAIN_ID).unwrap();
+    // 300 values for the first block (edits made while inactive).
+    perform(&probe, 1000..1300, 0.5);
+    assert_eq!(inst.gestures().len(), 300);
+    let mut proc = inst.activate(48_000.0, 64).unwrap();
+    let mut b = Block::new(inst.info(), 64);
+    b.quiet(proc.as_mut(), 64);
+    assert_eq!(probe.counters().param_points, 300, "all in the first block");
+    b.quiet(proc.as_mut(), 64);
+    assert_eq!(probe.counters().param_points, 300, "and only there");
+    inst.deactivate(proc);
+}
+
+#[test]
+fn more_edits_than_queues_reach_the_component_over_blocks() {
+    let (_d, copy, probe) = private();
+    let mut inst = Vst3Instance::load(&copy, VST3_GAIN_ID).unwrap();
+    let mut proc = inst.activate(48_000.0, 64).unwrap();
+    let mut b = Block::new(inst.info(), 64);
+    perform(&probe, 1000..1300, 0.5);
+    inst.gestures();
+    for _ in 0..4 {
+        b.quiet(proc.as_mut(), 64);
+    }
+    assert_eq!(probe.counters().param_points, 300, "none lost");
+    // A processor that goes after one block leaves the rest (and the edit
+    // it held) for the next first block.
+    perform(&probe, 2000..2300, 0.5);
+    inst.gestures();
+    b.quiet(proc.as_mut(), 64);
+    inst.deactivate(proc);
+    let mut proc = inst.activate(48_000.0, 64).unwrap();
+    for _ in 0..4 {
+        b.quiet(proc.as_mut(), 64);
+    }
+    assert_eq!(probe.counters().param_points, 600, "none lost");
+    inst.deactivate(proc);
+}
+
+#[test]
+fn an_edit_that_overflowed_is_retried_and_never_overwrites_a_newer_one() {
+    let (_d, copy, probe) = private();
+    let mut inst = Vst3Instance::load(&copy, VST3_GAIN_ID).unwrap();
+    let mut proc = inst.activate(48_000.0, 64).unwrap();
+    let mut b = Block::new(inst.info(), 64);
+    // Fill the processor's edit queue (1024), then one more edit.
+    for _ in 0..1024 {
+        probe.edit(Vst3Edit::Perform(VST3_PARAM_MODE, 0.5));
+    }
+    inst.gestures();
+    probe.edit(Vst3Edit::Perform(VST3_PARAM_GAIN, 0.3));
+    inst.gestures();
+    b.quiet(proc.as_mut(), 64);
+    // The overflowed edit is retried while the processor runs.
+    inst.gestures();
+    b.quiet(proc.as_mut(), 64);
+    let gain = |probe: &Vst3Probe| probe.counters().param_in(VST3_PARAM_GAIN);
+    assert!(close(gain(&probe).unwrap(), 0.3));
+    probe.edit(Vst3Edit::Perform(VST3_PARAM_GAIN, 0.5));
+    inst.gestures();
+    b.quiet(proc.as_mut(), 64);
+    assert!(close(gain(&probe).unwrap(), 0.5));
+    // The next activation does not send the stale 0.3.
+    inst.deactivate(proc);
+    let points = probe.counters().param_points;
+    let mut proc = inst.activate(48_000.0, 64).unwrap();
+    b.quiet(proc.as_mut(), 64);
+    assert_eq!(probe.counters().param_points, points, "nothing pending");
+    assert!(close(gain(&probe).unwrap(), 0.5));
+    inst.deactivate(proc);
+}
+
+#[test]
+fn non_finite_output_values_reach_neither_the_host_nor_the_controller() {
+    let (_d, copy, probe) = private();
+    let mut inst = Vst3Instance::load(&copy, VST3_GAIN_ID).unwrap();
+    probe.set_mode(Vst3Mode::NanOutput);
+    let mut proc = inst.activate(48_000.0, 64).unwrap();
+    let mut b = Block::new(inst.info(), 64);
+    let mode = [ParamChange {
+        frame: 0,
+        id: pid(VST3_PARAM_MODE),
+        value: 2.0,
+    }];
+    b.run(proc.as_mut(), 64, &[], &mode, &BlockInfo::default());
+    assert_eq!(b.out.as_slice(), [], "no NaN to the host");
+    inst.idle();
+    for id in [VST3_PARAM_METER, VST3_PARAM_SECRET] {
+        let v = inst.param_value(pid(id)).unwrap();
+        assert!(v.is_finite(), "{id}: {v}");
+    }
     inst.deactivate(proc);
 }

@@ -10,9 +10,9 @@
 //! arrive normalised through the component handler, from any thread, and
 //! are converted only when [`PluginInstance::gestures`] reads them.
 //!
-//! Activation (host track H1 Task 4) follows the SDK's order:
-//! `setupProcessing` (in the stored render mode, at the host's rate and
-//! block size), the plug-in's own bus arrangements confirmed, every audio
+//! Activation (host track H1 Task 4) follows the SDK's order: the
+//! plug-in's own bus arrangements confirmed, `setupProcessing` (in the
+//! stored render mode, at the host's rate and block size), every audio
 //! bus and the first event input turned on, then `setActive(true)`; the
 //! [`Vst3Processor`] calls `setProcessing` on the audio thread.
 //! Deactivation undoes it in reverse. Values reach the component as
@@ -75,6 +75,8 @@ const INFINITE_TAIL: u32 = u32::MAX;
 struct Active {
     /// Controller edits for the processor (normalised).
     edits: Arc<ArrayQueue<(u32, f64)>>,
+    /// The edit a dropped processor had popped but not sent.
+    returned: Arc<ArrayQueue<(u32, f64)>>,
     /// Values for the controller from the processor (normalised).
     echoes: Arc<ArrayQueue<(u32, f64)>>,
     /// Cleared when the processor is dropped (by `deactivate` or not).
@@ -238,7 +240,8 @@ impl Vst3Instance {
         let Some(a) = self.active.take() else {
             return;
         };
-        while let Some((id, n)) = a.edits.pop() {
+        // Oldest first, so later values win.
+        while let Some((id, n)) = a.returned.pop().or_else(|| a.edits.pop()) {
             self.pending.insert(id, n);
         }
         self.plugin.set_active(false);
@@ -293,6 +296,8 @@ impl PluginInstance for Vst3Instance {
         let Some(processor) = self.plugin.audio_processor() else {
             return failed("the plug-in has no audio processor");
         };
+        // The SDK's order: arrangements, then the processing setup.
+        self.plugin.keep_arrangements();
         // The stored render mode (`set_offline`) at the host's setup.
         if self
             .plugin
@@ -305,7 +310,6 @@ impl PluginInstance for Vst3Instance {
         if !self.plugin.can_process_f32() {
             return failed("the plug-in cannot process 32-bit samples");
         }
-        self.plugin.keep_arrangements();
         // Buses may have changed while inactive.
         self.read_info();
         self.plugin.activate_buses(true);
@@ -333,18 +337,21 @@ impl PluginInstance for Vst3Instance {
         let out_counts: Vec<u16> = self.info.outputs.iter().map(|p| p.channels).collect();
         let active = Active {
             edits: Arc::new(ArrayQueue::new(EDIT_QUEUE)),
+            returned: Arc::new(ArrayQueue::new(1)),
             echoes: Arc::new(ArrayQueue::new(ECHO_QUEUE)),
             alive: Arc::new(AtomicBool::new(true)),
         };
+        let first = self.take_pending();
         let setup = ProcessorSetup {
-            data: RtData::new(processor, &in_counts, &out_counts),
+            data: RtData::new(processor, &in_counts, &out_counts, first.len()),
             sample_rate,
             max_frames,
             offline: self.offline,
             maps,
             midi,
-            first: self.take_pending(),
+            first,
             edits: active.edits.clone(),
+            returned: active.returned.clone(),
             echoes: active.echoes.clone(),
             alive: active.alive.clone(),
         };
@@ -448,20 +455,34 @@ impl PluginInstance for Vst3Instance {
 
     fn gestures(&mut self) -> Vec<ParamEvent> {
         self.reclaim();
+        // While a processor runs, `pending` holds only edits its full queue
+        // did not take: they go first, before newer edits.
+        if let Some(a) = &self.active {
+            while let Some((&id, &n)) = self.pending.first_key_value() {
+                if a.edits.push((id, n)).is_err() {
+                    break;
+                }
+                self.pending.remove(&id);
+            }
+        }
         let edits = self.handler.take_edits();
         let mut out = Vec::with_capacity(edits.len());
         for e in edits {
             out.push(match e {
                 Edit::Begin(id) => ParamEvent::Begin(ParamId(u64::from(id))),
                 Edit::End(id) => ParamEvent::End(ParamId(u64::from(id))),
+                // A controller's NaN or infinity is never sent anywhere.
+                Edit::Perform(_, n) if !n.is_finite() => continue,
                 Edit::Perform(id, n) => {
                     // The component gets the edit where it reads next: the
                     // running processor's next block, else the next first
-                    // block (also when the processor's queue is full).
+                    // block. One the full queue refused waits in `pending`
+                    // (retried above), and so do the edits after it while
+                    // any waits, so no older value lands after a newer one.
                     let to_processor = self
                         .active
                         .as_ref()
-                        .is_some_and(|a| a.edits.push((id, n)).is_ok());
+                        .is_some_and(|a| self.pending.is_empty() && a.edits.push((id, n)).is_ok());
                     if !to_processor {
                         self.pending.insert(id, n);
                     }

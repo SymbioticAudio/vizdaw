@@ -372,7 +372,8 @@ mod ix {
     pub const CLAP_DEINITS: usize = 67;
     pub const LAST_CONTEXT_RATE: usize = 68;
     pub const SIDECHAIN_ON: usize = 69;
-    pub const N: usize = 70;
+    pub const LAST_ARRANGEMENT: usize = 70;
+    pub const N: usize = 71;
 }
 
 static COUNTERS: [AtomicU64; ix::N] = [const { AtomicU64::new(0) }; ix::N];
@@ -457,6 +458,7 @@ const MODE_COMPONENT_INIT_FAILS: u32 = 3;
 const MODE_CONTROLLER_INIT_FAILS: u32 = 4;
 const MODE_OFFLINE_REFUSED: u32 = 5;
 const MODE_REALTIME_REFUSED: u32 = 6;
+const MODE_NAN_OUTPUT: u32 = 7;
 
 /// The component handler the latest controller was given.
 struct Handler(ComPtr<IComponentHandler>);
@@ -1122,8 +1124,16 @@ impl Proc {
         }
         // SAFETY: the host's output list (or null), for this call.
         if let Some(out) = unsafe { ComRef::from_raw(d.outputParameterChanges) } {
-            let meter = Some((VST3_PARAM_METER, f64::from(peak.min(1.0))));
-            let secret = mode_in.map(|m| (VST3_PARAM_SECRET, m));
+            let nan = mode() == MODE_NAN_OUTPUT;
+            let meter = Some((
+                VST3_PARAM_METER,
+                if nan {
+                    f64::NAN
+                } else {
+                    f64::from(peak.min(1.0))
+                },
+            ));
+            let secret = mode_in.map(|m| (VST3_PARAM_SECRET, if nan { f64::NAN } else { m }));
             for (id, v) in [meter, secret].into_iter().flatten() {
                 let mut index = 0;
                 // SAFETY: plain calls on the host's list and the queue it
@@ -1151,6 +1161,7 @@ macro_rules! audio_processor {
                 _num_outs: int32,
             ) -> tresult {
                 bump(ix::ARRANGEMENTS);
+                stamp(ix::LAST_ARRANGEMENT);
                 kResultOk
             }
 
@@ -1790,6 +1801,9 @@ pub enum Vst3Mode {
     OfflineRefused = 5,
     /// `setupProcessing` refuses the real-time process mode.
     RealtimeRefused = 6,
+    /// `process` reports NaN for Meter and Secret in its output
+    /// parameter changes.
+    NanOutput = 7,
 }
 
 /// A component-handler call the probe makes the latest controller do.
@@ -1903,6 +1917,8 @@ pub struct Vst3Counters {
     pub last_setup_block: u64,
     /// `setBusArrangements` calls.
     pub arrangements: u64,
+    /// When the latest `setBusArrangements` came.
+    pub last_arrangement: u64,
     /// `activateBus(…, true)` calls.
     pub buses_on: u64,
     /// `process` calls.
@@ -2066,6 +2082,7 @@ impl Vst3Probe {
             last_setup_rate: v[ix::LAST_SETUP_RATE],
             last_setup_block: v[ix::LAST_SETUP_BLOCK],
             arrangements: v[ix::ARRANGEMENTS],
+            last_arrangement: v[ix::LAST_ARRANGEMENT],
             buses_on: v[ix::BUSES_ON],
             process_calls: v[ix::PROCESS_CALLS],
             first_process: v[ix::FIRST_PROCESS],
