@@ -36,6 +36,9 @@ use sdk::Vst::{
     IMessageTrait, MediaTypes_, ParamID, ParamValue, ParameterInfo, ProcessModes_, ProcessSetup,
     String128, SymbolicSampleSizes_, TChar,
 };
+use sdk::Vst::{
+    ControllerNumbers_, IMidiMapping, IMidiMappingTrait, SpeakerArr, SpeakerArrangement, kNoParamId,
+};
 use sdk::{
     FIDString, FUnknown, IBStream, IBStreamTrait, IPluginBaseTrait, IPluginFactory,
     IPluginFactory2, IPluginFactory2Trait, IPluginFactory3, IPluginFactory3Trait,
@@ -1110,6 +1113,139 @@ impl Plugin {
         };
         // SAFETY: `setup` is ours for the call.
         Some(unsafe { p.setupProcessing(&mut setup) } == kResultOk)
+    }
+}
+
+/// MIDI controller numbers the host maps through `IMidiMapping`: CC 0–127,
+/// then channel aftertouch (`kAfterTouch`) and pitch bend (`kPitchBend`).
+pub(crate) const MIDI_CONTROLLERS: usize = ControllerNumbers_::kCountCtrlNumber as usize;
+
+impl Plugin {
+    /// Whether the processor takes 32-bit samples.
+    pub(crate) fn can_process_f32(&self) -> bool {
+        self.processor.as_ref().is_some_and(|p| {
+            // SAFETY: a plain query.
+            let r = unsafe { p.canProcessSampleSize(SymbolicSampleSizes_::kSample32 as int32) };
+            r == kResultOk
+        })
+    }
+
+    /// Confirms the speaker arrangements the processor reports for its
+    /// audio buses (`getBusArrangement`, then `setBusArrangements` with
+    /// the same): the host takes the plug-in's layout. A refusal is
+    /// harmless; the buses' channel counts are read afterwards.
+    pub(crate) fn keep_arrangements(&self) {
+        let Some(p) = &self.processor else {
+            return;
+        };
+        let read = |input: bool| -> Vec<SpeakerArrangement> {
+            let dir = if input { 0 } else { 1 };
+            self.audio_buses(input)
+                .iter()
+                .enumerate()
+                .map(|(i, b)| {
+                    let mut a: SpeakerArrangement = 0;
+                    let i = i32::try_from(i).unwrap_or(0);
+                    // SAFETY: `a` is ours to fill.
+                    if unsafe { p.getBusArrangement(dir, i, &mut a) } == kResultOk {
+                        a
+                    } else {
+                        arrangement_of(b.channels)
+                    }
+                })
+                .collect()
+        };
+        let mut ins = read(true);
+        let mut outs = read(false);
+        let n_in = i32::try_from(ins.len()).unwrap_or(0);
+        let n_out = i32::try_from(outs.len()).unwrap_or(0);
+        // SAFETY: both arrays live for the call and hold the counts given.
+        unsafe { p.setBusArrangements(ins.as_mut_ptr(), n_in, outs.as_mut_ptr(), n_out) };
+    }
+
+    /// Turns every audio bus and the first event input on (or off).
+    pub(crate) fn activate_buses(&self, on: bool) {
+        let state = TBool::from(on);
+        let audio = MediaTypes_::kAudio as i32;
+        for (dir, n) in [
+            (0, self.audio_buses(true).len()),
+            (1, self.audio_buses(false).len()),
+        ] {
+            for i in 0..i32::try_from(n).unwrap_or(0) {
+                // SAFETY: a plain call on a bus the component lists.
+                unsafe { self.component.activateBus(audio, dir, i, state) };
+            }
+        }
+        if !self.event_inputs().is_empty() {
+            // SAFETY: as above.
+            unsafe {
+                self.component
+                    .activateBus(MediaTypes_::kEvent as i32, 0, 0, state)
+            };
+        }
+    }
+
+    /// `IComponent::setActive`; whether it succeeded.
+    pub(crate) fn set_active(&self, on: bool) -> bool {
+        // SAFETY: a plain call (main thread).
+        unsafe { self.component.setActive(TBool::from(on)) == kResultOk }
+    }
+
+    /// `getLatencySamples` (0 without a processor).
+    pub(crate) fn latency(&self) -> u32 {
+        // SAFETY: a plain query.
+        self.processor
+            .as_ref()
+            .map_or(0, |p| unsafe { p.getLatencySamples() })
+    }
+
+    /// `getTailSamples` (`kNoTail` without a processor).
+    pub(crate) fn tail(&self) -> u32 {
+        // SAFETY: a plain query.
+        self.processor
+            .as_ref()
+            .map_or(0, |p| unsafe { p.getTailSamples() })
+    }
+
+    /// The controller's MIDI controller assignments for event bus 0
+    /// (`IMidiMapping`): `MIDI_CONTROLLERS` entries per channel, 16
+    /// channels, `kNoParamId` where nothing is assigned; empty without
+    /// `IMidiMapping`.
+    pub(crate) fn midi_mapping(&self) -> Vec<ParamID> {
+        let Some(m) = self
+            .controller
+            .as_ref()
+            .and_then(|c| c.cast::<IMidiMapping>())
+        else {
+            return Vec::new();
+        };
+        let mut map = vec![kNoParamId; 16 * MIDI_CONTROLLERS];
+        for (k, slot) in map.iter_mut().enumerate() {
+            let channel = (k / MIDI_CONTROLLERS) as i16;
+            let ctrl = (k % MIDI_CONTROLLERS) as i16;
+            let mut id: ParamID = kNoParamId;
+            // SAFETY: `id` is ours to fill.
+            if unsafe { m.getMidiControllerAssignment(0, channel, ctrl, &mut id) } == kResultOk {
+                *slot = id;
+            }
+        }
+        map
+    }
+
+    /// The processor, for the audio thread's half
+    /// ([`super::process_ffi::RtData`]).
+    pub(crate) fn audio_processor(&self) -> Option<ComPtr<IAudioProcessor>> {
+        self.processor.clone()
+    }
+}
+
+/// The speaker arrangement of `channels` channels: mono, else the first
+/// `channels` speakers (stereo for 2).
+fn arrangement_of(channels: i32) -> SpeakerArrangement {
+    match channels {
+        c if c <= 1 => SpeakerArr::kMono,
+        c if c >= 64 => SpeakerArrangement::MAX,
+        c => (1u64 << c) - 1,
     }
 }
 

@@ -11,9 +11,9 @@ use core_host::{
 };
 use core_model::mixer::{ParamId, PluginFormat as Format, PluginRef};
 use test_plugins::{
-    VST3_COMPONENT_GAIN, VST3_GAIN_ID, VST3_PARAM_GAIN, VST3_PARAM_METER, VST3_PARAM_MODE,
-    VST3_PARAM_SECRET, VST3_PARAMS, VST3_SYNTH_ID, Vst3Counters, Vst3Edit, Vst3Mode, Vst3Probe,
-    vst3_restart,
+    VST3_COMPONENT_GAIN, VST3_GAIN_ID, VST3_PARAM_BEND, VST3_PARAM_GAIN, VST3_PARAM_METER,
+    VST3_PARAM_MOD, VST3_PARAM_MODE, VST3_PARAM_PRESSURE, VST3_PARAM_SECRET, VST3_PARAMS,
+    VST3_SYNTH_ID, Vst3Counters, Vst3Edit, Vst3Mode, Vst3Probe, vst3_restart,
 };
 
 /// A private copy of the test bundle, and a probe on its image.
@@ -81,7 +81,10 @@ fn a_split_plug_in_reads_its_buses_and_parameters() {
             pid(VST3_PARAM_GAIN),
             pid(VST3_PARAM_MODE),
             pid(VST3_PARAM_METER),
-            pid(VST3_PARAM_SECRET)
+            pid(VST3_PARAM_SECRET),
+            pid(VST3_PARAM_MOD),
+            pid(VST3_PARAM_BEND),
+            pid(VST3_PARAM_PRESSURE)
         ],
         "ParamIDs, not indices"
     );
@@ -154,7 +157,7 @@ fn a_single_component_plug_in_is_its_own_controller() {
     assert!(info.inputs.is_empty());
     let outs: Vec<_> = info.outputs.iter().map(|p| (p.channels, p.role)).collect();
     assert_eq!(outs, [(2, PortRole::Main), (2, PortRole::Aux)]);
-    assert_eq!(info.params.len(), 4);
+    assert_eq!(info.params.len(), VST3_PARAMS.len());
     let c = probe.counters();
     assert_eq!(c.component_inits, 1, "initialised once: {c:?}");
     assert_eq!(c.controller_inits, 0, "no separate controller: {c:?}");

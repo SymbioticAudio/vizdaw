@@ -4,14 +4,16 @@
 //! tests: a factory (`IPluginFactory3`) listing several classes, a split
 //! plug-in (component and a separate controller class, connected through
 //! `IConnectionPoint`) and a single-component one (the component is its
-//! own controller). Later tasks give the components audio and state.
+//! own controller). The components process audio (host track H1 Task 4)
+//! and report what the host gave them through the lifecycle counters.
 //!
 //! | class ID | name | sub-categories | what it does |
 //! |---|---|---|---|
-//! | [`VST3_GAIN_ID`] | Test Gain | `Fx` | split: a component (stereo main in and out, a stereo sidechain in) and the [`VST3_CONTROLLER_ID`] controller with the [`VST3_PARAMS`] |
-//! | [`VST3_SYNTH_ID`] | Test Synth | `Instrument\|Synth` | single component: an event input, two stereo outputs, the same parameters |
+//! | [`VST3_GAIN_ID`] | Test Gain | `Fx` | split: a component (stereo main in and out, a stereo sidechain in) and the [`VST3_CONTROLLER_ID`] controller with the [`VST3_PARAMS`]; output = input × Gain (dB) + sidechain; reports Meter (the output's peak) and echoes each Mode value as Secret through its output parameter changes |
+//! | [`VST3_SYNTH_ID`] | Test Synth | `Instrument\|Synth` | single component: an event input, two stereo outputs, the same parameters; output 1 is 0.5 while a note is held, output 2 always 0.25; `IMidiMapping` maps CC 1, pitch bend and channel aftertouch to Mod, Bend and Pressure |
 //! | [`VST3_CRASHER_ID`] | Test Crasher | `Fx` | crashes (SIGSEGV) in `createInstance` |
 //! | [`VST3_HANGER_ID`] | Test Hanger | `Fx` | never returns from `createInstance` |
+//! | [`VST3_PROCESS_CRASHER_ID`] | Test Process Crasher | `Fx` | Test Gain that crashes (SIGSEGV) in `process` |
 //! | [`VST3_CONTROLLER_ID`] | Test Controller | (controller class) | Test Gain's controller; not a plug-in |
 //!
 //! Like a plug-in built with the SDK, the factory is only handed out after
@@ -21,6 +23,9 @@
 //! destructor in this library (a pthread key, as Rust's `std` and many
 //! C++ plug-ins register): a host that unloads the library before such a
 //! thread exits crashes when the thread does.
+//!
+//! The latency and tail every component reports are set through the
+//! probe ([`crate::Vst3Probe::set_timing`]).
 //!
 //! The Gain component's state is [`VST3_COMPONENT_GAIN`] (a normalised
 //! value, 8 bytes little-endian); a controller given it through
@@ -44,7 +49,7 @@
 
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::thread::ThreadId;
 // The bindings' module (named after the SDK's vendor) is only named here.
 use vst3::Steinberg as sdk;
@@ -54,21 +59,24 @@ use vst3::{Class, ComPtr, ComRef, ComWrapper, Interface, uid};
 use sdk::PClassInfo_::ClassCardinality_;
 use sdk::PFactoryInfo_::FactoryFlags_;
 use sdk::Vst::BusInfo_::BusFlags_;
+use sdk::Vst::Event_::EventTypes_;
 use sdk::Vst::ParameterInfo_::ParameterFlags_;
 use sdk::Vst::{
-    BusDirection, BusDirections_, BusInfo, BusType, BusTypes_, IAttributeListTrait,
-    IAudioProcessor, IAudioProcessorTrait, IComponent, IComponentHandler, IComponentHandler2,
-    IComponentHandler2Trait, IComponentHandlerTrait, IComponentTrait, IConnectionPoint,
-    IConnectionPointTrait, IEditController, IEditControllerTrait, IHostApplication,
-    IHostApplicationTrait, IMessage, IMessageTrait, IoMode, MediaType, MediaTypes_, ParamID,
-    ParamValue, ParameterInfo, ProcessData, ProcessModes_, ProcessSetup, RoutingInfo,
-    SpeakerArrangement, String128, SymbolicSampleSizes_, TChar,
+    AudioBusBuffers, BusDirection, BusDirections_, BusInfo, BusType, BusTypes_, ControllerNumbers_,
+    CtrlNumber, Event, IAttributeListTrait, IAudioProcessor, IAudioProcessorTrait, IComponent,
+    IComponentHandler, IComponentHandler2, IComponentHandler2Trait, IComponentHandlerTrait,
+    IComponentTrait, IConnectionPoint, IConnectionPointTrait, IEditController,
+    IEditControllerTrait, IEventList, IEventListTrait, IHostApplication, IHostApplicationTrait,
+    IMessage, IMessageTrait, IMidiMapping, IMidiMappingTrait, IParamValueQueueTrait,
+    IParameterChanges, IParameterChangesTrait, IoMode, MediaType, MediaTypes_, ParamID, ParamValue,
+    ParameterInfo, ProcessData, ProcessModes_, ProcessSetup, RoutingInfo, SpeakerArrangement,
+    String128, SymbolicSampleSizes_, TChar,
 };
 use sdk::{
     FIDString, FUnknown, IBStream, IBStreamTrait, IPlugView, IPluginBaseTrait, IPluginFactory,
     IPluginFactory2Trait, IPluginFactory3, IPluginFactory3Trait, IPluginFactoryTrait, PClassInfo,
-    PClassInfo2, PClassInfoW, PFactoryInfo, TBool, TUID, int32, kInvalidArgument, kNoInterface,
-    kNotImplemented, kResultFalse, kResultOk, kResultTrue, tresult, uint32,
+    PClassInfo2, PClassInfoW, PFactoryInfo, TBool, TUID, int16, int32, kInvalidArgument,
+    kNoInterface, kNotImplemented, kResultFalse, kResultOk, kResultTrue, tresult, uint32,
 };
 
 /// Class ID of "Test Gain" (an effect), as the host spells it.
@@ -79,6 +87,8 @@ pub const VST3_SYNTH_ID: &str = "56495A44565354337E570000ABCD0002";
 pub const VST3_CRASHER_ID: &str = "56495A44565354337E570000ABCD0003";
 /// Class ID of "Test Hanger" (hangs when created).
 pub const VST3_HANGER_ID: &str = "56495A44565354337E570000ABCD0004";
+/// Class ID of "Test Process Crasher" (Test Gain that crashes in `process`).
+pub const VST3_PROCESS_CRASHER_ID: &str = "56495A44565354337E570000ABCD0005";
 /// Class ID of the controller class (not a plug-in, never listed).
 pub const VST3_CONTROLLER_ID: &str = "56495A44565354337E570000ABCD00FF";
 
@@ -86,6 +96,7 @@ const GAIN: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_0001);
 const SYNTH: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_0002);
 const CRASHER: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_0003);
 const HANGER: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_0004);
+const PROCESS_CRASHER: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_0005);
 const CONTROLLER: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_00FF);
 
 const AUDIO_MODULE: &str = "Audio Module Class";
@@ -143,9 +154,15 @@ pub const VST3_PARAM_MODE: u32 = 11;
 pub const VST3_PARAM_METER: u32 = 12;
 /// `ParamID` of Secret (hidden, not automatable).
 pub const VST3_PARAM_SECRET: u32 = 13;
+/// `ParamID` of Mod (hidden): Test Synth maps MIDI CC 1 to it.
+pub const VST3_PARAM_MOD: u32 = 14;
+/// `ParamID` of Bend (hidden): Test Synth maps pitch bend to it.
+pub const VST3_PARAM_BEND: u32 = 15;
+/// `ParamID` of Pressure (hidden): Test Synth maps channel aftertouch to it.
+pub const VST3_PARAM_PRESSURE: u32 = 16;
 
 /// The test controllers' parameters, in their order.
-pub const VST3_PARAMS: [Vst3ParamDef; 4] = [
+pub const VST3_PARAMS: [Vst3ParamDef; 7] = [
     Vst3ParamDef {
         id: VST3_PARAM_GAIN,
         title: "Gain",
@@ -186,6 +203,36 @@ pub const VST3_PARAMS: [Vst3ParamDef; 4] = [
         min: 0.0,
         max: 1.0,
     },
+    Vst3ParamDef {
+        id: VST3_PARAM_MOD,
+        title: "Mod",
+        units: "",
+        steps: 0,
+        default: 0.0,
+        flags: ParameterFlags_::kIsHidden,
+        min: 0.0,
+        max: 1.0,
+    },
+    Vst3ParamDef {
+        id: VST3_PARAM_BEND,
+        title: "Bend",
+        units: "",
+        steps: 0,
+        default: 0.5,
+        flags: ParameterFlags_::kIsHidden,
+        min: 0.0,
+        max: 1.0,
+    },
+    Vst3ParamDef {
+        id: VST3_PARAM_PRESSURE,
+        title: "Pressure",
+        units: "",
+        steps: 0,
+        default: 0.0,
+        flags: ParameterFlags_::kIsHidden,
+        min: 0.0,
+        max: 1.0,
+    },
 ];
 
 /// The Gain component's state: its gain, normalised (8 bytes
@@ -204,7 +251,7 @@ struct ClassDef {
     sub_categories: &'static str,
 }
 
-const CLASSES: [ClassDef; 5] = [
+const CLASSES: [ClassDef; 6] = [
     ClassDef {
         cid: GAIN,
         category: AUDIO_MODULE,
@@ -233,6 +280,12 @@ const CLASSES: [ClassDef; 5] = [
         cid: HANGER,
         category: AUDIO_MODULE,
         name: "Test Hanger",
+        sub_categories: "Fx",
+    },
+    ClassDef {
+        cid: PROCESS_CRASHER,
+        category: AUDIO_MODULE,
+        name: "Test Process Crasher",
         sub_categories: "Fx",
     },
 ];
@@ -280,7 +333,46 @@ mod ix {
     pub const SETUPS: usize = 23;
     pub const LAST_PROCESS_MODE: usize = 24;
     pub const THREAD_EXITS: usize = 25;
-    pub const N: usize = 26;
+    pub const SET_ACTIVE_ON: usize = 26;
+    pub const SET_ACTIVE_OFF: usize = 27;
+    pub const LAST_SET_ACTIVE_ON: usize = 28;
+    pub const LAST_SET_ACTIVE_OFF: usize = 29;
+    pub const PROCESSING_ON: usize = 30;
+    pub const PROCESSING_OFF: usize = 31;
+    pub const LAST_PROCESSING_ON: usize = 32;
+    pub const LAST_PROCESSING_OFF: usize = 33;
+    pub const LAST_SETUP: usize = 34;
+    pub const LAST_SETUP_RATE: usize = 35;
+    pub const LAST_SETUP_BLOCK: usize = 36;
+    pub const ARRANGEMENTS: usize = 37;
+    pub const BUSES_ON: usize = 38;
+    pub const PROCESS_CALLS: usize = 39;
+    pub const FIRST_PROCESS: usize = 40;
+    pub const BAD_PROCESS: usize = 41;
+    pub const LAST_FRAMES: usize = 42;
+    pub const LAST_DATA_MODE: usize = 43;
+    pub const LAST_TEMPO: usize = 44;
+    pub const LAST_MUSIC: usize = 45;
+    pub const LAST_BAR: usize = 46;
+    pub const LAST_STATE: usize = 47;
+    pub const LAST_PROJECT_SAMPLES: usize = 48;
+    pub const LAST_CONT_SAMPLES: usize = 49;
+    pub const PARAM_POINTS: usize = 50;
+    pub const PARAM_SEEN: usize = 51;
+    pub const LAST_PARAM_OFFSET: usize = 52;
+    /// One per entry of `VST3_PARAMS` (7).
+    pub const PARAM_LAST: usize = 53;
+    pub const NOTE_ONS: usize = 60;
+    pub const NOTE_OFFS: usize = 61;
+    pub const POLY_PRESSURES: usize = 62;
+    pub const LAST_NOTE: usize = 63;
+    pub const LAST_VELOCITY: usize = 64;
+    pub const SIDECHAIN_BLOCKS: usize = 65;
+    pub const CLAP_INITS: usize = 66;
+    pub const CLAP_DEINITS: usize = 67;
+    pub const LAST_CONTEXT_RATE: usize = 68;
+    pub const SIDECHAIN_ON: usize = 69;
+    pub const N: usize = 70;
 }
 
 static COUNTERS: [AtomicU64; ix::N] = [const { AtomicU64::new(0) }; ix::N];
@@ -304,6 +396,28 @@ fn store(i: usize, v: u64) {
     if let Some(c) = COUNTERS.get(i) {
         c.store(v, Ordering::SeqCst);
     }
+}
+
+/// The CLAP entry's `init` (the same library is the CLAP test bundle).
+pub(crate) fn clap_init() {
+    bump(ix::CLAP_INITS);
+}
+
+/// The CLAP entry's `deinit`.
+pub(crate) fn clap_deinit() {
+    bump(ix::CLAP_DEINITS);
+}
+
+/// The latency every component reports (`getLatencySamples`).
+static LATENCY: AtomicU32 = AtomicU32::new(0);
+/// The tail every component reports (`getTailSamples`).
+static TAIL: AtomicU32 = AtomicU32::new(0);
+
+/// Sets the latency and tail every component reports from now on.
+#[unsafe(no_mangle)]
+pub extern "C" fn vizdaw_test_vst3_set_timing(latency: u32, tail: u32) {
+    LATENCY.store(latency, Ordering::SeqCst);
+    TAIL.store(tail, Ordering::SeqCst);
 }
 
 fn enter() -> bool {
@@ -342,6 +456,7 @@ const MODE_NULL_FACTORY: u32 = 2;
 const MODE_COMPONENT_INIT_FAILS: u32 = 3;
 const MODE_CONTROLLER_INIT_FAILS: u32 = 4;
 const MODE_OFFLINE_REFUSED: u32 = 5;
+const MODE_REALTIME_REFUSED: u32 = 6;
 
 /// The component handler the latest controller was given.
 struct Handler(ComPtr<IComponentHandler>);
@@ -428,7 +543,7 @@ fn copy_wide(src: &str, dst: &mut [u16]) {
 /// Gives the calling thread a value under a pthread key whose destructor
 /// is code in this library; it runs when the thread exits.
 #[cfg(unix)]
-fn mark_thread() {
+pub(crate) fn mark_thread() {
     use std::sync::OnceLock;
     extern "C" fn on_thread_exit(_value: *mut c_void) {
         bump(ix::THREAD_EXITS);
@@ -447,7 +562,7 @@ fn mark_thread() {
 }
 
 #[cfg(not(unix))]
-fn mark_thread() {}
+pub(crate) fn mark_thread() {}
 
 /// Hands out `obj` as interface `iid` through `out` (the factory's and the
 /// host's `createInstance` convention).
@@ -573,7 +688,7 @@ fn bus_info(
 /// The parameter values and handler a controller keeps, and the thread
 /// that made it (every call should come on that thread).
 struct Ctl {
-    values: [AtomicU64; 4],
+    values: [AtomicU64; VST3_PARAMS.len()],
     handler: Mutex<Option<ComPtr<IComponentHandler>>>,
     creator: ThreadId,
 }
@@ -749,8 +864,282 @@ macro_rules! edit_controller {
     };
 }
 
-/// Implements a do-nothing `IAudioProcessor` (Task 4 gives it audio) that
-/// counts `setupProcessing` and keeps the process mode it was given.
+/// A raw channel pointer of bus `b` (of `count`), or `None`.
+fn channel_ptr(buses: *mut AudioBusBuffers, count: int32, b: usize, ch: usize) -> Option<*mut f32> {
+    if b >= usize::try_from(count).unwrap_or(0) || buses.is_null() {
+        return None;
+    }
+    // SAFETY: the host passes `count` buses at `buses`.
+    let bus = unsafe { &*buses.add(b) };
+    if ch >= usize::try_from(bus.numChannels).unwrap_or(0) {
+        return None;
+    }
+    // SAFETY: 32-bit processing, the only sample size this module takes.
+    let chans = unsafe { bus.__field0.channelBuffers32 };
+    if chans.is_null() {
+        return None;
+    }
+    // SAFETY: the bus has `numChannels` channel pointers.
+    let p = unsafe { *chans.add(ch) };
+    (!p.is_null()).then_some(p)
+}
+
+/// `Event::type` values (the SDK's `EventTypes`).
+const NOTE_ON: u16 = EventTypes_::kNoteOnEvent as u16;
+const NOTE_OFF: u16 = EventTypes_::kNoteOffEvent as u16;
+const POLY_PRESSURE: u16 = EventTypes_::kPolyPressureEvent as u16;
+
+/// Linear gain of a normalised Gain value (dB).
+fn gain_factor(n: f64) -> f32 {
+    10f64.powf(VST3_PARAMS[0].to_plain(n) / 20.0) as f32
+}
+
+/// A component's processing state (`IAudioProcessor` and the
+/// `IComponent` calls around it).
+struct Proc {
+    /// Gain, normalised (Test Gain's audio).
+    gain: AtomicU64,
+    active: AtomicBool,
+    processing: AtomicBool,
+    /// Notes held (Test Synth's audio).
+    notes: AtomicI32,
+    synth: bool,
+    /// Crashes in `process` (Test Process Crasher).
+    crash: bool,
+}
+
+impl Proc {
+    fn new(synth: bool, crash: bool) -> Proc {
+        Proc {
+            gain: AtomicU64::new(VST3_COMPONENT_GAIN.to_bits()),
+            active: AtomicBool::new(false),
+            processing: AtomicBool::new(false),
+            notes: AtomicI32::new(0),
+            synth,
+            crash,
+        }
+    }
+
+    fn set_active(&self, on: TBool) -> tresult {
+        let on = on != 0;
+        self.active.store(on, Ordering::SeqCst);
+        if on {
+            bump(ix::SET_ACTIVE_ON);
+            stamp(ix::LAST_SET_ACTIVE_ON);
+        } else {
+            bump(ix::SET_ACTIVE_OFF);
+            stamp(ix::LAST_SET_ACTIVE_OFF);
+            self.notes.store(0, Ordering::SeqCst);
+        }
+        kResultOk
+    }
+
+    fn set_processing(&self, on: TBool) -> tresult {
+        let on = on != 0;
+        self.processing.store(on, Ordering::SeqCst);
+        if on {
+            bump(ix::PROCESSING_ON);
+            stamp(ix::LAST_PROCESSING_ON);
+        } else {
+            bump(ix::PROCESSING_OFF);
+            stamp(ix::LAST_PROCESSING_OFF);
+        }
+        kResultOk
+    }
+
+    fn setup(&self, setup: *mut ProcessSetup) -> tresult {
+        // SAFETY: the host's setup, for this call.
+        let Some(s) = (unsafe { setup.as_ref() }) else {
+            return kInvalidArgument;
+        };
+        bump(ix::SETUPS);
+        stamp(ix::LAST_SETUP);
+        if self.active.load(Ordering::SeqCst) {
+            // The SDK allows `setupProcessing` only while inactive.
+            bump(ix::BAD_PROCESS);
+        }
+        store(ix::LAST_PROCESS_MODE, s.processMode as u64);
+        store(ix::LAST_SETUP_RATE, s.sampleRate.to_bits());
+        store(ix::LAST_SETUP_BLOCK, s.maxSamplesPerBlock as u64);
+        let refused = match mode() {
+            MODE_OFFLINE_REFUSED => Some(ProcessModes_::kOffline as int32),
+            MODE_REALTIME_REFUSED => Some(ProcessModes_::kRealtime as int32),
+            _ => None,
+        };
+        if refused == Some(s.processMode) {
+            return kResultFalse;
+        }
+        kResultOk
+    }
+
+    /// Reads the input parameter changes into the counters; returns the
+    /// last Mode value, if one came.
+    fn read_params(&self, changes: *mut IParameterChanges) -> Option<f64> {
+        // SAFETY: the host's list (or null), for this call.
+        let changes = unsafe { ComRef::from_raw(changes) }?;
+        let mut mode_in = None;
+        // SAFETY: plain calls on the host's list and its queues.
+        unsafe {
+            for i in 0..changes.getParameterCount() {
+                let Some(q) = ComRef::from_raw(changes.getParameterData(i)) else {
+                    continue;
+                };
+                let id = q.getParameterId();
+                for j in 0..q.getPointCount() {
+                    let (mut offset, mut v) = (0, 0.0);
+                    if q.getPoint(j, &mut offset, &mut v) != kResultOk {
+                        continue;
+                    }
+                    bump(ix::PARAM_POINTS);
+                    store(ix::LAST_PARAM_OFFSET, offset as u64);
+                    if let Some((k, _)) = param(id) {
+                        store(ix::PARAM_LAST + k, v.to_bits());
+                        if let Some(c) = COUNTERS.get(ix::PARAM_SEEN) {
+                            c.fetch_or(1 << k, Ordering::SeqCst);
+                        }
+                    }
+                    if id == VST3_PARAM_GAIN {
+                        self.gain.store(v.to_bits(), Ordering::SeqCst);
+                    }
+                    if id == VST3_PARAM_MODE {
+                        mode_in = Some(v);
+                    }
+                }
+            }
+        }
+        mode_in
+    }
+
+    fn read_events(&self, events: *mut IEventList) {
+        // SAFETY: the host's list (or null), for this call.
+        let Some(events) = (unsafe { ComRef::from_raw(events) }) else {
+            return;
+        };
+        // SAFETY: plain calls; `e` is ours to fill and read as its type
+        // says.
+        unsafe {
+            for i in 0..events.getEventCount() {
+                let mut e: Event = std::mem::zeroed();
+                if events.getEvent(i, &mut e) != kResultOk {
+                    continue;
+                }
+                match e.r#type {
+                    NOTE_ON => {
+                        let on = e.__field0.noteOn;
+                        bump(ix::NOTE_ONS);
+                        self.notes.fetch_add(1, Ordering::SeqCst);
+                        let note = (on.pitch as u64 & 0xFF)
+                            | ((on.channel as u64 & 0xFF) << 8)
+                            | ((e.sampleOffset as u64 & 0xFFFF) << 16);
+                        store(ix::LAST_NOTE, note);
+                        store(ix::LAST_VELOCITY, f64::from(on.velocity).to_bits());
+                    }
+                    NOTE_OFF => {
+                        bump(ix::NOTE_OFFS);
+                        self.notes.fetch_sub(1, Ordering::SeqCst);
+                    }
+                    POLY_PRESSURE => {
+                        bump(ix::POLY_PRESSURES);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn process(&self, data: *mut ProcessData) -> tresult {
+        // SAFETY: the host's process data, for this call.
+        let Some(d) = (unsafe { data.as_ref() }) else {
+            return kInvalidArgument;
+        };
+        if self.crash {
+            // SAFETY: undefined behaviour by design: a deliberate null
+            // write that raises SIGSEGV, for the scanner's crash tests.
+            unsafe { std::ptr::null_mut::<u8>().write_volatile(1) };
+        }
+        bump(ix::PROCESS_CALLS);
+        if let Some(c) = COUNTERS.get(ix::FIRST_PROCESS) {
+            let t = SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+            let _ = c.compare_exchange(0, t, Ordering::SeqCst, Ordering::SeqCst);
+        }
+        if !self.active.load(Ordering::SeqCst)
+            || !self.processing.load(Ordering::SeqCst)
+            || d.symbolicSampleSize != SymbolicSampleSizes_::kSample32 as int32
+        {
+            bump(ix::BAD_PROCESS);
+        }
+        store(ix::LAST_FRAMES, d.numSamples as u64);
+        store(ix::LAST_DATA_MODE, d.processMode as u64);
+        // SAFETY: the host's context (or null), for this call.
+        if let Some(c) = unsafe { d.processContext.as_ref() } {
+            store(ix::LAST_TEMPO, c.tempo.to_bits());
+            store(ix::LAST_MUSIC, c.projectTimeMusic.to_bits());
+            store(ix::LAST_BAR, c.barPositionMusic.to_bits());
+            store(ix::LAST_STATE, u64::from(c.state));
+            store(ix::LAST_PROJECT_SAMPLES, c.projectTimeSamples as u64);
+            store(ix::LAST_CONT_SAMPLES, c.continousTimeSamples as u64);
+            store(ix::LAST_CONTEXT_RATE, c.sampleRate.to_bits());
+        }
+        let mode_in = self.read_params(d.inputParameterChanges);
+        self.read_events(d.inputEvents);
+        let n = usize::try_from(d.numSamples).unwrap_or(0);
+        let mut peak = 0.0f32;
+        if self.synth {
+            let held = self.notes.load(Ordering::SeqCst) > 0;
+            for (bus, level) in [(0, if held { 0.5 } else { 0.0 }), (1, 0.25)] {
+                for ch in 0..2 {
+                    if let Some(out) = channel_ptr(d.outputs, d.numOutputs, bus, ch) {
+                        for i in 0..n {
+                            // SAFETY: an output channel of `n` samples.
+                            unsafe { out.add(i).write(level) };
+                        }
+                    }
+                }
+            }
+        } else {
+            let g = gain_factor(f64::from_bits(self.gain.load(Ordering::SeqCst)));
+            if channel_ptr(d.inputs, d.numInputs, 1, 0).is_some() {
+                bump(ix::SIDECHAIN_BLOCKS);
+            }
+            for ch in 0..2 {
+                let input = channel_ptr(d.inputs, d.numInputs, 0, ch);
+                let side = channel_ptr(d.inputs, d.numInputs, 1, ch);
+                let Some(out) = channel_ptr(d.outputs, d.numOutputs, 0, ch) else {
+                    continue;
+                };
+                for i in 0..n {
+                    // SAFETY: channels of `n` samples; each sample is read
+                    // before the output is written (in place is allowed).
+                    unsafe {
+                        let x = input.map_or(0.0, |p| p.add(i).read());
+                        let s = side.map_or(0.0, |p| p.add(i).read());
+                        let y = x * g + s;
+                        out.add(i).write(y);
+                        peak = peak.max(y.abs());
+                    }
+                }
+            }
+        }
+        // SAFETY: the host's output list (or null), for this call.
+        if let Some(out) = unsafe { ComRef::from_raw(d.outputParameterChanges) } {
+            let meter = Some((VST3_PARAM_METER, f64::from(peak.min(1.0))));
+            let secret = mode_in.map(|m| (VST3_PARAM_SECRET, m));
+            for (id, v) in [meter, secret].into_iter().flatten() {
+                let mut index = 0;
+                // SAFETY: plain calls on the host's list and the queue it
+                // hands out.
+                unsafe {
+                    if let Some(q) = ComRef::from_raw(out.addParameterData(&id, &mut index)) {
+                        q.addPoint(0, v, &mut index);
+                    }
+                }
+            }
+        }
+        kResultOk
+    }
+}
+
+/// Implements `IAudioProcessor` over a `proc: Proc` field.
 macro_rules! audio_processor {
     ($t:ty) => {
         impl IAudioProcessorTrait for $t {
@@ -761,6 +1150,7 @@ macro_rules! audio_processor {
                 _outputs: *mut SpeakerArrangement,
                 _num_outs: int32,
             ) -> tresult {
+                bump(ix::ARRANGEMENTS);
                 kResultOk
             }
 
@@ -790,34 +1180,23 @@ macro_rules! audio_processor {
             }
 
             unsafe fn getLatencySamples(&self) -> uint32 {
-                0
+                LATENCY.load(Ordering::SeqCst)
             }
 
             unsafe fn setupProcessing(&self, setup: *mut ProcessSetup) -> tresult {
-                // SAFETY: the host's setup, for this call.
-                let Some(s) = (unsafe { setup.as_ref() }) else {
-                    return kInvalidArgument;
-                };
-                bump(ix::SETUPS);
-                store(ix::LAST_PROCESS_MODE, s.processMode as u64);
-                if mode() == MODE_OFFLINE_REFUSED
-                    && s.processMode == ProcessModes_::kOffline as int32
-                {
-                    return kResultFalse;
-                }
-                kResultOk
+                self.proc.setup(setup)
             }
 
-            unsafe fn setProcessing(&self, _state: TBool) -> tresult {
-                kResultOk
+            unsafe fn setProcessing(&self, state: TBool) -> tresult {
+                self.proc.set_processing(state)
             }
 
-            unsafe fn process(&self, _data: *mut ProcessData) -> tresult {
-                kResultOk
+            unsafe fn process(&self, data: *mut ProcessData) -> tresult {
+                self.proc.process(data)
             }
 
             unsafe fn getTailSamples(&self) -> uint32 {
-                0
+                TAIL.load(Ordering::SeqCst)
             }
         }
     };
@@ -834,14 +1213,29 @@ macro_rules! component_common {
             kNotImplemented
         }
 
-        unsafe fn setActive(&self, _state: TBool) -> tresult {
-            kResultOk
+        unsafe fn setActive(&self, state: TBool) -> tresult {
+            self.proc.set_active(state)
         }
 
         unsafe fn setState(&self, _state: *mut IBStream) -> tresult {
             kResultOk
         }
     };
+}
+
+/// Counts `activateBus(…, true)`, and the audio input bus 1 (Test Gain's
+/// sidechain) on its own.
+fn bus_activated(media: MediaType, dir: BusDirection, index: int32, state: TBool) {
+    if state == 0 {
+        return;
+    }
+    bump(ix::BUSES_ON);
+    if media == MediaTypes_::kAudio as MediaType
+        && dir == BusDirections_::kInput as BusDirection
+        && index == 1
+    {
+        bump(ix::SIDECHAIN_ON);
+    }
 }
 
 fn component_initialize(context: *mut FUnknown) -> (tresult, Option<ComPtr<IHostApplication>>) {
@@ -864,6 +1258,7 @@ fn component_terminate() {
 struct Component {
     host: Mutex<Option<ComPtr<IHostApplication>>>,
     peer: Mutex<Option<ComPtr<IConnectionPoint>>>,
+    proc: Proc,
 }
 
 impl Drop for Component {
@@ -924,9 +1319,10 @@ impl IComponentTrait for Component {
         media: MediaType,
         dir: BusDirection,
         index: int32,
-        _state: TBool,
+        state: TBool,
     ) -> tresult {
         if index >= 0 && index < bus_count(&GAIN_BUSES, media, dir) {
+            bus_activated(media, dir, index, state);
             kResultOk
         } else {
             kInvalidArgument
@@ -1093,6 +1489,7 @@ impl IConnectionPointTrait for Controller {
 /// Test Synth: a single component (its own controller).
 struct Synth {
     ctl: Ctl,
+    proc: Proc,
 }
 
 impl Drop for Synth {
@@ -1103,7 +1500,31 @@ impl Drop for Synth {
 }
 
 impl Class for Synth {
-    type Interfaces = (IComponent, IAudioProcessor, IEditController);
+    type Interfaces = (IComponent, IAudioProcessor, IEditController, IMidiMapping);
+}
+
+impl IMidiMappingTrait for Synth {
+    unsafe fn getMidiControllerAssignment(
+        &self,
+        bus: int32,
+        _channel: int16,
+        ctrl: CtrlNumber,
+        id: *mut ParamID,
+    ) -> tresult {
+        self.ctl.check();
+        let target = match i32::from(ctrl) {
+            1 => VST3_PARAM_MOD,
+            c if c == ControllerNumbers_::kPitchBend as i32 => VST3_PARAM_BEND,
+            c if c == ControllerNumbers_::kAfterTouch as i32 => VST3_PARAM_PRESSURE,
+            _ => return kResultFalse,
+        };
+        if bus != 0 || id.is_null() {
+            return kResultFalse;
+        }
+        // SAFETY: the host's out value.
+        unsafe { *id = target };
+        kResultTrue
+    }
 }
 
 impl IPluginBaseTrait for Synth {
@@ -1144,9 +1565,10 @@ impl IComponentTrait for Synth {
         media: MediaType,
         dir: BusDirection,
         index: int32,
-        _state: TBool,
+        state: TBool,
     ) -> tresult {
         if index >= 0 && index < bus_count(&SYNTH_BUSES, media, dir) {
+            bus_activated(media, dir, index, state);
             kResultOk
         } else {
             kInvalidArgument
@@ -1235,14 +1657,19 @@ impl IPluginFactoryTrait for Factory {
             }
         }
         mark_thread();
-        let made = if cid == GAIN {
+        let made = if cid == GAIN || cid == PROCESS_CRASHER {
             ComWrapper::new(Component {
                 host: Mutex::new(None),
                 peer: Mutex::new(None),
+                proc: Proc::new(false, cid == PROCESS_CRASHER),
             })
             .to_com_ptr::<FUnknown>()
         } else if cid == SYNTH {
-            ComWrapper::new(Synth { ctl: Ctl::new() }).to_com_ptr::<FUnknown>()
+            ComWrapper::new(Synth {
+                ctl: Ctl::new(),
+                proc: Proc::new(true, false),
+            })
+            .to_com_ptr::<FUnknown>()
         } else if cid == CONTROLLER {
             ComWrapper::new(Controller {
                 ctl: Ctl::new(),
@@ -1361,6 +1788,8 @@ pub enum Vst3Mode {
     ControllerInitFails = 4,
     /// `setupProcessing` refuses the offline process mode.
     OfflineRefused = 5,
+    /// `setupProcessing` refuses the real-time process mode.
+    RealtimeRefused = 6,
 }
 
 /// A component-handler call the probe makes the latest controller do.
@@ -1450,6 +1879,93 @@ pub struct Vst3Counters {
     /// Thread-exit destructors run (threads that created an object and
     /// then exited).
     pub thread_exits: u64,
+    /// `setActive(true)` calls.
+    pub set_active_on: u64,
+    /// `setActive(false)` calls.
+    pub set_active_off: u64,
+    /// When the latest `setActive(true)` came.
+    pub last_set_active_on: u64,
+    /// When the latest `setActive(false)` came.
+    pub last_set_active_off: u64,
+    /// `setProcessing(true)` calls.
+    pub processing_on: u64,
+    /// `setProcessing(false)` calls.
+    pub processing_off: u64,
+    /// When the latest `setProcessing(true)` came.
+    pub last_processing_on: u64,
+    /// When the latest `setProcessing(false)` came.
+    pub last_processing_off: u64,
+    /// When the latest `setupProcessing` came.
+    pub last_setup: u64,
+    /// The latest `setupProcessing` sample rate (`f64` bits).
+    pub last_setup_rate: u64,
+    /// The latest `setupProcessing` largest block.
+    pub last_setup_block: u64,
+    /// `setBusArrangements` calls.
+    pub arrangements: u64,
+    /// `activateBus(…, true)` calls.
+    pub buses_on: u64,
+    /// `process` calls.
+    pub process_calls: u64,
+    /// When the first `process` call came.
+    pub first_process: u64,
+    /// Calls out of order: `process` while inactive or not processing, or
+    /// not in 32-bit samples; `setupProcessing` while active.
+    pub bad_process: u64,
+    /// The latest block's `numSamples`.
+    pub last_frames: u64,
+    /// The latest block's `processMode`.
+    pub last_data_mode: u64,
+    /// The latest `ProcessContext::tempo` (`f64` bits).
+    pub last_tempo: u64,
+    /// The latest `ProcessContext::projectTimeMusic` (`f64` bits).
+    pub last_music: u64,
+    /// The latest `ProcessContext::barPositionMusic` (`f64` bits).
+    pub last_bar: u64,
+    /// The latest `ProcessContext::state` flags.
+    pub last_state: u64,
+    /// The latest `ProcessContext::projectTimeSamples`.
+    pub last_project_samples: u64,
+    /// The latest `ProcessContext::continousTimeSamples`.
+    pub last_cont_samples: u64,
+    /// The latest `ProcessContext::sampleRate` (`f64` bits).
+    pub last_context_rate: u64,
+    /// Input parameter points read, in all.
+    pub param_points: u64,
+    /// Which of [`VST3_PARAMS`] (bit = index) got an input point.
+    pub param_seen: u64,
+    /// The latest input point's sample offset.
+    pub last_param_offset: u64,
+    /// The latest input point of each of [`VST3_PARAMS`] (`f64` bits).
+    pub param_last: [u64; 7],
+    /// Note-on events.
+    pub note_ons: u64,
+    /// Note-off events.
+    pub note_offs: u64,
+    /// Poly-pressure events.
+    pub poly_pressures: u64,
+    /// The latest note-on: pitch, channel << 8, sample offset << 16.
+    pub last_note: u64,
+    /// The latest note-on's velocity (`f64` bits).
+    pub last_velocity: u64,
+    /// Blocks in which Test Gain got sidechain buffers.
+    pub sidechain_blocks: u64,
+    /// `activateBus` of audio input bus 1 (the sidechain), on.
+    pub sidechain_on: u64,
+    /// CLAP entry `init` calls (the library as the CLAP test bundle).
+    pub clap_inits: u64,
+    /// CLAP entry `deinit` calls.
+    pub clap_deinits: u64,
+}
+
+impl Vst3Counters {
+    /// The latest normalised input point of parameter `id`, if one came.
+    pub fn param_in(&self, id: u32) -> Option<f64> {
+        let (k, _) = param(id)?;
+        (self.param_seen & (1 << k) != 0)
+            .then(|| self.param_last.get(k).map(|b| f64::from_bits(*b)))
+            .flatten()
+    }
 }
 
 /// A handle on the test module's loaded image, for reading its lifecycle
@@ -1473,6 +1989,19 @@ impl Vst3Probe {
             )
         };
         let binary = bundle.join("Contents").join(dir).join(file);
+        // SAFETY: the library is this crate's own test module.
+        Vst3Probe(unsafe { libloading::Library::new(&binary) }.unwrap())
+    }
+
+    /// Opens the binary of the CLAP test bundle at `bundle` (a copy of
+    /// [`crate::bundle`]): the same library, so the same counters. Does
+    /// not run the CLAP entry. Panics (test helper) when it cannot.
+    pub fn open_clap(bundle: &std::path::Path) -> Vst3Probe {
+        let binary = if cfg!(target_os = "macos") {
+            bundle.join("Contents").join("MacOS").join("VizDAW Test")
+        } else {
+            bundle.to_path_buf()
+        };
         // SAFETY: the library is this crate's own test module.
         Vst3Probe(unsafe { libloading::Library::new(&binary) }.unwrap())
     }
@@ -1525,7 +2054,57 @@ impl Vst3Probe {
             setups: v[ix::SETUPS],
             last_process_mode: v[ix::LAST_PROCESS_MODE],
             thread_exits: v[ix::THREAD_EXITS],
+            set_active_on: v[ix::SET_ACTIVE_ON],
+            set_active_off: v[ix::SET_ACTIVE_OFF],
+            last_set_active_on: v[ix::LAST_SET_ACTIVE_ON],
+            last_set_active_off: v[ix::LAST_SET_ACTIVE_OFF],
+            processing_on: v[ix::PROCESSING_ON],
+            processing_off: v[ix::PROCESSING_OFF],
+            last_processing_on: v[ix::LAST_PROCESSING_ON],
+            last_processing_off: v[ix::LAST_PROCESSING_OFF],
+            last_setup: v[ix::LAST_SETUP],
+            last_setup_rate: v[ix::LAST_SETUP_RATE],
+            last_setup_block: v[ix::LAST_SETUP_BLOCK],
+            arrangements: v[ix::ARRANGEMENTS],
+            buses_on: v[ix::BUSES_ON],
+            process_calls: v[ix::PROCESS_CALLS],
+            first_process: v[ix::FIRST_PROCESS],
+            bad_process: v[ix::BAD_PROCESS],
+            last_frames: v[ix::LAST_FRAMES],
+            last_data_mode: v[ix::LAST_DATA_MODE],
+            last_tempo: v[ix::LAST_TEMPO],
+            last_music: v[ix::LAST_MUSIC],
+            last_bar: v[ix::LAST_BAR],
+            last_state: v[ix::LAST_STATE],
+            last_project_samples: v[ix::LAST_PROJECT_SAMPLES],
+            last_cont_samples: v[ix::LAST_CONT_SAMPLES],
+            last_context_rate: v[ix::LAST_CONTEXT_RATE],
+            param_points: v[ix::PARAM_POINTS],
+            param_seen: v[ix::PARAM_SEEN],
+            last_param_offset: v[ix::LAST_PARAM_OFFSET],
+            param_last: std::array::from_fn(|k| v[ix::PARAM_LAST + k]),
+            note_ons: v[ix::NOTE_ONS],
+            note_offs: v[ix::NOTE_OFFS],
+            poly_pressures: v[ix::POLY_PRESSURES],
+            last_note: v[ix::LAST_NOTE],
+            last_velocity: v[ix::LAST_VELOCITY],
+            sidechain_blocks: v[ix::SIDECHAIN_BLOCKS],
+            sidechain_on: v[ix::SIDECHAIN_ON],
+            clap_inits: v[ix::CLAP_INITS],
+            clap_deinits: v[ix::CLAP_DEINITS],
         }
+    }
+
+    /// Sets the latency and tail (frames; `u32::MAX` is an infinite tail)
+    /// every component reports from now on.
+    pub fn set_timing(&self, latency: u32, tail: u32) {
+        // SAFETY: the exported function takes two `u32`s.
+        let f = unsafe {
+            self.0
+                .get::<extern "C" fn(u32, u32)>(b"vizdaw_test_vst3_set_timing\0")
+        }
+        .unwrap();
+        f(latency, tail);
     }
 
     fn call(&self, e: Vst3Edit, off_thread: bool) -> i32 {

@@ -1,6 +1,7 @@
 //! `vizdaw-scan --format vst3` in its own process (host track H1 Task 2):
 //! a bundle lists each of its plug-in classes, each class is checked on
-//! its own, and a class that crashes or hangs costs only its scanner.
+//! its own (loaded, activated and run for one block, Task 4), and a class
+//! that crashes or hangs costs only its scanner.
 
 use core_host::PluginKind;
 use core_host::catalog::{Catalog, PluginStatus, ScanStatus, Source};
@@ -8,7 +9,9 @@ use core_host::scan::{ScanOutcome, ScanReply, ScanRequest, run, scan_all, scan_s
 use core_model::mixer::PluginFormat;
 use std::path::Path;
 use std::time::Duration;
-use test_plugins::{VST3_CRASHER_ID, VST3_GAIN_ID, VST3_HANGER_ID, VST3_SYNTH_ID};
+use test_plugins::{
+    VST3_CRASHER_ID, VST3_GAIN_ID, VST3_HANGER_ID, VST3_PROCESS_CRASHER_ID, VST3_SYNTH_ID,
+};
 
 fn exe() -> &'static Path {
     Path::new(env!("CARGO_BIN_EXE_vizdaw-scan"))
@@ -38,6 +41,7 @@ fn lists_every_class_and_checks_one() {
             (VST3_SYNTH_ID, PluginKind::Instrument),
             (VST3_CRASHER_ID, PluginKind::Effect),
             (VST3_HANGER_ID, PluginKind::Effect),
+            (VST3_PROCESS_CRASHER_ID, PluginKind::Effect),
         ]
     );
     // A class that loads is scanned: its info comes from the instance.
@@ -71,6 +75,17 @@ fn crashes_hangs_and_unknown_classes_have_reasons() {
         crash.reason().as_deref(),
         Some("crashed (signal 11)"),
         "{crash:?}"
+    );
+    // A plug-in that loads but crashes in processing is not usable: the
+    // check activates it and runs one block.
+    let late = run(
+        exe(),
+        &req(Some(VST3_PROCESS_CRASHER_ID), Duration::from_secs(10)),
+    );
+    assert_eq!(
+        late.reason().as_deref(),
+        Some("crashed (signal 11)"),
+        "{late:?}"
     );
     let hang = run(
         exe(),
@@ -109,7 +124,7 @@ fn a_full_scan_records_each_class() {
     test_plugins::copy_vst3_bundle(&copy);
     let src = Source::vst3_bundle(&copy);
     let entries = scan_source(exe(), &src, Duration::from_millis(3000));
-    assert_eq!(entries.len(), 4);
+    assert_eq!(entries.len(), 5);
     let mut cat = Catalog::new();
     assert_eq!(
         cat.mark_found(std::slice::from_ref(&src)),
@@ -129,6 +144,10 @@ fn a_full_scan_records_each_class() {
     assert_eq!(
         status(VST3_HANGER_ID),
         PluginStatus::Blocklisted("timed out".into())
+    );
+    assert_eq!(
+        status(VST3_PROCESS_CRASHER_ID),
+        PluginStatus::Blocklisted("crashed (signal 11)".into())
     );
     let synth = cat.get(PluginFormat::Vst3, VST3_SYNTH_ID).unwrap();
     assert_eq!(synth.kind, Some(PluginKind::Instrument));

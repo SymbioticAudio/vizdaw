@@ -13,6 +13,11 @@
 //! | `vizdaw.test.timer` | passes audio through; registers host timers and file descriptors (CLAP `timer-support`, `posix-fd-support`) on command: the unlisted `PARAM_TIMER_*`/`PARAM_FD_*` switches; it counts its callbacks, read back as parameter values. It has a headless embedded editor (CLAP `gui`, Cocoa or X11) that draws nothing and reports what the host told it (`PARAM_GUI_*`) |
 //! | `vizdaw.test.gui` | passes audio through; on Linux, a real embedded X11 editor (CLAP `gui`): in `gui.create` it connects to the X server and registers a host timer and its connection's descriptor; it draws a [`GUI_COLOR`] child window under the host's parent, and from its first timer callback after `show` asks the host to grow it by [`GUI_GROW`] points (`request_resize`). What it saw reads back as `PARAM_GUI_*` values. Elsewhere it has no editor |
 //!
+//! Creating a CLAP plug-in gives the creating thread a thread-exit
+//! destructor in this library, as the VST3 side does (see
+//! [`Vst3Probe`], which also reads the CLAP entry's `init` and `deinit`
+//! counts through [`Vst3Probe::open_clap`]).
+//!
 //! The same library is also a VST3 module (`GetPluginFactory`, see [`VST3_GAIN_ID`]); [`bundle`] builds
 //! the `.clap` bundle for tests and [`vst3_bundle`] the `.vst3` one.
 
@@ -28,8 +33,9 @@ pub use bundle::{bundle, copy_bundle, copy_vst3_bundle, scanner, vst3_bundle};
 pub use editor::{BASE_SIZE, MAX_SIZE, MIN_SIZE};
 pub use vst3_module::{
     VST3_COMPONENT_GAIN, VST3_CONTROLLER_ID, VST3_CRASHER_ID, VST3_GAIN_ID, VST3_HANGER_ID,
-    VST3_PARAM_GAIN, VST3_PARAM_METER, VST3_PARAM_MODE, VST3_PARAM_SECRET, VST3_PARAMS,
-    VST3_SYNTH_ID, Vst3Counters, Vst3Edit, Vst3Mode, Vst3ParamDef, Vst3Probe, vst3_restart,
+    VST3_PARAM_BEND, VST3_PARAM_GAIN, VST3_PARAM_METER, VST3_PARAM_MOD, VST3_PARAM_MODE,
+    VST3_PARAM_PRESSURE, VST3_PARAM_SECRET, VST3_PARAMS, VST3_PROCESS_CRASHER_ID, VST3_SYNTH_ID,
+    Vst3Counters, Vst3Edit, Vst3Mode, Vst3ParamDef, Vst3Probe, vst3_restart,
 };
 
 use clack_plugin::entry::prelude::*;
@@ -229,8 +235,15 @@ pub struct TestEntry {
     factory: PluginFactoryWrapper<TestFactory>,
 }
 
+impl Drop for TestEntry {
+    fn drop(&mut self) {
+        vst3_module::clap_deinit();
+    }
+}
+
 impl Entry for TestEntry {
     fn new(bundle_path: Option<&CStr>) -> Result<Self, EntryLoadError> {
+        vst3_module::clap_init();
         Ok(TestEntry {
             factory: PluginFactoryWrapper::new(TestFactory {
                 descriptors: Kind::ALL.map(Kind::descriptor),
@@ -271,6 +284,7 @@ impl PluginFactoryImpl for TestFactory {
             .position(|k| k.id().as_bytes() == plugin_id.to_bytes())?;
         let kind = *Kind::ALL.get(i)?;
         let desc = self.descriptors.get(i)?;
+        vst3_module::mark_thread();
         Some(PluginInstance::new::<TestPlugin>(
             host_info,
             desc,

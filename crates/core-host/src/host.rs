@@ -14,6 +14,7 @@ use crate::instance::{
 use crate::process::ParamEvent;
 use crate::queue::{GestureReceiver, ParamSender, param_queues};
 use crate::shelf::{Ready, Shelf, ShelfFactory};
+use crate::vst3::Vst3Format;
 use core_engine::EngineError;
 use core_engine::engine::Engine;
 use core_engine::schedule::CompileReport;
@@ -355,7 +356,7 @@ impl std::fmt::Debug for PluginHost {
 }
 
 impl PluginHost {
-    /// A host with the CLAP format, activating plugins at `sample_rate`
+    /// A host with the CLAP and VST3 formats, activating plugins at `sample_rate`
     /// for blocks of up to `max_frames`; starts the loader thread.
     pub fn new(sample_rate: f64, max_frames: u32) -> Result<PluginHost, HostError> {
         let (jobs, job_rx) = channel::<Job>();
@@ -376,7 +377,7 @@ impl PluginHost {
             .map_err(|e| HostError::LoadFailed(format!("cannot start the loader: {e}")))?;
         let (back_tx, back_rx) = channel();
         Ok(PluginHost {
-            formats: vec![Box::new(ClapFormat::new())],
+            formats: vec![Box::new(ClapFormat::new()), Box::new(Vst3Format::new())],
             paths: BTreeMap::new(),
             unavailable: BTreeMap::new(),
             disabled: BTreeSet::new(),

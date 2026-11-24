@@ -9,8 +9,27 @@
 //! `plainParamToNormalized`), always on the main thread: a plug-in's edits
 //! arrive normalised through the component handler, from any thread, and
 //! are converted only when [`PluginInstance::gestures`] reads them.
+//!
+//! Activation (host track H1 Task 4) follows the SDK's order:
+//! `setupProcessing` (in the stored render mode, at the host's rate and
+//! block size), the plug-in's own bus arrangements confirmed, every audio
+//! bus and the first event input turned on, then `setActive(true)`; the
+//! [`Vst3Processor`] calls `setProcessing` on the audio thread.
+//! Deactivation undoes it in reverse. Values reach the component as
+//! follows:
+//! - set while inactive ([`PluginInstance::set_params`]) or edited by the
+//!   controller while no processor is out: with the next processor's
+//!   first block;
+//! - edited by the controller while a processor is out: with the
+//!   processor's next block (an edit is routed by where the component
+//!   will next read, when it is drained; one the processor never took
+//!   goes to the next first block);
+//! - host values while active: through the processor's context, as
+//!   plain values it converts.
 
-use super::ffi::{ComponentHandler, Edit, Module, Plugin};
+use super::ffi::{ComponentHandler, EDIT_QUEUE, Edit, Module, Plugin};
+use super::process_ffi::RtData;
+use super::processor::{ParamMap, ProcessorSetup, Vst3Processor};
 use super::{class_id_hex, module, parse_class_id};
 use crate::error::HostError;
 use crate::info::{AudioPortInfo, ParamInfo, PluginInfo, PluginKind, PortRole, Tail};
@@ -20,9 +39,12 @@ use crate::instance::{
 };
 use crate::process::ParamEvent;
 use core_model::mixer::{ParamId, PluginFormat as Format};
+use crossbeam_queue::ArrayQueue;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use vst3::ComWrapper;
 
 /// `restartComponent` flags (the SDK's `RestartFlags`).
@@ -40,6 +62,25 @@ mod restart {
 /// activation says otherwise (the scanner's check uses the same).
 const DEFAULT_SETUP: (f64, u32) = (48_000.0, 512);
 
+/// Most values the processor hands back to the controller between two
+/// main-thread drains (more are dropped: the controller shows a value
+/// late, nothing else is lost).
+const ECHO_QUEUE: usize = 4096;
+
+/// `getTailSamples`' "infinite" (the SDK's `kInfiniteTail`).
+const INFINITE_TAIL: u32 = u32::MAX;
+
+/// The main thread's ends of an active processor.
+#[derive(Debug)]
+struct Active {
+    /// Controller edits for the processor (normalised).
+    edits: Arc<ArrayQueue<(u32, f64)>>,
+    /// Values for the controller from the processor (normalised).
+    echoes: Arc<ArrayQueue<(u32, f64)>>,
+    /// Cleared when the processor is dropped (by `deactivate` or not).
+    alive: Arc<AtomicBool>,
+}
+
 /// A loaded VST3 plug-in (main-thread half). Not `Send`: the VST3 SDK
 /// ties a component and controller to the thread that made them.
 pub struct Vst3Instance {
@@ -48,7 +89,9 @@ pub struct Vst3Instance {
     plugin: Plugin,
     handler: ComWrapper<ComponentHandler>,
     info: PluginInfo,
-    active: bool,
+    /// Set while the component is active (`setActive(true)` and a
+    /// processor handed out).
+    active: Option<Active>,
     /// Render offline (`kOffline`) at the next `setupProcessing`.
     offline: bool,
     /// The rate and block size of the latest `setupProcessing`.
@@ -105,7 +148,7 @@ impl Vst3Instance {
                 latency: 0,
                 tail: Tail::None,
             },
-            active: false,
+            active: None,
             offline: false,
             setup: DEFAULT_SETUP,
             pending: BTreeMap::new(),
@@ -173,9 +216,55 @@ impl Vst3Instance {
     /// Normalised values set while inactive that the processor has not
     /// been sent yet, by `ParamID` (taken: the processor sends them with
     /// its first block).
-    #[expect(dead_code, reason = "the processor (H1 Task 4) takes them")]
     pub(crate) fn take_pending(&mut self) -> Vec<(u32, f64)> {
         std::mem::take(&mut self.pending).into_iter().collect()
+    }
+
+    /// Hands the processor's values to the controller (main thread).
+    fn drain_echoes(&mut self) {
+        let Some(a) = &self.active else {
+            return;
+        };
+        while let Some((id, n)) = a.echoes.pop() {
+            self.plugin.set_normalized(id, n);
+        }
+    }
+
+    /// Ends the active state once its processor is gone: the controller
+    /// gets the processor's last values, edits the processor never took
+    /// wait for the next first block, and the component is deactivated.
+    fn finish_active(&mut self) {
+        self.drain_echoes();
+        let Some(a) = self.active.take() else {
+            return;
+        };
+        while let Some((id, n)) = a.edits.pop() {
+            self.pending.insert(id, n);
+        }
+        self.plugin.set_active(false);
+        self.plugin.activate_buses(false);
+    }
+
+    /// Finishes the active state of a processor dropped without
+    /// [`PluginInstance::deactivate`].
+    fn reclaim(&mut self) {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|a| !a.alive.load(Ordering::Acquire))
+        {
+            self.finish_active();
+        }
+    }
+
+    /// Reads latency and tail (after `setActive(true)`).
+    fn read_timing(&mut self) {
+        self.info.latency = self.plugin.latency();
+        self.info.tail = match self.plugin.tail() {
+            0 => Tail::None,
+            INFINITE_TAIL => Tail::Infinite,
+            n => Tail::Frames(n),
+        };
     }
 
     /// Edits the component handler dropped because its queue was full
@@ -192,21 +281,87 @@ impl PluginInstance for Vst3Instance {
 
     fn activate(
         &mut self,
-        _sample_rate: f64,
-        _max_frames: u32,
+        sample_rate: f64,
+        max_frames: u32,
     ) -> Result<Box<dyn AudioProcessor>, HostError> {
-        Err(HostError::ActivateFailed(
-            "VST3 audio processing is not available yet".into(),
-        ))
+        self.reclaim();
+        if self.active.is_some() {
+            return Err(HostError::ActivateFailed("already active".into()));
+        }
+        let max_frames = max_frames.max(1);
+        let failed = |why: &str| Err(HostError::ActivateFailed(why.into()));
+        let Some(processor) = self.plugin.audio_processor() else {
+            return failed("the plug-in has no audio processor");
+        };
+        // The stored render mode (`set_offline`) at the host's setup.
+        if self
+            .plugin
+            .setup_processing(self.offline, sample_rate, max_frames)
+            != Some(true)
+        {
+            return failed("the plug-in refused the processing setup");
+        }
+        self.setup = (sample_rate, max_frames);
+        if !self.plugin.can_process_f32() {
+            return failed("the plug-in cannot process 32-bit samples");
+        }
+        self.plugin.keep_arrangements();
+        // Buses may have changed while inactive.
+        self.read_info();
+        self.plugin.activate_buses(true);
+        if !self.plugin.set_active(true) {
+            self.plugin.activate_buses(false);
+            return failed("the plug-in did not activate");
+        }
+        self.read_timing();
+        let maps = self
+            .plugin
+            .params()
+            .into_iter()
+            .map(|p| {
+                ParamMap::sample(p.id, p.steps, !p.read_only, |n| {
+                    self.plugin.to_plain(p.id, n)
+                })
+            })
+            .collect();
+        let midi = if self.info.note_input {
+            self.plugin.midi_mapping()
+        } else {
+            Vec::new()
+        };
+        let in_counts: Vec<u16> = self.info.inputs.iter().map(|p| p.channels).collect();
+        let out_counts: Vec<u16> = self.info.outputs.iter().map(|p| p.channels).collect();
+        let active = Active {
+            edits: Arc::new(ArrayQueue::new(EDIT_QUEUE)),
+            echoes: Arc::new(ArrayQueue::new(ECHO_QUEUE)),
+            alive: Arc::new(AtomicBool::new(true)),
+        };
+        let setup = ProcessorSetup {
+            data: RtData::new(processor, &in_counts, &out_counts),
+            sample_rate,
+            max_frames,
+            offline: self.offline,
+            maps,
+            midi,
+            first: self.take_pending(),
+            edits: active.edits.clone(),
+            echoes: active.echoes.clone(),
+            alive: active.alive.clone(),
+        };
+        let proc = Vst3Processor::new(setup, &self.info);
+        self.active = Some(active);
+        Ok(Box::new(proc))
     }
 
     fn deactivate(&mut self, processor: Box<dyn AudioProcessor>) {
+        // Dropping the processor stops processing; then the component is
+        // deactivated here.
         drop(processor);
-        self.active = false;
+        self.finish_active();
     }
 
     fn is_active(&self) -> bool {
-        self.active
+        self.active.is_some()
     }
 
     fn save_state(&mut self) -> Result<Vec<u8>, HostError> {
@@ -222,7 +377,8 @@ impl PluginInstance for Vst3Instance {
     }
 
     fn set_params(&mut self, values: &[(ParamId, f64)]) -> Result<(), HostError> {
-        if self.active {
+        self.reclaim();
+        if self.active.is_some() {
             return Err(HostError::StateRejected(
                 "parameters of an active plugin go through its processor".into(),
             ));
@@ -266,6 +422,8 @@ impl PluginInstance for Vst3Instance {
     }
 
     fn idle(&mut self) -> InstanceEvents {
+        self.reclaim();
+        self.drain_echoes();
         let flags = self.handler.take_restart();
         let has = |f: i32| flags & f != 0;
         let io = has(restart::IO_CHANGED);
@@ -273,7 +431,7 @@ impl PluginInstance for Vst3Instance {
             || has(restart::PARAM_TITLES_CHANGED)
             || has(restart::PARAM_ID_MAPPING_CHANGED)
             || has(restart::IO_TITLES_CHANGED);
-        if reread && !self.active {
+        if reread && self.active.is_none() {
             self.read_info();
         }
         InstanceEvents {
@@ -289,6 +447,7 @@ impl PluginInstance for Vst3Instance {
     }
 
     fn gestures(&mut self) -> Vec<ParamEvent> {
+        self.reclaim();
         let edits = self.handler.take_edits();
         let mut out = Vec::with_capacity(edits.len());
         for e in edits {
@@ -296,9 +455,14 @@ impl PluginInstance for Vst3Instance {
                 Edit::Begin(id) => ParamEvent::Begin(ParamId(u64::from(id))),
                 Edit::End(id) => ParamEvent::End(ParamId(u64::from(id))),
                 Edit::Perform(id, n) => {
-                    // The component learns of an edit made while inactive
-                    // with the processor's first block.
-                    if !self.active {
+                    // The component gets the edit where it reads next: the
+                    // running processor's next block, else the next first
+                    // block (also when the processor's queue is full).
+                    let to_processor = self
+                        .active
+                        .as_ref()
+                        .is_some_and(|a| a.edits.push((id, n)).is_ok());
+                    if !to_processor {
                         self.pending.insert(id, n);
                     }
                     ParamEvent::Value(ParamId(u64::from(id)), self.plugin.to_plain(id, n))
@@ -309,7 +473,8 @@ impl PluginInstance for Vst3Instance {
     }
 
     fn set_offline(&mut self, on: bool) -> OfflineRender {
-        if self.active {
+        self.reclaim();
+        if self.active.is_some() {
             // `setupProcessing` needs an inactive component.
             return OfflineRender::Refused;
         }
@@ -319,11 +484,19 @@ impl PluginInstance for Vst3Instance {
                 self.offline = on;
                 OfflineRender::Taken
             }
-            Some(false) => {
-                self.offline = false;
-                OfflineRender::Refused
-            }
-            None => OfflineRender::Refused,
+            // Refused: the plug-in keeps the mode it last took, which the
+            // next activation sets up again.
+            Some(false) | None => OfflineRender::Refused,
+        }
+    }
+}
+
+impl Drop for Vst3Instance {
+    fn drop(&mut self) {
+        // An instance dropped while active is deactivated first (the
+        // host deactivates before dropping; this covers the rest).
+        if self.active.take().is_some() {
+            self.plugin.set_active(false);
         }
     }
 }

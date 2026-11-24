@@ -11,10 +11,9 @@
 //!
 //! `--list` prints the plugins of the bundle; `--id` loads the plugin,
 //! activates it at 48 kHz / 512 frames, processes one silent block,
-//! deactivates it and prints its `PluginInfo`. A VST3 `--id` loads the
-//! plug-in (component and controller, initialised and connected), prints
-//! its `PluginInfo` and releases it; it is not activated until VST3
-//! processing exists. The reply is one JSON line
+//! deactivates it and prints its `PluginInfo` (for every format: a
+//! plug-in that crashes in its setup, activation or first block is
+//! blocklisted, not marked usable). The reply is one JSON line
 //! on stdout ([`core_host::scan::ScanReply`]); failures print a message on
 //! stderr and exit with status 2. A crash or a hang is the caller's to
 //! detect.
@@ -132,9 +131,12 @@ fn scan(args: &Args) -> Result<ScanReply, String> {
         (Format::Vst3, None) => core_host::vst3::list_bundle(&args.path)
             .map(ScanReply::Listed)
             .map_err(|e| e.to_string()),
-        (Format::Vst3, Some(id)) => core_host::vst3::Vst3Instance::load(&args.path, id)
-            .map(|inst| ScanReply::Scanned(inst.info().clone()))
-            .map_err(|e| e.to_string()),
+        (Format::Vst3, Some(id)) => {
+            let mut inst =
+                core_host::vst3::Vst3Instance::load(&args.path, id).map_err(|e| e.to_string())?;
+            exercise(&mut inst)?;
+            Ok(ScanReply::Scanned(inst.info().clone()))
+        }
     }
 }
 
