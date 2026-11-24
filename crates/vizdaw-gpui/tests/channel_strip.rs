@@ -284,3 +284,44 @@ fn hiding_the_pane_ends_its_drag(cx: &mut TestAppContext) {
     let phases = s.of(T::StripFader { strip: 1 });
     assert_eq!(phases.last(), Some(&G::Release), "{phases:?}");
 }
+
+/// Review fix round 1: focus moving mid-drag (to another strip) ends the
+/// drag, released once, at once.
+#[gpui::test]
+fn a_focus_change_mid_drag_ends_the_drag(cx: &mut TestAppContext) {
+    let mut s = arrange(cx);
+    select(&mut s, 40);
+    let at = s.fader_at("Fader of Synth");
+    s.down(at);
+    s.move_to(point(at.x, at.y - px(10.)), true);
+    assert!(strip_pressed(&mut s));
+    select(&mut s, 41);
+    assert_eq!(s.fader_labels(), ["Fader of Audio 1"]);
+    assert!(!strip_pressed(&mut s), "the drag ended");
+    let phases = s.of(T::StripFader { strip: 1 });
+    let releases = phases.iter().filter(|p| **p == G::Release).count();
+    assert_eq!(releases, 1, "{phases:?}");
+    assert_eq!(phases.last(), Some(&G::Release), "{phases:?}");
+}
+
+/// Review fix round 1: focus moving mid-drag to a track with no strip
+/// drops the placement (no poll left running) and ends the drag once.
+#[gpui::test]
+fn a_focus_change_to_the_inspector_mid_drag_drops_the_placement(cx: &mut TestAppContext) {
+    let mut s = arrange(cx);
+    select(&mut s, 40);
+    let at = s.fader_at("Fader of Synth");
+    s.down(at);
+    s.move_to(point(at.x, at.y - px(10.)), true);
+    select(&mut s, 44);
+    assert!(s.find("text", INSPECTOR).is_some());
+    assert!(strip_view(&mut s).is_none(), "the placement went");
+    assert!(!strip_pressed(&mut s), "the drag ended");
+    let phases = s.of(T::StripFader { strip: 1 });
+    let releases = phases.iter().filter(|p| **p == G::Release).count();
+    assert_eq!(releases, 1, "{phases:?}");
+    // Back to a strip: the placement comes again.
+    select(&mut s, 40);
+    assert!(strip_view(&mut s).is_some());
+    assert_eq!(s.fader_labels(), ["Fader of Synth"]);
+}

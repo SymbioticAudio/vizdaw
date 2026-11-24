@@ -1348,13 +1348,14 @@ impl DocumentWindow {
                         )),
                 )
         };
-        // The left pane's Channel Strip is a placement while a track is
-        // focused (nothing focused: its note, and no mixer is made).
+        // The left pane's Channel Strip is a placement while the focused
+        // track has a strip (or the mixer is still to be read); otherwise
+        // the pane shows a note and the placement goes, ending its drag.
         let strip_mixer = self.place_mixer(
             MixerPlacement::Strip,
             frames.of(PaneSide::Left).is_some()
                 && host.setup.left.view == PaneView::Strip
-                && !host.nothing_focused,
+                && host.left_strip.placed(),
             window,
             cx,
         );
@@ -1366,7 +1367,13 @@ impl DocumentWindow {
             let mut scope = root.container();
             let view = host.setup.pane(side).view;
             let content = if side == PaneSide::Left && view == PaneView::Strip {
-                channel_strip_pane::render(strip_mixer.as_ref(), &mut scope.container(), window, cx)
+                channel_strip_pane::render(
+                    host.left_strip,
+                    strip_mixer.as_ref(),
+                    &mut scope.container(),
+                    window,
+                    cx,
+                )
             } else {
                 panes::content(view, host, &mut scope.container())
             };

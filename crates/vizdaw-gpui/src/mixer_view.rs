@@ -29,7 +29,8 @@
 //!
 //! One [`MixerView`] per placement (the Mix view's centre, the bottom
 //! pane, the Mixer window, and the left pane's Channel Strip, which
-//! shows only the focused track's strip, centred, with no bar): it says it appeared when made and that it
+//! shows only the focused track's strip, centred, with no bar; a press
+//! whose column goes ends): it says it appeared when made and that it
 //! went when dropped (the last placement's going releases every open
 //! touch), and the window losing the keyboard cancels its drag.
 //!
@@ -896,6 +897,8 @@ struct Gathered {
     keys: HashSet<ColumnKey>,
     renaming: Option<(u64, MixerPlacement)>,
     renaming_vca: Option<(u64, MixerPlacement)>,
+    /// The column whose control this placement's press holds.
+    pressed: Option<ColumnKey>,
 }
 
 /// A column a placement shows: one of the mixer's, or (the left pane) a
@@ -907,6 +910,11 @@ enum Column<'a> {
         lane: &'a LaneRow,
         dest: Option<&'a DestRow>,
     },
+}
+
+/// The left pane has a column to show for the focused track.
+pub(crate) fn has_focused_column(m: &MixerModel, d: &DocumentModel) -> bool {
+    !focused_column(m, d).is_empty()
 }
 
 /// The left pane's column (Swift `LeftStripPane`): the strip the focused
@@ -1038,6 +1046,7 @@ fn gather(
         keys: all.iter().map(key_of).collect(),
         renaming: m.renaming(),
         renaming_vca: m.renaming_vca(),
+        pressed,
     }
 }
 
@@ -1521,6 +1530,12 @@ fn strips_in(
         {
             v.menu = None;
             v.submenu = None;
+        }
+        // The column a press holds went (the left pane's focus moved): its
+        // drag ends, released once, not left touching.
+        if g.pressed.is_some_and(|k| !g.keys.contains(&k)) {
+            let gone = v.mixer.clone();
+            cx.defer(move |cx| gone.cancel_drags(cx));
         }
         // The strip of a dragged insert went: the drag ends.
         if v.insert_drag

@@ -7,38 +7,38 @@
 //! the pane less 8 points above and below, scrolling down when the pane
 //! is shorter than the strip's least height; its controls, menus and
 //! drags are the mixer's own. A track with no strip shows the inspector's
-//! placeholder; nothing focused, the Swift note (the placement is not
-//! made then).
+//! placeholder; nothing focused (or a strip the mixer lacks), the Swift
+//! note. The placement exists only while a strip shows: when the focus
+//! moves off one it goes, ending its drag.
 
 use gpui::{AnyElement, App, Entity, Window};
 use vizdaw_app::editor::PaneView;
-use vizdaw_app::view::StripFocus;
 
 use crate::mixer_view::{self, MixerView};
-use crate::panes;
+use crate::panes::{self, LeftStrip};
 use crate::registry::RegistryScope;
 
-/// The pane's content, drawn by placement `view` (`None` while nothing
-/// is focused). `scope` is the pane content's own container.
+/// Swift `StripFocus.nothingMessage`.
+const NOTHING: &str = "Select a track to see its channel strip.";
+
+/// The pane's content for `shows`, the strip drawn by placement `view`
+/// (made while `shows` is placed). `scope` is the pane content's own
+/// container.
 pub(crate) fn render(
+    shows: LeftStrip,
     view: Option<&Entity<MixerView>>,
     scope: &mut RegistryScope,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let Some(view) = view else {
-        return panes::note_view(&panes::note(PaneView::Strip, true), scope);
-    };
-    let mixer = view.read(cx).mixer.clone();
-    let focus = mixer.read(cx, |m, d| {
-        d.left_strip(&m.snapshot().strips, m.destinations())
-    });
-    match focus {
-        Some(StripFocus::Inspector) => {
+    match (shows, view) {
+        (LeftStrip::Inspector, _) => {
             panes::note_view(&panes::note(PaneView::Inspector, false), scope)
         }
-        Some(StripFocus::Nothing) => panes::note_view(&panes::note(PaneView::Strip, true), scope),
         // A strip, or no mixer yet (asked for, or Mixer Unavailable).
-        _ => mixer_view::render(view, scope, window, cx),
+        (LeftStrip::Strip | LeftStrip::Unread, Some(view)) => {
+            mixer_view::render(view, scope, window, cx)
+        }
+        _ => panes::note_view(NOTHING, scope),
     }
 }

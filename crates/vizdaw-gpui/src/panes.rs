@@ -344,6 +344,49 @@ pub struct HostState {
     /// No track is selected or armed: the strip and controllers views say
     /// so.
     pub nothing_focused: bool,
+    /// What the left pane's Channel Strip view shows.
+    pub left_strip: LeftStrip,
+}
+
+/// What the left pane's Channel Strip view shows (Swift `LeftStripPane`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeftStrip {
+    /// No track is focused: the note.
+    Nothing,
+    /// A track is focused but the mixer is not read yet: the placement
+    /// shows (and reads it).
+    Unread,
+    /// The focused track's strip: the placement shows it.
+    Strip,
+    /// The focused track has no strip: the inspector's placeholder.
+    Inspector,
+    /// The focus names a strip the mixer does not have: the note.
+    Missing,
+}
+
+impl LeftStrip {
+    pub fn of(d: &DocumentModel) -> Self {
+        if d.focus_lanes().is_empty() {
+            return LeftStrip::Nothing;
+        }
+        let Some(m) = d.mixer() else {
+            return LeftStrip::Unread;
+        };
+        if crate::mixer_view::has_focused_column(m, d) {
+            LeftStrip::Strip
+        } else if d.left_strip(&m.snapshot().strips, m.destinations())
+            == view::StripFocus::Inspector
+        {
+            LeftStrip::Inspector
+        } else {
+            LeftStrip::Missing
+        }
+    }
+
+    /// The left pane's strip placement shows.
+    pub fn placed(self) -> bool {
+        matches!(self, LeftStrip::Unread | LeftStrip::Strip)
+    }
 }
 
 impl HostState {
@@ -354,6 +397,7 @@ impl HostState {
             setup: *l.views.current(),
             current: PaneSide::ALL.map(|s| Choice::current(s, l)),
             nothing_focused: d.focus_lanes().is_empty(),
+            left_strip: LeftStrip::of(d),
         }
     }
 
@@ -369,6 +413,7 @@ impl HostState {
                 Choice::View(v.arrange.right.view),
             ],
             nothing_focused: true,
+            left_strip: LeftStrip::Nothing,
         }
     }
 
