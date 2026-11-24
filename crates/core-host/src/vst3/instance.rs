@@ -240,7 +240,13 @@ impl PluginInstance for Vst3Instance {
             let Some(vid) = vst_id(*id) else {
                 continue;
             };
-            let n = self.plugin.to_normalized(vid, *plain).clamp(0.0, 1.0);
+            // A controller may map a value to NaN; that is never sent.
+            let Some(n) = Some(self.plugin.to_normalized(vid, *plain))
+                .filter(|n| n.is_finite())
+                .map(|n| n.clamp(0.0, 1.0))
+            else {
+                continue;
+            };
             if self.plugin.set_normalized(vid, n) {
                 self.pending.insert(vid, n);
             }

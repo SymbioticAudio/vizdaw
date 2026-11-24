@@ -324,7 +324,7 @@ fn an_unknown_class_is_not_found_and_leaves_nothing_loaded() {
     let e = Vst3Instance::load(&copy, "00000000000000000000000000000001").unwrap_err();
     assert!(matches!(e, HostError::NotFound(_)), "{e}");
     let c = probe.counters();
-    assert_eq!(c.entries, c.exits, "{c:?}");
+    assert_eq!((c.entries, c.exits), (2, 2), "one load each: {c:?}");
     assert_eq!(c.component_releases, 0, "{c:?}");
 }
 

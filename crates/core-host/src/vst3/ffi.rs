@@ -13,6 +13,7 @@ use crate::error::HostError;
 use crossbeam_queue::ArrayQueue;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
+use std::mem::ManuallyDrop;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
@@ -107,17 +108,23 @@ mod cf {
 }
 
 /// A loaded VST3 module: its library (entered), and its factory. Dropping
-/// it releases the factory, runs the module exit and unloads the library,
-/// in that order; every COM object made from the factory must be released
-/// first.
+/// it releases the factory, then runs the module exit; every COM object
+/// made from the factory must be released first.
+///
+/// The library itself is never unloaded once opened, on any platform
+/// (host track H1 Task 3 fix, Linux TLS): a plug-in may have given a
+/// thread a thread-exit destructor in its own code (Rust's `std`, many
+/// C++ runtimes), and a thread that exits after an unload runs code that
+/// is gone. Loading the bundle again reuses the open image and runs its
+/// entry again, as a module that counts entries expects.
 pub(crate) struct Module {
     factory: Option<ComPtr<IPluginFactory>>,
     exit: Option<ModuleExit>,
     /// The host context the factory and every object made from it get.
     host: ComWrapper<HostApp>,
-    // Dropped after `drop` ran the exit: the library, then (macOS) the
-    // bundle reference the entry got.
-    _library: libloading::Library,
+    // Never closed (see above); (macOS) the bundle reference the entry got
+    // is released after `drop` ran the exit.
+    _library: ManuallyDrop<libloading::Library>,
     #[cfg(target_os = "macos")]
     _bundle: cf::Bundle,
 }
@@ -142,8 +149,9 @@ impl Module {
             // SAFETY: loading a plug-in binary runs its initialisers;
             // plug-ins are untrusted code by design (spec §2), which is why
             // the scanner loads unknown bundles in a separate process first.
-            let library =
-                unsafe { libloading::Library::new(&binary) }.map_err(|e| load_failed(bundle, e))?;
+            let library = ManuallyDrop::new(
+                unsafe { libloading::Library::new(&binary) }.map_err(|e| load_failed(bundle, e))?,
+            );
             let cf_bundle = cf::Bundle::create(bundle);
             type Entry = unsafe extern "system" fn(*mut c_void) -> bool;
             // SAFETY: the SDK declares `bool bundleEntry(CFBundleRef)`.
@@ -160,20 +168,25 @@ impl Module {
         let (library, entered) = {
             use libloading::os::unix::{Library, RTLD_LAZY, RTLD_LOCAL};
             // SAFETY: as above (macOS).
-            let library = unsafe { Library::open(Some(&binary), RTLD_LAZY | RTLD_LOCAL) }
-                .map_err(|e| load_failed(bundle, e))?;
+            let library = ManuallyDrop::new(
+                unsafe { Library::open(Some(&binary), RTLD_LAZY | RTLD_LOCAL) }
+                    .map_err(|e| load_failed(bundle, e))?,
+            );
             type Entry = unsafe extern "system" fn(*mut c_void) -> bool;
             // SAFETY: the SDK declares `bool ModuleEntry(void* sharedLibraryHandle)`.
             let entry = unsafe { library.get::<Entry>(b"ModuleEntry\0") }
                 .map(|s| *s)
                 .map_err(|_| load_failed(bundle, "no ModuleEntry function"))?;
             // The entry gets the `dlopen` handle, as in the SDK.
-            let handle = library.into_raw();
+            let handle = ManuallyDrop::into_inner(library).into_raw();
             // SAFETY: `handle` came from `into_raw` just now.
             let library = unsafe { Library::from_raw(handle) };
             // SAFETY: the handle is the open library's.
             let entered = unsafe { entry(handle) };
-            (libloading::Library::from(library), entered)
+            (
+                ManuallyDrop::new(libloading::Library::from(library)),
+                entered,
+            )
         };
         if !entered {
             return Err(load_failed(bundle, "the module entry failed"));

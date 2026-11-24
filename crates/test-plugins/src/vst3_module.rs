@@ -17,6 +17,11 @@
 //! Like a plug-in built with the SDK, the factory is only handed out after
 //! the module entry (`bundleEntry` on macOS, `ModuleEntry` on Linux) ran.
 //!
+//! Creating any object also gives the creating thread a thread-exit
+//! destructor in this library (a pthread key, as Rust's `std` and many
+//! C++ plug-ins register): a host that unloads the library before such a
+//! thread exits crashes when the thread does.
+//!
 //! The Gain component's state is [`VST3_COMPONENT_GAIN`] (a normalised
 //! value, 8 bytes little-endian); a controller given it through
 //! `setComponentState` takes it as its Gain value. When connected, the
@@ -274,7 +279,8 @@ mod ix {
     pub const HOST_CONTEXTS: usize = 22;
     pub const SETUPS: usize = 23;
     pub const LAST_PROCESS_MODE: usize = 24;
-    pub const N: usize = 25;
+    pub const THREAD_EXITS: usize = 25;
+    pub const N: usize = 26;
 }
 
 static COUNTERS: [AtomicU64; ix::N] = [const { AtomicU64::new(0) }; ix::N];
@@ -418,6 +424,30 @@ fn copy_wide(src: &str, dst: &mut [u16]) {
         *end = 0;
     }
 }
+
+/// Gives the calling thread a value under a pthread key whose destructor
+/// is code in this library; it runs when the thread exits.
+#[cfg(unix)]
+fn mark_thread() {
+    use std::sync::OnceLock;
+    extern "C" fn on_thread_exit(_value: *mut c_void) {
+        bump(ix::THREAD_EXITS);
+    }
+    static KEY: OnceLock<Option<libc::pthread_key_t>> = OnceLock::new();
+    let key = KEY.get_or_init(|| {
+        let mut key: libc::pthread_key_t = 0;
+        // SAFETY: `key` is ours to fill; the destructor is a plain
+        // `extern "C"` function of this library.
+        (unsafe { libc::pthread_key_create(&mut key, Some(on_thread_exit)) } == 0).then_some(key)
+    });
+    if let Some(key) = key {
+        // SAFETY: a live key; any non-null value makes the destructor run.
+        unsafe { libc::pthread_setspecific(*key, std::ptr::dangling::<u8>() as *const c_void) };
+    }
+}
+
+#[cfg(not(unix))]
+fn mark_thread() {}
 
 /// Hands out `obj` as interface `iid` through `out` (the factory's and the
 /// host's `createInstance` convention).
@@ -1204,6 +1234,7 @@ impl IPluginFactoryTrait for Factory {
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
         }
+        mark_thread();
         let made = if cid == GAIN {
             ComWrapper::new(Component {
                 host: Mutex::new(None),
@@ -1416,6 +1447,9 @@ pub struct Vst3Counters {
     pub setups: u64,
     /// The latest `setupProcessing` process mode (0 real time, 2 offline).
     pub last_process_mode: u64,
+    /// Thread-exit destructors run (threads that created an object and
+    /// then exited).
+    pub thread_exits: u64,
 }
 
 /// A handle on the test module's loaded image, for reading its lifecycle
@@ -1490,6 +1524,7 @@ impl Vst3Probe {
             host_contexts: v[ix::HOST_CONTEXTS],
             setups: v[ix::SETUPS],
             last_process_mode: v[ix::LAST_PROCESS_MODE],
+            thread_exits: v[ix::THREAD_EXITS],
         }
     }
 

@@ -86,3 +86,31 @@ fn parallel_loads_of_one_image_all_find_a_factory() {
     let c = probe.counters();
     assert_eq!((c.entries, c.exits), (160, 160), "{c:?}");
 }
+
+/// A plug-in that gave a thread a thread-exit destructor (Rust's `std` and
+/// many C++ plug-ins do) must still be loaded when that thread exits, after
+/// its module exited: the host never unloads a VST3 library. Without that,
+/// the thread's exit runs code that is gone (SIGSEGV on Linux).
+#[test]
+fn a_thread_that_used_a_plug_in_exits_safely_after_its_module_exits() {
+    let d = tempfile::tempdir().unwrap();
+    let copy = d.path().join("Private.vst3");
+    test_plugins::copy_vst3_bundle(&copy);
+    // No probe yet: a probe would hold the image open and hide the bug.
+    let path = copy.clone();
+    std::thread::spawn(move || {
+        let inst = vst3::Vst3Instance::load(&path, test_plugins::VST3_SYNTH_ID).unwrap();
+        // The module exits and is unloaded here, before the thread exits.
+        drop(inst);
+    })
+    .join()
+    .unwrap();
+    // The image is the same one: its counters saw the whole lifecycle.
+    let c = Vst3Probe::open(&copy).counters();
+    assert_eq!((c.entries, c.exits), (1, 1), "{c:?}");
+    assert_eq!(c.component_releases, 1, "{c:?}");
+    assert!(c.last_component_release < c.last_exit, "{c:?}");
+    if cfg!(unix) {
+        assert_eq!(c.thread_exits, 1, "the destructor ran: {c:?}");
+    }
+}
