@@ -1538,6 +1538,17 @@ fn gpui_new_track_strips_and_the_mixer_window_over_the_channel() {
 // strip over the channel, on the real core (its undo names included).
 
 /// The strip of `state.get mixer` whose ID is `id`.
+/// A level as a strip's fader reads it ("−6.0 dB", "0.0 dB", "+2.0 dB";
+/// within the throw).
+fn level_text(db: f64) -> String {
+    let v = (db * 10.0).round() / 10.0;
+    if v == 0.0 {
+        return "0.0 dB".into();
+    }
+    let sign = if v < 0.0 { '\u{2212}' } else { '+' };
+    format!("{sign}{:.1} dB", v.abs())
+}
+
 fn strip_by_id(m: &Value, id: u64) -> Value {
     m["strips"]
         .as_array()
@@ -1746,6 +1757,17 @@ fn gpui_groups_and_vcas_over_the_channel() {
     // The Mix view draws the VCA's fader at its level.
     app.call("command.run", json!({"id": "ui.view_mix", "window": w}));
     wait_for_value(&mut app, &w, "Fader of VCA Drums", "\u{2212}6.0 dB");
+    // A member shows its offset under its level box; its fader is still
+    // its own level, not the heard one.
+    wait_for_node(&mut app, &w, "VCA offset VCA \u{2212}6.0");
+    let member = strip_by_id(&after, a);
+    let name = member["name"].as_str().unwrap();
+    wait_for_value(
+        &mut app,
+        &w,
+        &format!("Fader of {name}"),
+        &level_text(gain_of(&after, a)),
+    );
     app.call("command.run", json!({"id": "edit.undo", "window": w}));
     wait_for_undo(&mut app, &w, "Set VCA");
     wait_for_node(&mut app, &w, "Fader of VCA 1");
@@ -1875,8 +1897,9 @@ fn gpui_new_bus_and_sends_over_the_channel() {
         "{m}"
     );
 
-    // Index 0 is refused before it reaches the core; a send the strip
-    // lacks is the core's refusal. Neither changes anything.
+    // Index 0 is the core's InvalidParams (sends count from 1 through
+    // `run_mixer`); a send the strip lacks is refused too. Neither changes
+    // anything.
     let e = app.call_err(
         "command.run",
         json!({"id": "mixer.set_send", "params": {"strip": audio_id, "index": 0, "level_db": "-1"}, "window": w}),

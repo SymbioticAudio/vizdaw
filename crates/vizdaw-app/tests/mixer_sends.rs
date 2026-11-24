@@ -8,11 +8,16 @@
 mod support;
 
 use std::sync::Arc;
+use std::time::Instant;
 
+use core_control::registry::ArgValue;
 use support::{FakeSession, mixer_fake, strip_row};
 use vizdaw_app::DocumentModel;
-use vizdaw_app::mixer::{MixerModel, SendLabels, StripPalette, send_index};
+use vizdaw_app::commands;
+use vizdaw_app::mixer::gesture::DRAG_TRAVEL;
+use vizdaw_app::mixer::{MixerModel, MixerPlacement, SendLabels, StripPalette, send_index};
 use vizdaw_ffi::VizError;
+use vizdaw_ffi::automation::GesturePhaseRow;
 use vizdaw_ffi::events::AutomationTargetRow as T;
 use vizdaw_ffi::mixer::{BusRow, SendRow, StripKindRow, SwatchRow};
 
@@ -243,4 +248,121 @@ fn a_colour_change_is_one_session_call_and_a_refusal_alerts() {
     f.set_call_error("set_strip_colour", Some(model_err("no")));
     mx(&mut d, |m, d| m.set_colour(d, 1, Some(SwatchRow::Blue)));
     assert_eq!(d.alert.as_ref().unwrap().title, "Strip Colour Failed");
+}
+
+/// Holds Synth's first send knob (Bus 1) through the tracker and moves it.
+fn hold_first_send(m: &mut MixerModel, d: &mut DocumentModel, now: Instant) {
+    let t = m.send_target(1, 0);
+    m.press(d, MixerPlacement::View, t, DRAG_TRAVEL, false, now);
+    m.drag(d, MixerPlacement::View, 0.0, -10.0, false, now);
+    assert!(m.is_touched(t));
+}
+
+/// After the held send moved away: the mouse moves on and comes up.
+fn move_on_and_lift(d: &mut DocumentModel, now: Instant) {
+    mx(d, |m, d| {
+        m.refresh_if_needed(d);
+        m.drag(d, MixerPlacement::View, 0.0, -30.0, false, now);
+        m.drag(d, MixerPlacement::View, 0.0, -50.0, false, now);
+        m.lift(d, MixerPlacement::View, now);
+    });
+}
+
+fn send_phases(f: &FakeSession) -> Vec<GesturePhaseRow> {
+    f.gestures().iter().map(|g| g.1).collect()
+}
+
+#[test]
+fn a_held_send_knob_lets_go_when_the_channel_removes_its_send() {
+    let (f, mut d) = make_with(two_sends());
+    let now = Instant::now();
+    mx(&mut d, |m, d| hold_first_send(m, d, now));
+    let before = send_phases(&f).len();
+    // The channel removes send 1 (Bus 1): Bus 2's send is index 0 now.
+    f.edit_mixer(|m| {
+        m.strips[0].sends.remove(0);
+    });
+    let args = [
+        ("strip".to_owned(), ArgValue::Int(1)),
+        ("index".to_owned(), ArgValue::Int(1)),
+    ];
+    commands::run("mixer.remove_send", &args, &mut d).expect("the channel's edit");
+    move_on_and_lift(&mut d, now);
+    let after = &send_phases(&f)[before..];
+    assert_eq!(
+        after,
+        [GesturePhaseRow::Release],
+        "released once, nothing else"
+    );
+    let first = T::SendLevel { strip: 1, send: 0 };
+    assert!(f.gestures()[before..].iter().all(|g| g.0 == first));
+    assert!(!d.mixer().unwrap().is_touched(first));
+    assert!(!d.mixer().unwrap().is_dragging(MixerPlacement::View));
+    assert!(d.alert.is_none());
+}
+
+#[test]
+fn a_held_send_knob_lets_go_when_undo_moves_its_send() {
+    // Bus 1's send was removed: Bus 2's is send 1, and its knob is held.
+    let f = two_sends();
+    f.edit_mixer(|m| {
+        m.strips[0].sends.remove(0);
+    });
+    let (f, mut d) = make_with(f);
+    let now = Instant::now();
+    mx(&mut d, |m, d| hold_first_send(m, d, now));
+    let before = send_phases(&f).len();
+    // ⌘Z while the mouse is down brings Bus 1's send back at index 0.
+    f.edit_mixer(|m| m.strips[0].sends.insert(0, send(2, 0.0)));
+    d.undo();
+    move_on_and_lift(&mut d, now);
+    assert_eq!(
+        &send_phases(&f)[before..],
+        [GesturePhaseRow::Release],
+        "released once; Bus 1's send is not moved"
+    );
+    let m = d.mixer().unwrap();
+    assert_eq!(m.strip(1).unwrap().sends[0].level_db, 0.0);
+    assert!(!m.is_dragging(MixerPlacement::View));
+}
+
+#[test]
+fn a_held_send_knob_lets_go_when_undo_of_its_add_removes_it() {
+    let (f, mut d) = make_with(two_sends());
+    let now = Instant::now();
+    mx(&mut d, |m, d| {
+        let t = m.send_target(1, 1);
+        m.press(d, MixerPlacement::View, t, DRAG_TRAVEL, false, now);
+        m.drag(d, MixerPlacement::View, 0.0, -10.0, false, now);
+    });
+    let before = send_phases(&f).len();
+    // ⌘Z of the Add Send that made it.
+    f.edit_mixer(|m| {
+        m.strips[0].sends.pop();
+    });
+    d.undo();
+    move_on_and_lift(&mut d, now);
+    assert_eq!(&send_phases(&f)[before..], [GesturePhaseRow::Release]);
+}
+
+#[test]
+fn a_held_send_knob_keeps_its_drag_when_its_send_stays() {
+    let (f, mut d) = make_with(two_sends());
+    let now = Instant::now();
+    mx(&mut d, |m, d| hold_first_send(m, d, now));
+    let before = send_phases(&f).len();
+    // A later send is removed: send 1 is still Bus 1's.
+    f.edit_mixer(|m| {
+        m.strips[0].sends.pop();
+    });
+    d.undo();
+    mx(&mut d, |m, d| {
+        m.refresh_if_needed(d);
+        m.drag(d, MixerPlacement::View, 0.0, -30.0, false, now);
+    });
+    assert!(matches!(
+        send_phases(&f)[before..],
+        [GesturePhaseRow::Value { .. }]
+    ));
+    assert!(d.mixer().unwrap().is_dragging(MixerPlacement::View));
 }

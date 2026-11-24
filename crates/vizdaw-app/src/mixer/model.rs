@@ -127,6 +127,9 @@ pub struct MixerModel {
     alone: HashSet<Target>,
     /// Releases that met Busy.
     pending: HashMap<Target, PendingRelease>,
+    /// The bus each pressed or touched send fed then: a send is keyed by
+    /// its index, so one whose index now feeds another bus has gone.
+    send_buses: HashMap<Target, u64>,
     presses: HashMap<MixerPlacement, Press>,
     gestures: HashMap<(MixerPlacement, Target), ControlGesture>,
     /// Moves when a tick changed what the placements show.
@@ -175,6 +178,7 @@ impl MixerModel {
             core_values: HashMap::new(),
             alone: HashSet::new(),
             pending: HashMap::new(),
+            send_buses: HashMap::new(),
             presses: HashMap::new(),
             gestures: HashMap::new(),
             shown_version: 0,
@@ -549,7 +553,9 @@ impl MixerModel {
     /// follows it. `alone` (⌥ at the press) moves this target without its
     /// group until its release.
     pub fn touch(&mut self, doc: &mut DocumentModel, t: Target, alone: bool) {
-        self.editing.insert(t);
+        if self.editing.insert(t) && !self.presses.values().any(|p| p.target == t) {
+            self.note_send_bus(t);
+        }
         if self.touches.contains(&t) {
             return;
         }
@@ -602,6 +608,7 @@ impl MixerModel {
     /// snapshot's value again. A release that meets Busy is retried.
     pub fn release(&mut self, doc: &mut DocumentModel, t: Target, now: Instant) {
         self.editing.remove(&t);
+        self.send_buses.remove(&t);
         if !self.touches.remove(&t) {
             return;
         }
@@ -650,6 +657,7 @@ impl MixerModel {
         self.editing.clear();
         self.presses.clear();
         self.gestures.clear();
+        self.send_buses.clear();
         if self.touches.is_empty() {
             return;
         }
@@ -744,6 +752,7 @@ impl MixerModel {
         self.lift(doc, p, now);
         self.midi_lift(doc, p, now);
         let alone = option && matches!(t, Target::StripFader { .. });
+        self.note_send_bus(t);
         self.presses.insert(p, Press { target: t, alone });
         self.gestures
             .entry((p, t))
@@ -794,6 +803,19 @@ impl MixerModel {
             .is_some_and(|g| g.ended(now));
         if ended {
             self.release(doc, press.target, now);
+        } else if !self.editing.contains(&press.target) {
+            self.send_buses.remove(&press.target);
+        }
+    }
+
+    /// Notes the bus send target `t` feeds now (nothing for other targets).
+    fn note_send_bus(&mut self, t: Target) {
+        if let Target::SendLevel { strip, send } = t
+            && let Some(row) = self
+                .strip(strip)
+                .and_then(|s| s.sends.get(usize::from(send)))
+        {
+            self.send_buses.insert(t, row.target);
         }
     }
 
@@ -1136,19 +1158,20 @@ impl MixerModel {
 
     /// Releases (once, quietly: the control went) the touches whose
     /// control the mixer no longer has, ends their drags, and drops gone
-    /// strips from the selection.
+    /// strips from the selection. A held send whose index now feeds
+    /// another bus (the list shifted under it: a channel edit, an undo)
+    /// has gone too: its drag must not carry on into the send there now.
     fn forget_gone(&mut self, doc: &mut DocumentModel) {
         let snap = &self.snapshot;
-        self.editing.retain(|t| exists(*t, snap));
+        let buses = &self.send_buses;
+        let here = |t: &Target| exists(*t, snap) && same_send(*t, snap, buses.get(t).copied());
+        self.editing.retain(here);
         self.pending.retain(|t, _| exists(*t, snap));
-        self.presses.retain(|_, p| exists(p.target, snap));
-        self.gestures.retain(|(_, t), _| exists(*t, snap));
-        let gone: Vec<Target> = self
-            .touches
-            .iter()
-            .copied()
-            .filter(|t| !exists(*t, snap))
-            .collect();
+        self.presses.retain(|_, p| here(&p.target));
+        self.gestures.retain(|(_, t), _| here(t));
+        let gone: Vec<Target> = self.touches.iter().copied().filter(|t| !here(t)).collect();
+        self.send_buses
+            .retain(|t, bus| exists(*t, snap) && same_send(*t, snap, Some(*bus)));
         let session: Arc<dyn DocSession> = doc.session().clone();
         for t in gone {
             self.touches.remove(&t);
@@ -1253,6 +1276,19 @@ fn exists(t: Target, snap: &MixerSnapshot) -> bool {
         Target::VcaFader { vca } => snap.vcas.iter().any(|v| v.id == vca),
         Target::PluginParam { .. } | Target::VelocityScale { .. } => true,
     }
+}
+
+/// Whether send target `t` still feeds `bus`, the bus it fed at its press
+/// (`None`: not noted, or not a send).
+fn same_send(t: Target, snap: &MixerSnapshot, bus: Option<u64>) -> bool {
+    let (Target::SendLevel { strip, send }, Some(bus)) = (t, bus) else {
+        return true;
+    };
+    snap.strips
+        .iter()
+        .find(|s| s.id == strip)
+        .and_then(|s| s.sends.get(usize::from(send)))
+        .is_some_and(|row| row.target == bus)
 }
 
 /// One gesture phase from the mouse; `alone` keeps the group still.

@@ -472,6 +472,64 @@ fn a_send_knob_drag_is_one_gesture_on_the_first_send(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_held_send_knob_lets_go_when_undo_moves_its_send(cx: &mut TestAppContext) {
+    // Audio 1 also sends to Bus 2 (3) at −12 dB, as its second send.
+    let f = fake();
+    f.edit_mixer(|m| {
+        let at = m.strips.iter().position(|s| s.id == 2).unwrap() + 1;
+        m.strips
+            .insert(at, strip_row(3, "Bus 2", StripKindRow::Bus));
+        m.buses.push(vizdaw_ffi::mixer::BusRow {
+            id: 3,
+            name: "Bus 2".into(),
+        });
+        m.strips[0].sends.push(SendRow {
+            target: 3,
+            level_db: -12.0,
+            pre_fader: false,
+            enabled: true,
+        });
+    });
+    let mut s = setup(cx, f);
+    let at = s
+        .element("slider", "Send knob 1 of Audio 1")
+        .bounds
+        .center();
+    s.down(at, 1);
+    s.move_to(point(at.x, at.y - px(2.)), true);
+    s.move_to(point(at.x, at.y - px(10.)), true);
+    let before = s.fake.gestures().len();
+    assert!(before >= 2, "touched and moved");
+    // ⌘Z while the mouse is down takes Bus 1's send away: Bus 2's is send
+    // 1 now.
+    s.fake.edit_mixer(|m| {
+        m.strips[0].sends.remove(0);
+    });
+    let doc = s.window.read_with(&s.cx, |v, _| v.doc()).unwrap();
+    s.app.update(&mut s.cx, |a, cx| {
+        a.store.document_mut(doc).unwrap().undo();
+        cx.notify();
+    });
+    s.cx.run_until_parked();
+    s.move_to(point(at.x, at.y - px(40.)), true);
+    s.move_to(point(at.x, at.y - px(60.)), true);
+    s.up(point(at.x, at.y - px(60.)), 1);
+    let after: Vec<GesturePhaseRow> = s.fake.gestures()[before..].iter().map(|g| g.1).collect();
+    assert_eq!(
+        after,
+        [GesturePhaseRow::Release],
+        "released once; no value reaches Bus 2's send"
+    );
+    let pressed = s.app.read_with(&s.cx, |a, _| {
+        a.store
+            .document(doc)
+            .and_then(|d| d.mixer())
+            .and_then(|m| m.pressed(MixerPlacement::View))
+    });
+    assert_eq!(pressed, None, "the drag ended");
+}
+
+#[gpui::test]
 fn a_typed_send_level_is_one_click_and_bad_text_is_refused(cx: &mut TestAppContext) {
     let mut s = setup(cx, fake());
     s.click("textfield", "Send 1 of Audio 1");
