@@ -722,3 +722,69 @@ fn a_hidden_pane_keeps_no_keyboard(cx: &mut TestAppContext) {
     s.keys("backspace");
     assert_eq!(s.fake.edits().len(), 1, "{:?}", s.fake.edits());
 }
+
+/// A file panel the test keeps up until it answers.
+struct HeldPanel {
+    done: std::cell::RefCell<
+        Vec<futures::channel::oneshot::Sender<vizdaw_gpui::file_panels::Chosen>>,
+    >,
+}
+
+impl vizdaw_gpui::file_panels::PanelBackend for HeldPanel {
+    fn show(
+        &self,
+        _spec: &vizdaw_app::panels::PanelSpec,
+        _place: &vizdaw_gpui::file_panels::PanelPlace,
+        _window: Option<gpui::AnyWindowHandle>,
+        done: futures::channel::oneshot::Sender<vizdaw_gpui::file_panels::Chosen>,
+        _cx: &mut gpui::App,
+    ) {
+        self.done.borrow_mut().push(done);
+    }
+}
+
+#[gpui::test]
+fn the_windows_keys_do_nothing_while_a_file_panel_is_up(cx: &mut TestAppContext) {
+    use vizdaw_gpui::file_panels::{PanelBackend, PanelPlace, choose, set_backend};
+    let mut s = list_view(cx);
+    s.click_row(FIRST);
+    let held = std::rc::Rc::new(HeldPanel {
+        done: Default::default(),
+    });
+    let backend: std::rc::Rc<dyn PanelBackend> = held.clone();
+    s.cx.update(|_, cx| {
+        set_backend(backend, cx);
+        choose(
+            &vizdaw_app::panels::IMPORT_MIDI,
+            PanelPlace::default(),
+            None,
+            cx,
+        )
+        .detach();
+    });
+    s.cx.run_until_parked();
+    assert_eq!(held.done.borrow().len(), 1);
+    let edits = s.fake.edits().len();
+    // Delete on the selected row, the transport's Space, a typed key.
+    s.keys("backspace");
+    s.keys("space");
+    s.keys("enter");
+    assert_eq!(s.fake.edits().len(), edits);
+    assert_eq!(s.fake.count("play(3)"), 0);
+    assert_eq!(s.editing(), None);
+    // The panel answers: the keys work again.
+    held.done
+        .borrow_mut()
+        .pop()
+        .unwrap()
+        .send(Ok(None))
+        .unwrap();
+    s.cx.run_until_parked();
+    s.keys("backspace");
+    assert_eq!(
+        s.fake.edits().last(),
+        Some(&EditCommand::Event {
+            edit: EventEdit::Delete { events: vec![1] }
+        })
+    );
+}

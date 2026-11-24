@@ -46,6 +46,8 @@ pub use shell::DocumentWindow;
 /// handles the app-level actions (New, New Demo, Open, Quit).
 pub fn install(store: DocumentStore, cx: &mut App) -> gpui::Entity<AppState> {
     let state = app_state::create(store, cx);
+    // No window key acts while a file panel is up.
+    file_panels::install(cx);
     // The store's file reads (DAWproject and AAF opens) run off the UI
     // thread from now on.
     control::files::install_spawner(cx);

@@ -14,8 +14,8 @@ use vizdaw_app::DocumentStore;
 use vizdaw_app::panels::{self, PanelSpec};
 use vizdaw_app::testing::{FakeSession, demo_fake};
 use vizdaw_gpui::file_panels::{
-    Chosen, MacPanel, MacType, PanelBackend, PanelPlace, PortalFilter, PortalRequest, choose,
-    is_up, mac_panel, portal_request, set_backend,
+    Chosen, MacPanel, MacType, PanelBackend, PanelPlace, PortalFilter, PortalRequest, blocks_key,
+    choose, is_up, mac_panel, portal_request, set_backend,
 };
 use vizdaw_gpui::menus::{self, ItemSpec, MenuModel};
 
@@ -338,6 +338,11 @@ fn the_answer_arrives_through_the_panels_completion_and_menus_are_off_meanwhile(
     assert!(got.borrow().is_none());
     assert!(s.cx.update(|_, cx| is_up(cx)));
     assert!(!s.cx.update(|_, cx| any_enabled(&menus::shown(cx).unwrap())));
+    // Keys are off, apart from the panel's own cancel keys.
+    assert!(blocks(&mut s, "space"));
+    assert!(blocks(&mut s, "backspace"));
+    assert!(!blocks(&mut s, "escape"));
+    assert!(!blocks(&mut s, "cmd-."));
     fake.answer(0, Ok(Some(vec![PathBuf::from("/m/a.mid")])));
     s.cx.run_until_parked();
     assert_eq!(
@@ -346,6 +351,7 @@ fn the_answer_arrives_through_the_panels_completion_and_menus_are_off_meanwhile(
     );
     assert!(!s.cx.update(|_, cx| is_up(cx)));
     assert!(s.cx.update(|_, cx| any_enabled(&menus::shown(cx).unwrap())));
+    assert!(!blocks(&mut s, "space"));
 }
 
 #[gpui::test]
@@ -368,4 +374,9 @@ fn dropping_the_callers_task_still_clears_the_panel_up_flag(cx: &mut TestAppCont
     s.cx.update(|_, cx| drop(choose(&panels::IMPORT_AAF, PanelPlace::default(), None, cx)));
     s.cx.run_until_parked();
     assert_eq!(fake.rows(), vec!["14"]);
+}
+
+fn blocks(s: &mut Setup, key: &'static str) -> bool {
+    let key = gpui::Keystroke::parse(key).unwrap();
+    s.cx.update(|_, cx| blocks_key(&key, cx))
 }

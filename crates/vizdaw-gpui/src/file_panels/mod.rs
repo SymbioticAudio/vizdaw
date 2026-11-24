@@ -26,7 +26,7 @@ use std::rc::Rc;
 
 use futures::channel::oneshot;
 
-use gpui::{AnyWindowHandle, App, Global, PathPromptOptions, PromptLevel, Task};
+use gpui::{AnyWindowHandle, App, Global, Keystroke, PathPromptOptions, PromptLevel, Task};
 use vizdaw_app::panels::{
     FileType, PanelKind, PanelSpec, REPLACE_ANSWERS, replace_question, save_target,
 };
@@ -255,6 +255,26 @@ pub fn set_backend(backend: Rc<dyn PanelBackend>, cx: &mut App) {
 /// Whether a panel is up now.
 pub fn is_up(cx: &App) -> bool {
     cx.try_global::<PanelState>().is_some_and(|s| s.up)
+}
+
+/// Whether `key` must not reach a window now: while a panel is up no
+/// window key acts (Swift's panels were app-modal), apart from Esc and
+/// Cmd-. , which belong to the panel (AppKit's cancel keys).
+pub fn blocks_key(key: &Keystroke, cx: &App) -> bool {
+    let cancel = key.key == "escape" || (key.modifiers.platform && key.key == ".");
+    is_up(cx) && !cancel
+}
+
+/// Keeps keys from every window while a panel is up ([`blocks_key`]): an
+/// interceptor stops the key before bindings match, and GPUI then calls
+/// no key-down handler either (they run only while the event propagates).
+pub fn install(cx: &mut App) {
+    cx.intercept_keystrokes(|e, _, cx| {
+        if blocks_key(&e.keystroke, cx) {
+            cx.stop_propagation();
+        }
+    })
+    .detach();
 }
 
 fn set_up(up: bool, cx: &mut App) {

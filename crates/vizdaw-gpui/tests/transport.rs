@@ -508,3 +508,56 @@ fn a_narrow_window_folds_the_last_items_into_more(cx: &mut TestAppContext) {
     assert!(!s.has("button", "More Transport Items"));
     assert!(s.has("textfield", "Edit Out"));
 }
+
+/// A file panel the test keeps up until it answers.
+struct HeldPanel {
+    done: std::cell::RefCell<
+        Vec<futures::channel::oneshot::Sender<vizdaw_gpui::file_panels::Chosen>>,
+    >,
+}
+
+impl vizdaw_gpui::file_panels::PanelBackend for HeldPanel {
+    fn show(
+        &self,
+        _spec: &vizdaw_app::panels::PanelSpec,
+        _place: &vizdaw_gpui::file_panels::PanelPlace,
+        _window: Option<gpui::AnyWindowHandle>,
+        done: futures::channel::oneshot::Sender<vizdaw_gpui::file_panels::Chosen>,
+        _cx: &mut gpui::App,
+    ) {
+        self.done.borrow_mut().push(done);
+    }
+}
+
+#[gpui::test]
+fn held_keys_do_nothing_while_a_file_panel_is_up(cx: &mut TestAppContext) {
+    use vizdaw_gpui::file_panels::{PanelBackend, PanelPlace, choose, set_backend};
+    let mut s = setup(cx, demo_fake());
+    let held = std::rc::Rc::new(HeldPanel {
+        done: Default::default(),
+    });
+    let backend: std::rc::Rc<dyn PanelBackend> = held.clone();
+    s.cx.update(|_, cx| {
+        set_backend(backend, cx);
+        choose(
+            &vizdaw_app::panels::IMPORT_MIDI,
+            PanelPlace::default(),
+            None,
+            cx,
+        )
+        .detach();
+    });
+    s.cx.run_until_parked();
+    // The window's own key-down handler (held Fast Forward) is off too.
+    s.keys("shift-.");
+    assert!(s.fake.key_steps().is_empty());
+    held.done
+        .borrow_mut()
+        .pop()
+        .unwrap()
+        .send(Ok(None))
+        .unwrap();
+    s.cx.run_until_parked();
+    s.keys("shift-.");
+    assert_eq!(s.fake.key_steps(), vec![true]);
+}
