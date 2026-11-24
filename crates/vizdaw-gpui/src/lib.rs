@@ -30,6 +30,7 @@ use std::path::Path;
 
 use gpui::{App, PathPromptOptions, PromptLevel, WindowHandle};
 use vizdaw_app::alerts::AlertItem;
+use vizdaw_app::store::{CrashChoice, Opened};
 use vizdaw_app::{DocId, DocumentStore};
 
 pub use app_state::{AppState, WindowKind};
@@ -83,9 +84,20 @@ pub fn open_path(path: &Path, cx: &mut App) -> Option<WindowHandle<DocumentWindo
     let app = AppState::global(cx);
     let opened = app.update(cx, |s, cx| {
         cx.notify();
-        s.store.open(path)
+        match s.store.open(path) {
+            Ok(Opened::Doc(d)) => Some(d),
+            // Until slice 7b's prompts: opened as before, normally and
+            // from the last save.
+            Ok(Opened::Asking) => s
+                .store
+                .answer_crash(CrashChoice::Normally)
+                .or_else(|| s.store.answer_autosave(false)),
+            // The file is read first; its project arrives later (Task 5
+            // runs the reads).
+            Ok(Opened::Reading) | Err(_) => None,
+        }
     });
-    let doc = opened.ok()?;
+    let doc = opened?;
     if let Some(entry) = app.read(cx).window_of(doc).cloned() {
         entry
             .handle

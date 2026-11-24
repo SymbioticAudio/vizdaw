@@ -291,6 +291,11 @@ pub trait DocSession: Send + Sync {
     fn recover_recordings(&self, import: bool) -> Result<DocSnapshot, VizError>;
     /// How many Co-Producer copies the project keeps, and their bytes.
     fn co_producer_copies_size(&self) -> Result<CopiesSizeRow, VizError>;
+    /// The project's ID (its record's head), if it has one.
+    fn project_id(&self) -> Result<Option<String>, VizError>;
+    /// Whether the project keeps the snapshot of export `export_id` (one
+    /// lstat).
+    fn has_snapshot(&self, export_id: String) -> Result<bool, VizError>;
 }
 
 impl DocSession for Session {
@@ -664,6 +669,12 @@ impl DocSession for Session {
     }
     fn co_producer_copies_size(&self) -> Result<CopiesSizeRow, VizError> {
         Session::co_producer_copies_size(self)
+    }
+    fn project_id(&self) -> Result<Option<String>, VizError> {
+        Session::project_id(self)
+    }
+    fn has_snapshot(&self, export_id: String) -> Result<bool, VizError> {
+        Session::has_snapshot(self, export_id)
     }
 }
 

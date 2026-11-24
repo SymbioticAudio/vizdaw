@@ -75,6 +75,14 @@ pub struct DocumentModel {
     /// Disk too slow was dismissed; a transport read without an underrun
     /// clears it (the transport model shares it).
     pub(crate) disk_warning_dismissed: Arc<AtomicBool>,
+    /// The store made this project for a file it imports (an open): an
+    /// import that fails or is cancelled closes it while untouched.
+    pub(crate) opened_file: bool,
+    /// That import failed (its message) or was cancelled (`None`); the
+    /// store closes the project or shows the alert.
+    pub(crate) opened_file_end: Option<Option<String>>,
+    /// The MIDI file the import sheet reads (slice 7c shows it).
+    pub(crate) midi_read: Option<crate::store::MidiRead>,
 }
 
 /// What the arrangement reads of one track, read when first asked for.
@@ -177,6 +185,9 @@ impl DocumentModel {
             project_info: None,
             media_version: 0,
             disk_warning_dismissed: Arc::new(AtomicBool::new(false)),
+            opened_file: false,
+            opened_file_end: None,
+            midi_read: None,
         };
         model.refresh_project_info();
         model.reset_infos();

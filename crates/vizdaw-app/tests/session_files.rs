@@ -659,7 +659,12 @@ fn the_store_makes_and_opens_through_its_core() {
     store.open(std::path::Path::new("/p/Song.vizdaw")).unwrap();
     assert_eq!(
         core.calls(),
-        vec!["new_empty", "new_demo", "open(/p/Song.vizdaw)"]
+        vec![
+            "new_empty",
+            "new_demo",
+            "recovery_check(/p/Song.vizdaw)",
+            "open(/p/Song.vizdaw)"
+        ]
     );
     assert_eq!(store.core().project_rates(), core.project_rates());
 }

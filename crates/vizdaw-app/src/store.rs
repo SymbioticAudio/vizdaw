@@ -1,7 +1,9 @@
 //! The open documents (Swift: `DocumentStore`). Windows are plain tokens;
 //! the GUI layer maps real windows onto them.
 
-use std::collections::{HashMap, VecDeque};
+mod opening;
+
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -13,6 +15,11 @@ use vizdaw_ffi::{
 use crate::alerts::{AlertItem, error_message};
 use crate::document::DocumentModel;
 use crate::session::{CoreCalls, DocSession, LiveCore};
+
+pub use opening::{
+    CrashChoice, DisablePlugins, Landed, MidiRead, OPEN_FAILED, OpenQuestion, Opened, ReturnChoice,
+    ReturnPrompt, SlowRead, Spawner, is_aaf, is_copy, is_dawproject, is_midi, project_path,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DocId(pub u64);
@@ -49,8 +56,9 @@ impl CoreCalls for Makers {
     fn new_demo_audio(&self) -> Result<Arc<dyn DocSession>, VizError> {
         Err(not_scripted("new_demo_audio"))
     }
+    /// Without a format maker a new project is an empty one (Swift).
     fn new_project(&self, _format: ProjectFormatRow) -> Result<Arc<dyn DocSession>, VizError> {
-        Err(not_scripted("new_project"))
+        (self.make_empty)()
     }
     fn open(&self, path: &str) -> Result<Arc<dyn DocSession>, VizError> {
         (self.open_path)(path)
@@ -95,6 +103,20 @@ pub struct DocumentStore {
     alert: Option<AlertItem>,
     queued_alerts: VecDeque<AlertItem>,
     last_failure: Option<String>,
+    default_format: ProjectFormatRow,
+    /// Projects made for a file that landed later, waiting for a window.
+    pending: VecDeque<DocId>,
+    /// Documents the store closed itself, whose windows should close.
+    closed: Vec<DocId>,
+    /// Projects a channel import made, whose job has not ended.
+    made: HashSet<DocId>,
+    return_prompt: Option<ReturnPrompt>,
+    queued_prompts: VecDeque<ReturnPrompt>,
+    /// Opens waiting for the recovery questions, the first asking.
+    questions: VecDeque<opening::PendingOpen>,
+    reads: opening::Reads,
+    shift_held: Box<dyn Fn() -> bool>,
+    disable_plugins: opening::DisablePlugins,
 }
 
 impl DocumentStore {
@@ -119,6 +141,16 @@ impl DocumentStore {
             alert: None,
             queued_alerts: VecDeque::new(),
             last_failure: None,
+            default_format: crate::formats::FALLBACK_FORMAT,
+            pending: VecDeque::new(),
+            closed: vec![],
+            made: HashSet::new(),
+            return_prompt: None,
+            queued_prompts: VecDeque::new(),
+            questions: VecDeque::new(),
+            reads: opening::Reads::default(),
+            shift_held: Box::new(|| false),
+            disable_plugins: Box::new(|_| false),
         }
     }
 
@@ -146,7 +178,10 @@ impl DocumentStore {
     /// the store). The document is out of the store while `f` runs, so `f`
     /// must not open, close or look up documents; it is put back after.
     /// An alert the document raised (save, undo) moves to the store, the
-    /// single alert channel. `None` when `id` is not open.
+    /// single alert channel. An import into a project the store made for
+    /// its file that failed or was cancelled (polled in `f`) closes the
+    /// project while untouched (see [`DocumentStore::take_closed`]).
+    /// `None` when `id` is not open.
     pub fn with_document<R>(
         &mut self,
         id: DocId,
@@ -158,6 +193,8 @@ impl DocumentStore {
             self.post_alert(alert);
         }
         self.documents.insert(id, doc);
+        // An import into a project made for its file ended badly.
+        self.settle_opened_file(id);
         Some(result)
     }
 
@@ -179,35 +216,6 @@ impl DocumentStore {
 
     pub fn new_demo(&mut self) -> Option<DocId> {
         self.add("Demo Project Failed", |s| s.core.new_demo())
-    }
-
-    /// Opens a `.vizdaw` package. A refusal or failure is also posted as an
-    /// alert. A project that is already open answers its existing document.
-    pub fn open(&mut self, path: &Path) -> Result<DocId, String> {
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        if path.extension().and_then(|e| e.to_str()) != Some("vizdaw") {
-            let message = format!("{name} is not a .vizdaw project.");
-            self.post_alert(AlertItem::new("Open Failed", message.clone()));
-            return Err(message);
-        }
-        if let Some((id, _)) = self
-            .documents
-            .iter()
-            .find(|(_, d)| d.path().map(|p| canonical(&p)) == Some(canonical(path)))
-        {
-            return Ok(*id);
-        }
-        let text = path.to_string_lossy().into_owned();
-        match self.add("Open Failed", |s| s.core.open(&text)) {
-            Some(id) => Ok(id),
-            None => Err(self
-                .last_failure
-                .take()
-                .unwrap_or_else(|| "open failed".into())),
-        }
     }
 
     fn add(
@@ -267,6 +275,9 @@ impl DocumentStore {
             self.key_window = None;
         }
         self.recent_key.retain(|d| *d != id);
+        self.made.remove(&id);
+        self.pending.retain(|d| *d != id);
+        self.reads.midi_generation.remove(&id);
         if let Some(mut doc) = self.documents.remove(&id) {
             doc.audition_off_all();
             // No mixer touch outlives its document.

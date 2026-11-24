@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use support::{FakeSession, demo_fake};
+use vizdaw_app::store::Opened;
 use vizdaw_app::{AlertItem, DocumentStore, WindowToken};
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::session::Session;
@@ -165,6 +166,7 @@ fn opening_an_open_project_again_answers_the_same_document() {
         }),
     );
     let a = s.open(&real).unwrap();
+    assert!(matches!(a, Opened::Doc(_)));
     // `.` and a trailing slash name the same package.
     let indirect = dir.path().join(".").join("a.vizdaw").join("");
     assert_eq!(s.open(&indirect).unwrap(), a);

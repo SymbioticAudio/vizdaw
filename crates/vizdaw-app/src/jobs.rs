@@ -434,7 +434,10 @@ impl DocumentModel {
     /// Reads every listed job (`idle` calls this while any is listed).
     /// An ended one was applied by the session and refreshes the
     /// document: a failure is an alert titled by [`failure_title`],
-    /// warnings a Problems banner; a cancelled job ends quietly. A job the
+    /// warnings a Problems banner; a cancelled job ends quietly. An import
+    /// into a project the store made for its file ends at the store
+    /// instead ([`DocumentStore::with_document`](crate::DocumentStore::with_document)
+    /// closes the project while untouched). A job the
     /// session no longer knows is dropped (only Busy is retried), so the
     /// polling stops once none is left.
     pub fn poll_jobs(&mut self) {
@@ -449,16 +452,30 @@ impl DocumentModel {
                 }
                 Err(_) => continue,
             };
+            let opens = matches!(
+                r.kind,
+                JobKindRow::ImportMidi | JobKindRow::ImportProject | JobKindRow::ImportAaf
+            );
             match self.job_answer(&r) {
                 JobAnswer::Wait => still.push(r),
                 JobAnswer::Ok(_) => {
                     if !r.problems.is_empty() {
                         self.job_problems = r.problems.clone();
                     }
+                    // The file is in: the project stays whatever happens next.
+                    if opens {
+                        self.opened_file = false;
+                    }
                     self.refresh_after_job();
                 }
                 JobAnswer::Failed(message) => {
-                    if r.state != JobStateRow::Cancelled {
+                    if opens && self.opened_file {
+                        // The store made this project for the file: it
+                        // closes it, or shows the alert ("Import Failed").
+                        self.opened_file = false;
+                        self.opened_file_end =
+                            Some((r.state != JobStateRow::Cancelled).then_some(message));
+                    } else if r.state != JobStateRow::Cancelled {
                         self.alert = Some(AlertItem::new(failure_title(r.kind), message));
                     }
                     self.refresh_after_job();

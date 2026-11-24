@@ -321,6 +321,9 @@ struct Files {
     song_info: SongInfoRow,
     recovered: Vec<RecoveredFileRow>,
     copies: Option<CopiesSizeRow>,
+    project_id: Option<String>,
+    /// The exports whose snapshot the project keeps.
+    snapshot_ids: Vec<String>,
 }
 
 /// What the session keeps of a selection it is given (after dropping
@@ -466,6 +469,11 @@ impl FakeSession {
     /// Makes the next command return `s`.
     pub fn bump(&self, s: DocSnapshot) {
         self.st().next_snapshot = Some(s);
+    }
+
+    /// Gives the current snapshot an undo step (`None`: nothing to undo).
+    pub fn set_undo_label(&self, label: Option<&str>) {
+        self.st().snap.undo_label = label.map(str::to_owned);
     }
 
     /// Marks the current snapshot edited (or clean).
@@ -1065,6 +1073,16 @@ impl FakeSession {
 
     pub fn set_recovered_files(&self, rows: Vec<RecoveredFileRow>) {
         self.st().files.recovered = rows;
+    }
+
+    /// What `project_id` answers.
+    pub fn set_project_id(&self, id: Option<&str>) {
+        self.st().files.project_id = id.map(str::to_owned);
+    }
+
+    /// The exports `has_snapshot` answers true for.
+    pub fn set_snapshot_ids(&self, ids: &[&str]) {
+        self.st().files.snapshot_ids = ids.iter().map(|i| i.to_string()).collect();
     }
 
     pub fn set_copies_size(&self, row: CopiesSizeRow) {
@@ -2323,6 +2341,16 @@ impl DocSession for FakeSession {
             .clone()
             .unwrap_or(CopiesSizeRow { count: 0, bytes: 0 }))
     }
+    fn project_id(&self) -> Result<Option<String>, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, "project_id")?;
+        Ok(s.files.project_id.clone())
+    }
+    fn has_snapshot(&self, export_id: String) -> Result<bool, VizError> {
+        let mut s = self.st();
+        Self::read(&mut s, "has_snapshot")?;
+        Ok(s.files.snapshot_ids.contains(&export_id))
+    }
 }
 
 /// Every slot of every strip: instrument, EQ, inserts.
@@ -2625,7 +2653,7 @@ pub fn roll_fake() -> FakeSession {
     f
 }
 
-fn seq(id: u64, name: &str, top_level: bool, uses: u32) -> SeqRow {
+pub fn seq(id: u64, name: &str, top_level: bool, uses: u32) -> SeqRow {
     SeqRow {
         id,
         name: name.into(),
