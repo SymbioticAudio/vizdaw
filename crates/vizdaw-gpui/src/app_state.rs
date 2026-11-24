@@ -102,6 +102,14 @@ impl AppState {
         self.prefs = prefs;
     }
 
+    /// File › New's Create: `format` is the default from now on, and is
+    /// remembered in the preferences (a failed write keeps it for this
+    /// run).
+    pub fn remember_default_format(&mut self, format: vizdaw_ffi::ProjectFormatRow) {
+        self.store.set_default_format(format);
+        let _ = self.prefs.set_default_format(format);
+    }
+
     /// The transport bar every document window draws.
     pub fn transport_layout(&self) -> TransportLayout {
         self.prefs.transport_bar()

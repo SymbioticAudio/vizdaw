@@ -64,6 +64,25 @@ impl RunCommand {
     }
 }
 
+/// A File menu item on the window's document (Swift `AppCommands`):
+/// Import Audio…, Import MIDI File…, Open Co-Producer Copy…, Project
+/// Settings…, Bounce…, the Export items, the report and Relink Media….
+/// The document window handles it ([`crate::file_menu`]).
+#[derive(Clone, Debug, PartialEq, Eq, gpui::Action)]
+#[action(namespace = vizdaw, no_json)]
+pub struct FileCommand {
+    pub id: SharedString,
+}
+
+/// A File menu item that needs no document: Create Demo Project with
+/// Audio and Import Project's DAWproject… and AAF… (the app handles it,
+/// [`crate::file_menu`]).
+#[derive(Clone, Debug, PartialEq, Eq, gpui::Action)]
+#[action(namespace = vizdaw, no_json)]
+pub struct AppFileCommand {
+    pub id: SharedString,
+}
+
 /// A macOS menu item that cannot run now. It has no handler anywhere, so
 /// AppKit's validation (an action's availability) shows it disabled; a
 /// `RunCommand` item would show enabled whatever its command's state.
@@ -166,10 +185,10 @@ pub enum ItemSpec {
 }
 
 // Slice 1's items. Where the registry has the command its ID is used (for
-// the keys shown); the slice 1 titles stay.
+// the keys shown).
 const APP_QUIT: &str = "app.quit";
 const FILE_NEW: &str = "file.new";
-const FILE_NEW_DEMO: &str = "file.new_demo";
+const FILE_CREATE_DEMO: &str = "file.create_demo";
 const FILE_OPEN: &str = "file.open";
 const FILE_CLOSE: &str = "file.close";
 const FILE_SAVE: &str = "file.save";
@@ -181,13 +200,38 @@ const EDIT_SELECT_ALL: &str = "edit.select_all";
 const PLAY_STOP: &str = "transport.play_stop";
 const STOP_AND_RETURN: &str = "transport.stop";
 
+/// The File menu items the app handles with no document ([`AppFileCommand`]).
+pub const APP_FILE_COMMANDS: &[&str] = &[
+    "file.create_demo_audio",
+    "file.import_dawproject",
+    "file.import_aaf",
+];
+
+/// The File menu items that show their keys (Swift gives these a
+/// `keyboardShortcut`; the others show none whatever the keymap says).
+const FILE_KEYED: &[&str] = &[
+    "file.new",
+    "file.open",
+    "file.open_copy",
+    "media.import",
+    "file.close",
+    "file.save",
+    "file.save_as",
+    "media.relink",
+];
+
+/// The File menu items bound from the keymap ([`FileCommand`]); New,
+/// Open, Close, Save and Save As keep slice 1's bindings.
+const FILE_BOUND: &[&str] = &["file.open_copy", "media.import", "media.relink"];
+
 /// The action a menu item's `id` dispatches: the slice 1 action for a
-/// slice 1 item, else [`RunCommand`].
+/// slice 1 item, [`AppFileCommand`] or [`FileCommand`] for the other
+/// File items, else [`RunCommand`].
 pub fn action_for(id: &str) -> Box<dyn Action> {
     match id {
         APP_QUIT => Box::new(Quit),
         FILE_NEW => Box::new(NewDocument),
-        FILE_NEW_DEMO => Box::new(NewDemo),
+        FILE_CREATE_DEMO => Box::new(NewDemo),
         FILE_OPEN => Box::new(OpenDocument),
         FILE_CLOSE => Box::new(CloseWindow),
         FILE_SAVE => Box::new(Save),
@@ -198,6 +242,12 @@ pub fn action_for(id: &str) -> Box<dyn Action> {
         EDIT_SELECT_ALL => Box::new(text_input::SelectAll),
         PLAY_STOP => Box::new(PlayStop),
         STOP_AND_RETURN => Box::new(StopAndReturn),
+        id if APP_FILE_COMMANDS.contains(&id) => Box::new(AppFileCommand {
+            id: SharedString::new(id),
+        }),
+        id if commands::FILE_COMMANDS.contains(&id) => Box::new(FileCommand {
+            id: SharedString::new(id),
+        }),
         id => Box::new(RunCommand::new(SharedString::new(id))),
     }
 }
@@ -269,6 +319,63 @@ pub fn owner(chord: &Chord, keymap: &Keymap, mac: bool) -> Option<Chord> {
         .find(|c| c.mods & COMMAND != 0 && c.code == chord.code && ctrl_folded(c.mods) == folded)
 }
 
+/// File menu item `id`: the registry's title, its keys where Swift shows
+/// them, enabled as Swift enables it on `front`.
+fn file_item(id: &'static str, front: Option<&DocumentModel>, keymap: &Keymap) -> ItemSpec {
+    ItemSpec::Command {
+        id,
+        title: registry::find(id).map_or(id, |c| c.title).to_owned(),
+        keys: FILE_KEYED
+            .contains(&id)
+            .then(|| keys_of(id, keymap))
+            .flatten(),
+        enabled: commands::file_enabled(id, front),
+        checked: None,
+    }
+}
+
+/// The File menu (Swift `AppCommands`): the new-item group, then Close,
+/// Save and Save As, then the project's own items. Import Project opens
+/// with no document; Export only with one.
+fn file_items(front: Option<&DocumentModel>, keymap: &Keymap) -> Vec<ItemSpec> {
+    let item = |id| file_item(id, front, keymap);
+    vec![
+        item("file.new"),
+        item("file.open"),
+        item("file.open_copy"),
+        item("media.import"),
+        item("file.import_midi"),
+        ItemSpec::Submenu {
+            title: "Import Project".into(),
+            enabled: true,
+            items: vec![item("file.import_dawproject"), item("file.import_aaf")],
+        },
+        item("file.create_demo"),
+        item("file.create_demo_audio"),
+        ItemSpec::Separator,
+        item("file.close"),
+        item("file.save"),
+        item("file.save_as"),
+        ItemSpec::Separator,
+        item("file.project_settings"),
+        item("file.bounce"),
+        // The most complete export comes first (Swift, plan 6d).
+        ItemSpec::Submenu {
+            title: "Export".into(),
+            enabled: front.is_some(),
+            items: vec![
+                item("file.export_dawproject"),
+                item("file.export_aaf"),
+                item("file.export_midi"),
+                item("file.export_midi_clip"),
+                item("file.export_for_daw"),
+            ],
+        },
+        item("file.interchange_report"),
+        item("media.relink"),
+    ]
+}
+
 /// A slice 1 item: its slice 1 title, the registry's keys where it has the
 /// command, else ⌘`key` (as slice 1 binds it); always enabled (whether its
 /// action has a handler decides).
@@ -338,18 +445,7 @@ pub fn menu_model(front: Option<&DocumentModel>, keymap: &Keymap) -> MenuModel {
                 "VizDAW",
                 vec![slice1(APP_QUIT, quit_title, Some(quit_key), keymap)],
             ),
-            menu(
-                "File",
-                vec![
-                    slice1(FILE_NEW, "New", None, keymap),
-                    slice1(FILE_NEW_DEMO, "New Demo Project", None, keymap),
-                    slice1(FILE_OPEN, "Open\u{2026}", None, keymap),
-                    ItemSpec::Separator,
-                    slice1(FILE_CLOSE, "Close Window", None, keymap),
-                    slice1(FILE_SAVE, "Save", None, keymap),
-                    slice1(FILE_SAVE_AS, "Save As\u{2026}", None, keymap),
-                ],
-            ),
+            menu("File", file_items(front, keymap)),
             menu(
                 "Edit",
                 vec![
@@ -608,6 +704,22 @@ pub fn bindings(keymap: &Keymap) -> Vec<KeyBinding> {
         KeyBinding::new("space", PlayStop, Some(UNMODIFIED_KEYS)),
         KeyBinding::new("s", StopAndReturn, Some(UNMODIFIED_KEYS)),
     ];
+    // The File items Swift binds from the keymap (⇧⌘I Import Audio…).
+    for &id in FILE_BOUND {
+        for chord in keymap.chords(id) {
+            if chord.mods & (COMMAND | CONTROL) == 0 {
+                continue;
+            }
+            let Some(k) = keystroke(&chord) else { continue };
+            keys.push(KeyBinding::new(
+                interned(k),
+                FileCommand {
+                    id: SharedString::new_static(id),
+                },
+                Some(WINDOW_CONTEXT),
+            ));
+        }
+    }
     keys.extend(text_input::bindings());
     keys.extend(crate::list_editor::bindings());
     keys.extend(crate::piano_roll::bindings());

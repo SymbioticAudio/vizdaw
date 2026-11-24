@@ -222,6 +222,54 @@ fn kind_of(id: &str) -> Option<TrackKindRow> {
     }
 }
 
+/// The File menu's commands, in menu order (Swift `AppCommands`'s File
+/// groups; `media.convert` is the banner's, not a menu item).
+pub const FILE_COMMANDS: &[&str] = &[
+    "file.new",
+    "file.open",
+    "file.open_copy",
+    "media.import",
+    "file.import_midi",
+    "file.import_dawproject",
+    "file.import_aaf",
+    "file.create_demo",
+    "file.create_demo_audio",
+    "file.close",
+    "file.save",
+    "file.save_as",
+    "file.project_settings",
+    "file.bounce",
+    "file.export_dawproject",
+    "file.export_aaf",
+    "file.export_midi",
+    "file.export_midi_clip",
+    "file.export_for_daw",
+    "file.interchange_report",
+    "media.relink",
+];
+
+/// Whether File menu item `id` is enabled with `doc` the front document
+/// (Swift `AppCommands`): the new projects, the opens, Import Project and
+/// Close always; Open Co-Producer Copy… when the project is saved and
+/// has copies; Last Import or Export Report… when the UI has a report;
+/// Relink Media… when an item is relinkable and no merge is held; the
+/// rest with a document.
+pub fn file_enabled(id: &str, doc: Option<&DocumentModel>) -> bool {
+    match id {
+        "file.new"
+        | "file.open"
+        | "file.import_dawproject"
+        | "file.import_aaf"
+        | "file.create_demo"
+        | "file.create_demo_audio"
+        | "file.close" => true,
+        "file.open_copy" => doc.is_some_and(DocumentModel::has_copies),
+        "file.interchange_report" => doc.is_some_and(|d| d.last_report().is_some()),
+        "media.relink" => doc.is_some_and(|d| !d.merge_held() && !d.relinkable().is_empty()),
+        _ => FILE_COMMANDS.contains(&id) && doc.is_some(),
+    }
+}
+
 /// Whether `id` can run on `doc` now (its menu item is enabled).
 pub fn enabled(id: &str, doc: &DocumentModel) -> bool {
     // The views and panes can change at any time; the mixer's commands

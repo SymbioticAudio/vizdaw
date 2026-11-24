@@ -8,8 +8,10 @@ mod channel_strip_pane;
 pub mod control;
 pub mod controls;
 pub mod detail_pane;
+pub mod file_menu;
 pub mod file_panels;
 mod fit;
+pub mod format_panel;
 #[doc(hidden)]
 pub mod frame_stats;
 pub mod list_editor;
@@ -39,13 +41,14 @@ use vizdaw_app::{DocId, DocumentStore};
 
 pub use app_state::{AppState, WindowKind};
 pub use menus::{
-    CloseWindow, NewDemo, NewDocument, OpenDocument, PlayStop, Quit, RunCommand, Save, SaveAs,
-    StopAndReturn,
+    AppFileCommand, CloseWindow, FileCommand, NewDemo, NewDocument, OpenDocument, PlayStop, Quit,
+    RunCommand, Save, SaveAs, StopAndReturn,
 };
 pub use shell::DocumentWindow;
 
 /// Creates the app state over `store`, binds the keys, sets the menus and
-/// handles the app-level actions (New, New Demo, Open, Quit).
+/// handles the app-level actions (New, the demos, Open, Import Project,
+/// Quit).
 pub fn install(store: DocumentStore, cx: &mut App) -> gpui::Entity<AppState> {
     let state = app_state::create(store, cx);
     // No window key acts while a file panel is up.
@@ -59,9 +62,9 @@ pub fn install(store: DocumentStore, cx: &mut App) -> gpui::Entity<AppState> {
     control::files::install_spawner(cx);
     let keymap = state.read(cx).keymap.clone();
     menus::install(&keymap, cx);
-    cx.on_action(|_: &NewDocument, cx| {
-        new_document(cx);
-    });
+    // File › New asks for the format first.
+    cx.on_action(|_: &NewDocument, cx| file_menu::new_project(cx));
+    file_menu::install(cx);
     cx.on_action(|_: &NewDemo, cx| {
         new_demo(cx);
     });
@@ -70,7 +73,8 @@ pub fn install(store: DocumentStore, cx: &mut App) -> gpui::Entity<AppState> {
     state
 }
 
-/// File › New: an empty document in a new window.
+/// An empty document in a new window (the one the app opens at launch;
+/// File › New asks for its format first, [`file_menu::new_project`]).
 pub fn new_document(cx: &mut App) -> Option<WindowHandle<DocumentWindow>> {
     let app = AppState::global(cx);
     let doc = app.update(cx, |s, cx| {
@@ -80,7 +84,7 @@ pub fn new_document(cx: &mut App) -> Option<WindowHandle<DocumentWindow>> {
     show(doc, cx)
 }
 
-/// File › New Demo Project.
+/// File › Create Demo Project.
 pub fn new_demo(cx: &mut App) -> Option<WindowHandle<DocumentWindow>> {
     let app = AppState::global(cx);
     let doc = app.update(cx, |s, cx| {
@@ -144,13 +148,14 @@ pub(crate) fn show(doc: Option<DocId>, cx: &mut App) -> Option<WindowHandle<Docu
 /// File › Open…: Swift's open panel (one project, MIDI, DAWproject or
 /// AAF file; on Linux a project is chosen by its `project.json`).
 pub fn prompt_open(cx: &mut App) {
+    choose_and_open(&vizdaw_app::panels::OPEN_PROJECT, cx);
+}
+
+/// `spec`'s panel over the active window, then each chosen path opened
+/// ([`open_path`]): File › Open… and Import Project's items.
+pub(crate) fn choose_and_open(spec: &vizdaw_app::panels::PanelSpec, cx: &mut App) {
     let window = cx.active_window();
-    let chosen = file_panels::choose(
-        &vizdaw_app::panels::OPEN_PROJECT,
-        file_panels::PanelPlace::default(),
-        window,
-        cx,
-    );
+    let chosen = file_panels::choose(spec, file_panels::PanelPlace::default(), window, cx);
     cx.spawn(async move |cx| {
         let answer = chosen.await;
         cx.update(|cx| match answer {
@@ -159,17 +164,19 @@ pub fn prompt_open(cx: &mut App) {
                     open_path(&p, cx);
                 }
             }
-            Err(e) => {
-                let app = AppState::global(cx);
-                app.update(cx, |s, cx| {
-                    s.store.post_alert(AlertItem::new("Open Failed", e));
-                    cx.notify();
-                });
-            }
+            Err(e) => panel_failed(e, cx),
             Ok(None) => {}
         });
     })
     .detach();
+}
+
+/// A panel that could not show: the alert "Open Failed".
+pub(crate) fn panel_failed(message: String, cx: &mut App) {
+    AppState::global(cx).update(cx, |s, cx| {
+        s.store.post_alert(AlertItem::new("Open Failed", message));
+        cx.notify();
+    });
 }
 
 /// Quit: with unsaved changes, asks first in the front window. Deferred:

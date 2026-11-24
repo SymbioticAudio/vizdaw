@@ -91,6 +91,17 @@ pub struct DocumentModel {
     pub(crate) midi_read: Option<crate::store::MidiRead>,
     /// The Recovered Recordings offer.
     recovery: recovery::RecoveryOffer,
+    /// The report of the last import or export this document's UI ran
+    /// (Swift `InterchangeModel.report`).
+    pub(crate) last_report: Option<vizdaw_ffi::ReportRow>,
+    /// A DAWproject merge is held, waiting to be confirmed (Swift
+    /// `DocumentModel.mergeHeld`; the merge sheet sets it, slice 7c).
+    pub(crate) merge_held: bool,
+    /// The media rows, with the media version they were read at.
+    pub(crate) media_rows: Mutex<Option<(u64, Vec<vizdaw_ffi::MediaRow>)>>,
+    /// Whether the saved project has Co-Producer copies, and when that
+    /// was read.
+    pub(crate) copies_read: Mutex<Option<(std::time::Instant, bool)>>,
 }
 
 /// What the arrangement reads of one track, read when first asked for.
@@ -197,6 +208,10 @@ impl DocumentModel {
             opened_file_end: None,
             midi_read: None,
             recovery: recovery::RecoveryOffer::default(),
+            last_report: None,
+            merge_held: false,
+            media_rows: Mutex::new(None),
+            copies_read: Mutex::new(None),
         };
         model.refresh_project_info();
         model.reset_infos();

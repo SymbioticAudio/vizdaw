@@ -3,19 +3,38 @@
 //! from `idle` while any is listed, and answers each ended one through
 //! [`answer`], the one answer the UI and the control channel share.
 
+use std::time::Instant;
+
 use core_control::error::ControlError;
 use core_control::registry::ArgValue;
 use vizdaw_ffi::{
     AafExportRequestRow, AafImportRequestRow, BounceRequestRow, BounceResultRow,
     ClipExportRequestRow, DawprojectExportRequestRow, DawprojectImportRequestRow,
     DawprojectMergeRequestRow, ForDawRequestRow, ImportTargetRow, JobKindRow, JobRow, JobStateRow,
-    MidiImportRequestRow, ProjectFormatRow, SmfExportRequestRow, VizError,
+    MediaRow, MidiImportRequestRow, OfflineReasonRow, ProjectFormatRow, ReportRow,
+    SmfExportRequestRow, VizError,
 };
 
 use crate::alerts::AlertItem;
 use crate::document::DocumentModel;
 use crate::formats::{int, text};
 use crate::session::DocSession;
+
+/// The jobs whose report the UI keeps when they end well (Swift
+/// `ProjectMedia.pollJobs`: the MIDI, DAWproject, AAF and For Another DAW
+/// imports and exports).
+const REPORTING: [JobKindRow; 7] = [
+    JobKindRow::ImportMidi,
+    JobKindRow::ExportMidi,
+    JobKindRow::ExportProject,
+    JobKindRow::ExportDawproject,
+    JobKindRow::ImportProject,
+    JobKindRow::ExportAaf,
+    JobKindRow::ImportAaf,
+];
+
+/// How often [`DocumentModel::has_copies`] counts the copies again.
+pub const COPIES_READ_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// How long a job's control call waits for the job to end (the server's
 /// app timeout is for calls that are not jobs).
@@ -462,6 +481,14 @@ impl DocumentModel {
                     if !r.problems.is_empty() {
                         self.job_problems = r.problems.clone();
                     }
+                    // An import or export the UI started keeps its report
+                    // (Swift `InterchangeModel.jobEnded`; its sheet is
+                    // slice 7c's).
+                    if REPORTING.contains(&r.kind)
+                        && let Some(report) = &r.report
+                    {
+                        self.last_report = Some(report.clone());
+                    }
                     // The file is in: the project stays whatever happens next.
                     if opens {
                         self.opened_file = false;
@@ -495,6 +522,83 @@ impl DocumentModel {
         }
         self.media_version += 1;
         self.refresh_project_info();
+    }
+
+    /// The report of the last import or export this document's UI ran
+    /// (File › Last Import or Export Report… is enabled with one).
+    pub fn last_report(&self) -> Option<&ReportRow> {
+        self.last_report.as_ref()
+    }
+
+    /// A DAWproject merge is held, waiting to be confirmed: Relink waits
+    /// (Swift `mergeHeld`, plan 6e Task 11).
+    pub fn merge_held(&self) -> bool {
+        self.merge_held
+    }
+
+    /// The merge sheet holds a merge, or lets it go (slice 7c).
+    pub fn set_merge_held(&mut self, held: bool) {
+        self.merge_held = held;
+    }
+
+    /// The project's media, read again when the media version moved; a
+    /// failed read keeps the last rows and is tried again next time
+    /// (Swift `MediaModel.rows`).
+    pub fn media_rows(&self) -> Vec<MediaRow> {
+        let mut cache = self.media_rows.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((v, rows)) = cache.as_ref()
+            && *v == self.media_version
+        {
+            return rows.clone();
+        }
+        match self.session.media() {
+            Ok(rows) => {
+                *cache = Some((self.media_version, rows.clone()));
+                rows
+            }
+            Err(_) => cache.as_ref().map(|(_, r)| r.clone()).unwrap_or_default(),
+        }
+    }
+
+    /// The offline items the Relink sheet lists: missing, changed length,
+    /// changed (another format or an unreadable file get the Convert
+    /// banner instead; Swift `MediaModel.relinkable`).
+    pub fn relinkable(&self) -> Vec<MediaRow> {
+        self.media_rows()
+            .into_iter()
+            .filter(|r| {
+                matches!(
+                    r.offline,
+                    Some(
+                        OfflineReasonRow::Missing
+                            | OfflineReasonRow::Length
+                            | OfflineReasonRow::Changed
+                    )
+                )
+            })
+            .collect()
+    }
+
+    /// The project is saved and has Co-Producer copies (File › Open
+    /// Co-Producer Copy… is enabled). The copies are counted at most once
+    /// per [`COPIES_READ_EVERY`]: the menus ask on every frame.
+    pub fn has_copies(&self) -> bool {
+        if self.path().is_none() {
+            return false;
+        }
+        let mut read = self.copies_read.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        if let Some((at, has)) = *read
+            && now.duration_since(at) < COPIES_READ_EVERY
+        {
+            return has;
+        }
+        let has = self
+            .session
+            .co_producer_copies_size()
+            .is_ok_and(|c| c.count > 0);
+        *read = Some((now, has));
+        has
     }
 
     /// Bumped when the media pool or its offline state changed (views

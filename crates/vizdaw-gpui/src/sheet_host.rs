@@ -687,6 +687,146 @@ impl Render for AskDialog {
 }
 
 // ---------------------------------------------------------------------
+// A sheet in a dialog window of its own (no window is open)
+
+/// A [`Sheet`] in a small window of its own, for when no document window
+/// is open (the New Project format panel, shown before its window
+/// exists): the sheet's body and buttons, Return its default button and
+/// Esc its cancel one. A press that closes the sheet closes the window;
+/// closing the window presses the cancel button.
+pub struct SheetDialog {
+    sheet: Option<Box<dyn Sheet>>,
+    focus: FocusHandle,
+    registry: crate::registry::SharedRegistry,
+}
+
+impl SheetDialog {
+    /// Opens the dialog window showing `sheet`.
+    pub fn open(sheet: Box<dyn Sheet>, cx: &mut App) -> Option<gpui::WindowHandle<SheetDialog>> {
+        let bounds =
+            gpui::Bounds::centered(None, gpui::size(px(DIALOG_SIZE.0), px(DIALOG_SIZE.1)), cx);
+        let title = sheet.label();
+        let handle = cx
+            .open_window(
+                gpui::WindowOptions {
+                    window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
+                    titlebar: Some(gpui::TitlebarOptions {
+                        title: Some(title.into()),
+                        ..Default::default()
+                    }),
+                    is_resizable: false,
+                    ..Default::default()
+                },
+                move |window, cx| {
+                    let focus = cx.focus_handle();
+                    window.focus(&focus, cx);
+                    let dialog = cx.new(|_| SheetDialog {
+                        sheet: Some(sheet),
+                        focus,
+                        registry: Default::default(),
+                    });
+                    let weak = dialog.downgrade();
+                    window.on_window_should_close(cx, move |window, cx| {
+                        weak.update(cx, |d, cx| {
+                            if let Some(mut sheet) = d.sheet.take()
+                                && let Some(i) = cancel_index(&sheet.buttons(cx))
+                            {
+                                sheet.press(i, window, cx);
+                            }
+                        })
+                        .ok();
+                        true
+                    });
+                    dialog
+                },
+            )
+            .ok()?;
+        handle
+            .update(cx, |_, window, _| window.activate_window())
+            .ok();
+        Some(handle)
+    }
+
+    /// The label of the sheet it shows.
+    pub fn label(&self) -> Option<String> {
+        self.sheet.as_ref().map(|s| s.label())
+    }
+
+    /// What it drew last frame.
+    pub fn registry(&self) -> &crate::registry::SharedRegistry {
+        &self.registry
+    }
+
+    /// Presses the sheet's button `index` (an enabled one); the window
+    /// closes when the sheet does.
+    pub fn press(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mut sheet) = self.sheet.take() else {
+            return;
+        };
+        let enabled = sheet.buttons(cx).get(index).is_some_and(|b| b.enabled);
+        if enabled && sheet.press(index, window, cx) {
+            window.remove_window();
+        } else {
+            self.sheet = Some(sheet);
+        }
+        cx.notify();
+    }
+
+    fn key_down(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(sheet) = &self.sheet else { return };
+        let m = &e.keystroke.modifiers;
+        if m.control || m.alt || m.platform || m.function || m.shift {
+            return;
+        }
+        let buttons = sheet.buttons(cx);
+        let i = match e.keystroke.key.as_str() {
+            "enter" => default_index(&buttons),
+            "escape" => cancel_index(&buttons),
+            _ => return,
+        };
+        if let Some(i) = i {
+            self.press(i, window, cx);
+        }
+        cx.stop_propagation();
+    }
+}
+
+impl Render for SheetDialog {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut root = RegistryScope::root(&self.registry);
+        let mut card = root.container();
+        let mut body = None;
+        let mut buttons = vec![];
+        let mut label = String::new();
+        if let Some(mut sheet) = self.sheet.take() {
+            label = sheet.label();
+            buttons = sheet.buttons(cx);
+            body = Some(sheet.render(&mut card.container(), window, cx));
+            self.sheet = Some(sheet);
+        }
+        let row = buttons_row(&buttons, &mut card.container(), |i, b| {
+            b.on_click(cx.listener(move |this, _, window, cx| this.press(i, window, cx)))
+        });
+        div()
+            .relative()
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::key_down))
+            .size_full()
+            .flex()
+            .flex_col()
+            .justify_between()
+            .gap_3()
+            .p_4()
+            .bg(rgb(CARD))
+            .text_color(rgb(colors::TEXT))
+            .text_sm()
+            .children(body)
+            .child(row)
+            .child(card.this("sheet", &label, true))
+    }
+}
+
+// ---------------------------------------------------------------------
 // GPUI's prompts off macOS
 
 /// GPUI's prompts drawn as the sheet card (off macOS, where the platform

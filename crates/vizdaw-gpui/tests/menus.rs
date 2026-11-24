@@ -677,3 +677,794 @@ fn the_mixer_menu_follows_the_selection_groups_and_vcas() {
     assert_eq!(m[3], mixer(MixerOp::NewVca, "New VCA", false));
     assert_eq!(m[0], mixer(MixerOp::Group, "Group", false));
 }
+
+// ---------------------------------------------------------------------
+// The File menu (slice 7b Task 3; Swift `AppCommands`'s File groups)
+
+/// One File menu row: a command's (id, title, keys, enabled), a
+/// submenu's title and enabled with its rows, or a separator.
+#[derive(Debug, PartialEq)]
+enum Row {
+    Item(&'static str, String, Option<String>, bool),
+    Sub(String, bool, Vec<Row>),
+    Sep,
+}
+
+fn rows(items: &[ItemSpec]) -> Vec<Row> {
+    items
+        .iter()
+        .map(|i| match i {
+            ItemSpec::Command {
+                id,
+                title,
+                keys,
+                enabled,
+                checked,
+            } => {
+                assert_eq!(*checked, None, "{id} is not a toggle");
+                Row::Item(id, title.clone(), keys.clone(), *enabled)
+            }
+            ItemSpec::Submenu {
+                title,
+                enabled,
+                items,
+            } => Row::Sub(title.clone(), *enabled, rows(items)),
+            ItemSpec::Separator => Row::Sep,
+            other => panic!("unexpected {other:?}"),
+        })
+        .collect()
+}
+
+fn file_rows(front: Option<&DocumentModel>) -> Vec<Row> {
+    let m = menu_model(front, &Keymap::default());
+    rows(menu_of(&m, "File"))
+}
+
+/// The keys `id` shows: the registry's shortcut.
+fn keys(id: &str) -> Option<String> {
+    registry::find(id)
+        .and_then(|c| c.shortcut)
+        .map(|s| Chord::parse(s).unwrap().text())
+}
+
+/// The File menu Swift shows, with `on(id)` saying which items are
+/// enabled and `export` whether the Export submenu opens.
+fn swift_file_menu(on: impl Fn(&str) -> bool, export: bool) -> Vec<Row> {
+    let item = |id: &'static str, title: &str, shows_keys: bool| {
+        Row::Item(
+            id,
+            title.to_owned(),
+            if shows_keys { keys(id) } else { None },
+            on(id),
+        )
+    };
+    vec![
+        item("file.new", "New", true),
+        item("file.open", "Open\u{2026}", true),
+        item("file.open_copy", "Open Co-Producer Copy\u{2026}", true),
+        item("media.import", "Import Audio\u{2026}", true),
+        item("file.import_midi", "Import MIDI File\u{2026}", false),
+        Row::Sub(
+            "Import Project".into(),
+            true,
+            vec![
+                item("file.import_dawproject", "DAWproject\u{2026}", false),
+                item("file.import_aaf", "AAF\u{2026}", false),
+            ],
+        ),
+        item("file.create_demo", "Create Demo Project", false),
+        item(
+            "file.create_demo_audio",
+            "Create Demo Project with Audio",
+            false,
+        ),
+        Row::Sep,
+        item("file.close", "Close", true),
+        item("file.save", "Save", true),
+        item("file.save_as", "Save As\u{2026}", true),
+        Row::Sep,
+        item("file.project_settings", "Project Settings\u{2026}", false),
+        item("file.bounce", "Bounce\u{2026}", false),
+        Row::Sub(
+            "Export".into(),
+            export,
+            vec![
+                item("file.export_dawproject", "DAWproject\u{2026}", false),
+                item("file.export_aaf", "AAF\u{2026}", false),
+                item("file.export_midi", "MIDI File\u{2026}", false),
+                item("file.export_midi_clip", "MIDI Clip File\u{2026}", false),
+                item("file.export_for_daw", "For Another DAW\u{2026}", false),
+            ],
+        ),
+        item(
+            "file.interchange_report",
+            "Last Import or Export Report\u{2026}",
+            false,
+        ),
+        item("media.relink", "Relink Media\u{2026}", true),
+    ]
+}
+
+/// Always on, with or without a document.
+const ALWAYS: [&str; 7] = [
+    "file.new",
+    "file.open",
+    "file.import_dawproject",
+    "file.import_aaf",
+    "file.create_demo",
+    "file.create_demo_audio",
+    "file.close",
+];
+
+/// On with a document whatever its state.
+const WITH_DOC: [&str; 11] = [
+    "media.import",
+    "file.import_midi",
+    "file.save",
+    "file.save_as",
+    "file.project_settings",
+    "file.bounce",
+    "file.export_dawproject",
+    "file.export_aaf",
+    "file.export_midi",
+    "file.export_midi_clip",
+    "file.export_for_daw",
+];
+
+fn media(id: u64, offline: Option<vizdaw_ffi::OfflineReasonRow>) -> vizdaw_ffi::MediaRow {
+    vizdaw_ffi::MediaRow {
+        id,
+        name: format!("m{id}.wav"),
+        path: format!("Audio/m{id}.caf"),
+        channels: 2,
+        frames: 48_000,
+        sample_rate: 48_000,
+        origin: vizdaw_ffi::MediaOriginRow::Imported,
+        original_name: None,
+        offline,
+        uses: 1,
+        used_percent: 100.0,
+        peak: None,
+    }
+}
+
+#[test]
+fn the_file_menu_has_swifts_items_titles_keys_and_submenus_with_no_document() {
+    assert_eq!(
+        file_rows(None),
+        swift_file_menu(|id| ALWAYS.contains(&id), false)
+    );
+    // Slice 1's own titles and ID are gone.
+    let m = menu_model(None, &Keymap::default());
+    for r in rows(menu_of(&m, "File")) {
+        if let Row::Item(id, title, ..) = r {
+            assert_ne!(id, "file.new_demo");
+            assert!(title != "New Demo Project" && title != "Close Window");
+            assert!(registry::find(id).is_some(), "{id} is a registry ID");
+        }
+    }
+    // Swift's keys: ⌘N, ⌘O, ⇧⌘I, ⌘W, ⌘S, ⇧⌘S.
+    assert_eq!(keys("media.import").as_deref(), Some("⇧⌘I"));
+    assert_eq!(keys("file.close").as_deref(), Some("⌘W"));
+}
+
+#[test]
+fn the_file_menu_with_a_document_and_each_state_enables_as_swift_does() {
+    use vizdaw_ffi::OfflineReasonRow as Off;
+    use vizdaw_ffi::session::CopiesSizeRow;
+    let base = |id: &str| ALWAYS.contains(&id) || WITH_DOC.contains(&id);
+    // An untitled document.
+    let d = demo_doc();
+    assert_eq!(file_rows(Some(&d)), swift_file_menu(base, true));
+
+    // Copies, untitled: Open Co-Producer Copy… stays off; saved: on.
+    let copies = CopiesSizeRow {
+        count: 2,
+        bytes: 10,
+    };
+    let f = Arc::new(demo_fake());
+    f.set_copies_size(copies.clone());
+    assert_eq!(file_rows(Some(&doc_of(&f))), swift_file_menu(base, true));
+    let f = Arc::new(demo_fake());
+    f.set_path(Some("/m/Song.vizdaw"));
+    f.set_copies_size(copies);
+    assert_eq!(
+        file_rows(Some(&doc_of(&f))),
+        swift_file_menu(|id| base(id) || id == "file.open_copy", true)
+    );
+    // Saved, no copies.
+    let f = Arc::new(demo_fake());
+    f.set_path(Some("/m/Song.vizdaw"));
+    assert_eq!(file_rows(Some(&doc_of(&f))), swift_file_menu(base, true));
+
+    // A report the UI kept.
+    let f = Arc::new(demo_fake());
+    let mut d = doc_of(&f);
+    f.script_job(
+        vizdaw_app::testing::JobScript::done().report(vizdaw_ffi::ReportRow {
+            summary: "Exported".into(),
+            items: vec![],
+        }),
+    );
+    let args = vec![(
+        "path".to_owned(),
+        core_control::registry::ArgValue::Text("/m/a.mid".into()),
+    )];
+    let Ok(vizdaw_app::interchange_commands::InterchangeRequest::Job(job)) =
+        vizdaw_app::interchange_commands::request("file.export_midi", &args, &d)
+    else {
+        panic!("an export job")
+    };
+    d.start_job(job.kind(), job.refusal_title(), |s| job.start(s));
+    d.poll_jobs();
+    assert_eq!(
+        file_rows(Some(&d)),
+        swift_file_menu(|id| base(id) || id == "file.interchange_report", true)
+    );
+
+    // Relinkable media; another format is not; a held merge holds it.
+    let f = Arc::new(demo_fake());
+    f.set_media(vec![media(1, Some(Off::Format))]);
+    assert_eq!(file_rows(Some(&doc_of(&f))), swift_file_menu(base, true));
+    let f = Arc::new(demo_fake());
+    f.set_media(vec![media(1, None), media(2, Some(Off::Missing))]);
+    let mut d = doc_of(&f);
+    assert_eq!(
+        file_rows(Some(&d)),
+        swift_file_menu(|id| base(id) || id == "media.relink", true)
+    );
+    d.set_merge_held(true);
+    assert_eq!(file_rows(Some(&d)), swift_file_menu(base, true));
+}
+
+fn doc_of(f: &Arc<vizdaw_app::testing::FakeSession>) -> DocumentModel {
+    DocumentModel::new(f.clone()).unwrap()
+}
+
+#[test]
+fn file_items_dispatch_their_actions() {
+    use vizdaw_gpui::menus::action_for;
+    let is = |id: &str, a: &dyn gpui::Action| action_for(id).partial_eq(a);
+    assert!(is("file.new", &vizdaw_gpui::NewDocument));
+    assert!(is("file.open", &vizdaw_gpui::OpenDocument));
+    assert!(is("file.create_demo", &vizdaw_gpui::NewDemo));
+    assert!(is("file.close", &vizdaw_gpui::CloseWindow));
+    assert!(is("file.save", &vizdaw_gpui::Save));
+    assert!(is("file.save_as", &vizdaw_gpui::SaveAs));
+    for id in menus::APP_FILE_COMMANDS {
+        assert!(
+            is(id, &vizdaw_gpui::AppFileCommand { id: (*id).into() }),
+            "{id}"
+        );
+    }
+    for id in [
+        "file.open_copy",
+        "media.import",
+        "file.import_midi",
+        "file.project_settings",
+        "file.bounce",
+        "file.export_dawproject",
+        "file.export_aaf",
+        "file.export_midi",
+        "file.export_midi_clip",
+        "file.export_for_daw",
+        "file.interchange_report",
+        "media.relink",
+    ] {
+        assert!(is(id, &vizdaw_gpui::FileCommand { id: id.into() }), "{id}");
+    }
+}
+
+#[test]
+fn import_audio_is_bound_to_its_registry_key() {
+    let keymap = Keymap::default();
+    let chord = Chord::parse("⇧⌘I").unwrap();
+    let os = if cfg!(target_os = "macos") {
+        gpui::OperatingSystem::Mac
+    } else {
+        gpui::OperatingSystem::Linux
+    };
+    let want = gpui::Keystroke::parse_with_os(&keystroke(&chord).unwrap(), os).unwrap();
+    let context = KeyBindingContextPredicate::parse(menus::WINDOW_CONTEXT).unwrap();
+    let bound: Vec<_> = menus::bindings(&keymap)
+        .into_iter()
+        .filter(|b| {
+            b.action().partial_eq(&vizdaw_gpui::FileCommand {
+                id: "media.import".into(),
+            })
+        })
+        .collect();
+    assert_eq!(bound.len(), 1);
+    assert_eq!(bound[0].keystrokes()[0].inner(), &want);
+    assert_eq!(bound[0].predicate().as_deref(), Some(&context));
+}
+
+/// What the File items do: New asks for the format first (a sheet on the
+/// front window, a dialog window with none), the imports show their
+/// panel and run, the demos and Import Project need no document, and the
+/// items whose sheets come later do nothing.
+mod file_flows {
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use core_control::ControlError;
+    use core_control::server::Call;
+    use futures::channel::oneshot;
+    use gpui::{AnyWindowHandle, App, Modifiers, TestAppContext, VisualTestContext, WindowHandle};
+    use serde_json::Value;
+    use vizdaw_app::DocumentStore;
+    use vizdaw_app::panels::PanelSpec;
+    use vizdaw_app::testing::{FakeCore, FakeSession, JobRequest, demo_fake};
+    use vizdaw_ffi::{BitDepthRow, JobKindRow, ProjectFormatRow};
+    use vizdaw_gpui::control::{self, CallSource};
+    use vizdaw_gpui::file_panels::{Chosen, PanelBackend, PanelPlace, set_backend};
+    use vizdaw_gpui::sheet_host::SheetDialog;
+    use vizdaw_gpui::{AppFileCommand, AppState, DocumentWindow, FileCommand, NewDocument};
+
+    /// Panels a test answers itself.
+    #[derive(Default)]
+    struct FakePanels {
+        shown: RefCell<Vec<(&'static str, oneshot::Sender<Chosen>)>>,
+    }
+
+    impl PanelBackend for FakePanels {
+        fn show(
+            &self,
+            spec: &PanelSpec,
+            _: &PanelPlace,
+            _: Option<AnyWindowHandle>,
+            done: oneshot::Sender<Chosen>,
+            _: &mut App,
+        ) {
+            self.shown.borrow_mut().push((spec.row, done));
+        }
+    }
+
+    impl FakePanels {
+        fn rows(&self) -> Vec<&'static str> {
+            self.shown.borrow().iter().map(|(r, _)| *r).collect()
+        }
+
+        fn answer(&self, paths: &[&str]) {
+            let (_, done) = self.shown.borrow_mut().remove(0);
+            done.send(Ok(Some(paths.iter().map(PathBuf::from).collect())))
+                .unwrap();
+        }
+    }
+
+    struct Setup {
+        core: Arc<FakeCore>,
+        fake: Arc<FakeSession>,
+        window: WindowHandle<DocumentWindow>,
+        panels: Rc<FakePanels>,
+        cx: VisualTestContext,
+    }
+
+    fn setup(cx: &mut TestAppContext) -> Setup {
+        let core = Arc::new(FakeCore::new());
+        let fake = Arc::new(demo_fake());
+        core.hand_out("new_demo", fake.clone());
+        let store = DocumentStore::with_core(core.clone());
+        let panels = Rc::new(FakePanels::default());
+        let backend: Rc<dyn PanelBackend> = panels.clone();
+        let window = cx.update(|cx| {
+            vizdaw_gpui::install(store, cx);
+            set_backend(backend, cx);
+            vizdaw_gpui::new_demo(cx).expect("the demo's window")
+        });
+        let vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.run_until_parked();
+        Setup {
+            core,
+            fake,
+            window,
+            panels,
+            cx: vcx,
+        }
+    }
+
+    fn sheet_label(s: &mut Setup) -> Option<String> {
+        s.window.read_with(&s.cx, |v, _| v.sheet_label()).unwrap()
+    }
+
+    fn node(s: &mut Setup, role: &str, label: &str) -> Option<Value> {
+        let tree = s
+            .window
+            .read_with(&s.cx, |v, _| v.registry().borrow().tree())
+            .unwrap();
+        tree["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["role"] == role && n["label"] == label)
+            .cloned()
+    }
+
+    fn click(s: &mut Setup, role: &str, label: &str) {
+        let id = node(s, role, label).unwrap_or_else(|| panic!("no {role} {label}"))["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let at = s
+            .window
+            .read_with(&s.cx, |v, _| {
+                v.registry().borrow().resolve(&id).unwrap().bounds.center()
+            })
+            .unwrap();
+        s.cx.simulate_click(at, Modifiers::none());
+        s.cx.run_until_parked();
+    }
+
+    fn made(s: &Setup) -> Vec<String> {
+        s.core.made().into_iter().map(|(c, _)| c).collect()
+    }
+
+    fn new_project_calls(s: &Setup) -> Vec<String> {
+        s.core
+            .calls()
+            .into_iter()
+            .filter(|c| c.starts_with("new_project("))
+            .collect()
+    }
+
+    fn default_format(s: &mut Setup) -> (ProjectFormatRow, ProjectFormatRow) {
+        s.cx.update(|_, cx| {
+            let a = AppState::global(cx);
+            let a = a.read(cx);
+            (a.store.default_format(), a.prefs.default_format())
+        })
+    }
+
+    fn windows(s: &mut Setup) -> usize {
+        s.cx.update(|_, cx| AppState::global(cx).read(cx).windows().len())
+    }
+
+    #[gpui::test]
+    fn new_asks_for_the_format_on_the_front_window_and_remembers_it(cx: &mut TestAppContext) {
+        let mut s = setup(cx);
+        s.cx.dispatch_action(NewDocument);
+        s.cx.run_until_parked();
+        assert_eq!(sheet_label(&mut s).as_deref(), Some("New Project"));
+        assert!(new_project_calls(&s).is_empty(), "asked before made");
+        assert!(node(&mut s, "text", "New Project").is_some());
+        assert!(
+            node(
+                &mut s,
+                "text",
+                "Every audio file of the project is stored in this format."
+            )
+            .is_some()
+        );
+        // It starts at the default format, 48 kHz / 24-bit.
+        let rate = node(&mut s, "menu", "Sample rate").unwrap();
+        assert_eq!(rate["value"], "48 kHz");
+        assert_eq!(
+            node(&mut s, "menu", "Bit depth").unwrap()["value"],
+            "24-bit"
+        );
+        assert_eq!(node(&mut s, "button", "Create").unwrap()["enabled"], true);
+        assert!(node(&mut s, "button", "Cancel").is_some());
+        // Its items, the chosen one selected.
+        click(&mut s, "menu", "Sample rate");
+        for r in vizdaw_ffi::project_rates() {
+            let title = vizdaw_app::formats::rate_title(r);
+            let n = node(&mut s, "menuitem", &title).unwrap_or_else(|| panic!("{title}"));
+            assert_eq!(n["selected"] == true, r == 48_000, "{title}");
+        }
+        click(&mut s, "menuitem", "44.1 kHz");
+        assert!(node(&mut s, "menuitem", "88.2 kHz").is_none(), "it closes");
+        assert_eq!(
+            node(&mut s, "menu", "Sample rate").unwrap()["value"],
+            "44.1 kHz"
+        );
+        click(&mut s, "menu", "Bit depth");
+        for t in ["16-bit", "24-bit", "32-bit float"] {
+            assert!(node(&mut s, "menuitem", t).is_some(), "{t}");
+        }
+        click(&mut s, "menuitem", "32-bit float");
+        let before = windows(&mut s);
+        // Return is Create.
+        s.cx.simulate_keystrokes("enter");
+        s.cx.run_until_parked();
+        assert_eq!(sheet_label(&mut s), None);
+        assert_eq!(new_project_calls(&s), ["new_project(44100,Float32)"]);
+        assert_eq!(windows(&mut s), before + 1, "the project's window");
+        let chosen = ProjectFormatRow {
+            sample_rate: 44_100,
+            depth: BitDepthRow::Float32,
+        };
+        assert_eq!(default_format(&mut s), (chosen, chosen));
+        // The next New starts at it.
+        s.cx.dispatch_action(NewDocument);
+        s.cx.run_until_parked();
+        let front = s.cx.update(|_, cx| cx.active_window()).unwrap();
+        let front = front.downcast::<DocumentWindow>().unwrap();
+        let labels = front
+            .read_with(&s.cx, |v, _| {
+                let r = v.registry().borrow();
+                let rate = r
+                    .elements()
+                    .iter()
+                    .find(|e| e.role == "menu" && e.label == "Sample rate")
+                    .and_then(|e| e.value.clone());
+                (v.sheet_label(), rate)
+            })
+            .unwrap();
+        assert_eq!(
+            labels,
+            (Some("New Project".into()), Some("44.1 kHz".into()))
+        );
+    }
+
+    #[gpui::test]
+    fn cancel_makes_nothing_and_a_second_new_waits_for_the_first(cx: &mut TestAppContext) {
+        let mut s = setup(cx);
+        s.cx.dispatch_action(NewDocument);
+        s.cx.run_until_parked();
+        // The sheet keeps the window's focus; ⌘N reaches the app anyway.
+        s.cx.simulate_keystrokes("secondary-n");
+        s.cx.run_until_parked();
+        assert!(dialogs(&mut s.cx).is_empty(), "no second panel");
+        assert_eq!(windows(&mut s), 1);
+        s.cx.simulate_keystrokes("escape");
+        s.cx.run_until_parked();
+        assert_eq!(sheet_label(&mut s), None);
+        assert!(new_project_calls(&s).is_empty());
+        assert_eq!(windows(&mut s), 1);
+        // Answered: New asks again.
+        s.cx.dispatch_action(NewDocument);
+        s.cx.run_until_parked();
+        assert_eq!(sheet_label(&mut s).as_deref(), Some("New Project"));
+        click(&mut s, "button", "Create");
+        assert_eq!(new_project_calls(&s), ["new_project(48000,Int24)"]);
+    }
+
+    fn dialogs(cx: &mut TestAppContext) -> Vec<WindowHandle<SheetDialog>> {
+        cx.update(|cx| {
+            cx.windows()
+                .into_iter()
+                .filter_map(|w| w.downcast::<SheetDialog>())
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    fn with_no_window_open_the_format_panel_is_a_dialog_window(cx: &mut TestAppContext) {
+        let s = setup(cx);
+        let core = s.core.clone();
+        let window = s.window;
+        drop(s);
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|cx| AppState::global(cx).read(cx).windows().len()),
+            0
+        );
+        // What File › New's global handler runs with no window open.
+        cx.update(vizdaw_gpui::file_menu::new_project);
+        cx.run_until_parked();
+        let shown = dialogs(cx);
+        assert_eq!(shown.len(), 1, "the dialog window");
+        let label = shown[0].read_with(cx, |d, _| d.label()).unwrap();
+        assert_eq!(label.as_deref(), Some("New Project"));
+        let has_rate = shown[0]
+            .read_with(cx, |d, _| {
+                d.registry()
+                    .borrow()
+                    .elements()
+                    .iter()
+                    .any(|e| e.role == "menu" && e.label == "Sample rate")
+            })
+            .unwrap();
+        assert!(has_rate);
+        assert!(core.calls().iter().all(|c| !c.starts_with("new_project")));
+        let mut dcx = VisualTestContext::from_window(shown[0].into(), cx);
+        dcx.simulate_keystrokes("enter");
+        dcx.run_until_parked();
+        assert!(dialogs(cx).is_empty(), "it closed");
+        assert!(
+            core.calls()
+                .contains(&"new_project(48000,Int24)".to_owned())
+        );
+        assert_eq!(
+            cx.update(|cx| AppState::global(cx).read(cx).windows().len()),
+            1
+        );
+    }
+
+    #[gpui::test]
+    fn closing_the_dialog_window_cancels(cx: &mut TestAppContext) {
+        let s = setup(cx);
+        let core = s.core.clone();
+        let window = s.window;
+        drop(s);
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+        // What File › New's global handler runs with no window open.
+        cx.update(vizdaw_gpui::file_menu::new_project);
+        cx.run_until_parked();
+        let shown = dialogs(cx);
+        let mut dcx = VisualTestContext::from_window(shown[0].into(), cx);
+        // The window's close button: Cancel.
+        assert!(dcx.simulate_close());
+        dcx.run_until_parked();
+        assert!(core.calls().iter().all(|c| !c.starts_with("new_project")));
+        assert!(!cx.update(|cx| vizdaw_gpui::file_menu::format_panel_up(cx)));
+        shown[0]
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+        // Answered: New asks again; Esc is Cancel too.
+        cx.update(vizdaw_gpui::file_menu::new_project);
+        cx.run_until_parked();
+        let shown = dialogs(cx);
+        assert_eq!(shown.len(), 1);
+        let mut dcx = VisualTestContext::from_window(shown[0].into(), cx);
+        dcx.simulate_keystrokes("escape");
+        dcx.run_until_parked();
+        assert!(dialogs(cx).is_empty());
+        assert!(core.calls().iter().all(|c| !c.starts_with("new_project")));
+        assert!(!cx.update(|cx| vizdaw_gpui::file_menu::format_panel_up(cx)));
+    }
+
+    #[gpui::test]
+    fn a_front_window_showing_a_sheet_gets_the_dialog_window(cx: &mut TestAppContext) {
+        let mut s = setup(cx);
+        s.cx.dispatch_action(NewDocument);
+        s.cx.run_until_parked();
+        click(&mut s, "button", "Cancel");
+        // Another sheet is up on the front window.
+        s.window
+            .update(&mut s.cx, |v, window, cx| {
+                let ask = vizdaw_gpui::sheet_host::Ask::alert(gpui::PromptLevel::Info, "Busy", "");
+                let (sheet, _) = vizdaw_gpui::sheet_host::AskSheet::new(ask);
+                assert!(v.show_sheet(Box::new(sheet), window, cx).is_ok());
+            })
+            .unwrap();
+        s.cx.dispatch_action(NewDocument);
+        s.cx.run_until_parked();
+        assert_eq!(sheet_label(&mut s).as_deref(), Some("Busy"));
+        let shown = dialogs(&mut s.cx);
+        assert_eq!(shown.len(), 1);
+    }
+
+    struct NoCalls;
+
+    impl CallSource for NoCalls {
+        fn next_call(&self) -> Option<Call> {
+            None
+        }
+        fn reply(&self, _: u64, _: Result<Value, ControlError>) -> bool {
+            true
+        }
+    }
+
+    #[gpui::test]
+    fn under_the_control_channel_new_asks_nothing_and_uses_the_default(cx: &mut TestAppContext) {
+        let mut s = setup(cx);
+        s.cx.update(|_, cx| control::pump(&NoCalls, cx));
+        s.cx.dispatch_action(NewDocument);
+        s.cx.run_until_parked();
+        assert_eq!(sheet_label(&mut s), None);
+        assert!(dialogs(&mut s.cx).is_empty());
+        assert_eq!(new_project_calls(&s), ["new_project(48000,Int24)"]);
+    }
+
+    #[gpui::test]
+    fn import_audio_shows_its_panel_and_imports_the_chosen_files(cx: &mut TestAppContext) {
+        let mut s = setup(cx);
+        s.cx.simulate_keystrokes("secondary-shift-i");
+        s.cx.run_until_parked();
+        assert_eq!(s.panels.rows(), ["7"]);
+        s.panels.answer(&["/m/a.wav", "/m/b.wav"]);
+        s.cx.run_until_parked();
+        let started = s.fake.jobs_started();
+        assert_eq!(started.len(), 1);
+        assert_eq!(started[0].kind, JobKindRow::Import);
+        let JobRequest::Import { paths, .. } = &started[0].request else {
+            panic!("an import: {:?}", started[0].request)
+        };
+        assert_eq!(paths, &["/m/a.wav".to_owned(), "/m/b.wav".to_owned()]);
+    }
+
+    #[gpui::test]
+    fn import_midi_shows_its_panel_and_reads_the_file(cx: &mut TestAppContext) {
+        let mut s = setup(cx);
+        s.cx.dispatch_action(FileCommand {
+            id: "file.import_midi".into(),
+        });
+        s.cx.run_until_parked();
+        assert_eq!(s.panels.rows(), ["3"]);
+        s.panels.answer(&["/m/Song.mid"]);
+        s.cx.run_until_parked();
+        // Swift `beginImport`: the file is read (here it cannot be: the
+        // alert "Import Failed"); the sheet is slice 7c's.
+        assert_eq!(s.fake.reads("midi_file_info"), 1);
+        let prompt = s.cx.pending_prompt().map(|p| p.0);
+        assert_eq!(prompt.as_deref(), Some("Import Failed"));
+    }
+
+    #[gpui::test]
+    fn import_project_opens_the_chosen_file_as_a_new_project(cx: &mut TestAppContext) {
+        let mut s = setup(cx);
+        for (id, row, path, read) in [
+            (
+                "file.import_dawproject",
+                "11",
+                "/m/Song.dawproject",
+                "dawproject_info(/m/Song.dawproject)",
+            ),
+            (
+                "file.import_aaf",
+                "14",
+                "/m/Song.aaf",
+                "aaf_info(/m/Song.aaf)",
+            ),
+        ] {
+            s.cx.dispatch_action(AppFileCommand { id: id.into() });
+            s.cx.run_until_parked();
+            assert_eq!(s.panels.rows(), [row], "{id}");
+            s.panels.answer(&[path]);
+            s.cx.run_until_parked();
+            assert!(s.core.calls().contains(&read.to_owned()), "{id}");
+            // The file cannot be read here: its alert.
+            if s.cx.has_pending_prompt() {
+                s.cx.simulate_prompt_answer("OK");
+                s.cx.run_until_parked();
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn the_demos_need_no_document(cx: &mut TestAppContext) {
+        let mut s = setup(cx);
+        s.cx.dispatch_action(vizdaw_gpui::NewDemo);
+        s.cx.run_until_parked();
+        s.cx.dispatch_action(AppFileCommand {
+            id: "file.create_demo_audio".into(),
+        });
+        s.cx.run_until_parked();
+        assert_eq!(made(&s), ["new_demo", "new_demo", "new_demo_audio"]);
+        assert_eq!(windows(&mut s), 3);
+    }
+
+    #[gpui::test]
+    fn the_items_whose_sheets_come_later_do_nothing_yet(cx: &mut TestAppContext) {
+        let mut s = setup(cx);
+        for id in vizdaw_gpui::file_menu::LATER {
+            s.cx.dispatch_action(FileCommand { id: (*id).into() });
+            s.cx.run_until_parked();
+        }
+        assert!(s.panels.rows().is_empty());
+        assert_eq!(sheet_label(&mut s), None);
+        assert!(!s.cx.has_pending_prompt());
+        assert!(s.fake.jobs_started().is_empty());
+    }
+
+    #[gpui::test]
+    fn the_in_window_menu_bar_opens_import_projects_items(cx: &mut TestAppContext) {
+        let mut s = setup(cx);
+        s.window
+            .update(&mut s.cx, |v, _, cx| v.set_menu_bar_shown(true, cx))
+            .unwrap();
+        s.cx.run_until_parked();
+        click(&mut s, "menu", "File");
+        assert_eq!(
+            node(&mut s, "menuitem", "Create Demo Project").unwrap()["enabled"],
+            true
+        );
+        assert_eq!(
+            node(&mut s, "menuitem", "Relink Media\u{2026}").unwrap()["enabled"],
+            false
+        );
+        click(&mut s, "menuitem", "Import Project");
+        click(&mut s, "menuitem", "DAWproject\u{2026}");
+        assert_eq!(s.panels.rows(), ["11"]);
+    }
+}

@@ -404,6 +404,15 @@ fn target(doc: Option<DocId>, cx: &App) -> Target {
     }
 }
 
+/// The front window a question of the app's shows on (the key window,
+/// else the front document's, else any); `None` with no window open.
+pub(crate) fn front_window(cx: &App) -> Option<AnyWindowHandle> {
+    match target(None, cx) {
+        Target::Window(w) => Some(w),
+        Target::Dialog => None,
+    }
+}
+
 /// Whether `target` already shows one of ours (with no window open: a
 /// dialog window is up).
 fn busy(target: Target, cx: &mut App) -> bool {

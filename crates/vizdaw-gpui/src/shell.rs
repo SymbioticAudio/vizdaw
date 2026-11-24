@@ -49,7 +49,8 @@ use crate::frame_stats::{self, FrameStats};
 use crate::list_editor::{ListEditor, ListState};
 use crate::menu_bar::MenuBar;
 use crate::menus::{
-    self, CloseWindow, MixerMenuItem, PlayStop, RunCommand, Save, SaveAs, StopAndReturn,
+    self, CloseWindow, FileCommand, MixerMenuItem, PlayStop, RunCommand, Save, SaveAs,
+    StopAndReturn,
 };
 use crate::mixer_view::{self, MixerView};
 use crate::panes::{self, HostState, PaneDrag};
@@ -1496,6 +1497,9 @@ impl DocumentWindow {
             .on_action(cx.listener(Self::save))
             .on_action(cx.listener(Self::save_as))
             .on_action(cx.listener(Self::close_window))
+            .on_action(cx.listener(|this, a: &FileCommand, window, cx| {
+                crate::file_menu::run_in_window(a, this.doc, window, cx);
+            }))
             .size_full()
             .flex()
             .flex_col()
