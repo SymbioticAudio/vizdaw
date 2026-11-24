@@ -523,12 +523,14 @@ impl DocumentModel {
                     // The export sheets close once their job ended.
                     self.for_daw_job_done(&r);
                     self.dawproject_job_done(&r);
+                    self.aaf_export_job_done(&r);
                     self.refresh_after_job();
                 }
                 JobAnswer::Failed(message) => {
                     if r.state == JobStateRow::Cancelled {
                         self.for_daw_job_done(&r);
                         self.dawproject_job_done(&r);
+                        self.aaf_export_job_done(&r);
                     }
                     if opens && self.opened_file {
                         // The store made this project for the file: it
@@ -542,6 +544,7 @@ impl DocumentModel {
                         // So do the other export sheets' failures.
                         && !self.for_daw_job_failed(&r, &message)
                         && !self.dawproject_job_failed(&r, &message)
+                        && !self.aaf_export_job_failed(&r, &message)
                     {
                         self.alert = Some(AlertItem::new(failure_title(r.kind), message));
                     }
@@ -556,6 +559,7 @@ impl DocumentModel {
         if ended.iter().any(|k| crate::for_daw::blocks(*k, true)) {
             self.for_daw_job_ended();
             self.dawproject_job_ended();
+            self.aaf_export_job_ended();
         }
         // The Bounce sheet closes once its job ended.
         self.bounce_poll();

@@ -101,6 +101,10 @@ pub struct DocumentModel {
     pub(crate) for_daw: crate::for_daw::ForDaw,
     /// The Export DAWproject sheet's state (slice 7c Task 4).
     pub(crate) dawproject: crate::dawproject::Dawproject,
+    /// The Export AAF sheet's state (slice 7c Task 5).
+    pub(crate) aaf_export: crate::aaf::AafExport,
+    /// The Import AAF sheet, once its read landed (slice 7c Task 5).
+    pub(crate) aaf_import: Option<crate::aaf::AafImport>,
     /// The report of the last import or export this document's UI ran
     /// (Swift `InterchangeModel.report`).
     pub(crate) last_report: Option<vizdaw_ffi::ReportRow>,
@@ -229,6 +233,8 @@ impl DocumentModel {
             bounce: crate::bounce::Bounce::default(),
             for_daw: crate::for_daw::ForDaw::default(),
             dawproject: crate::dawproject::Dawproject::default(),
+            aaf_export: crate::aaf::AafExport::default(),
+            aaf_import: None,
             last_report: None,
             report_shown: false,
             report_written: vec![],

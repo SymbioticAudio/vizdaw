@@ -318,6 +318,8 @@ struct Files {
     /// Every `export_for_daw_check(req)` and `export_dawproject_check(req)`, in order.
     for_daw_checks: Vec<ForDawRequestRow>,
     dawproject_checks: Vec<DawprojectExportRequestRow>,
+    /// Every `export_aaf_check(req)`, in order.
+    aaf_checks: Vec<AafExportRequestRow>,
     midi_info: HashMap<String, MidiFileInfoRow>,
     clip_names: Option<ClipNamesRow>,
     /// Every MIDI export dry run and clip names question, in order.
@@ -1075,6 +1077,11 @@ impl FakeSession {
     /// Every `export_dawproject_check(req)`, in order.
     pub fn dawproject_checks(&self) -> Vec<DawprojectExportRequestRow> {
         self.st().files.dawproject_checks.clone()
+    }
+
+    /// Every `export_aaf_check(req)`, in order.
+    pub fn aaf_checks(&self) -> Vec<AafExportRequestRow> {
+        self.st().files.aaf_checks.clone()
     }
 
     /// Every `export_midi_check(req)`, in order.
@@ -2333,7 +2340,8 @@ impl DocSession for FakeSession {
             JobRequest::ExportAaf(req),
         )
     }
-    fn export_aaf_check(&self, _req: AafExportRequestRow) -> Result<ReportRow, VizError> {
+    fn export_aaf_check(&self, req: AafExportRequestRow) -> Result<ReportRow, VizError> {
+        self.st().files.aaf_checks.push(req);
         self.check_report("export_aaf_check")
     }
     fn import_aaf(&self, req: AafImportRequestRow) -> Result<u64, VizError> {

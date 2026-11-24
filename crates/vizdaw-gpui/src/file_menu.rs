@@ -8,8 +8,12 @@
 //!   the control channel no panel shows: the project is made in the
 //!   default format.
 //! - Create Demo Project with Audio: the demo with audio.
-//! - Import Project › DAWproject… and AAF…: their panel, then the store's
-//!   open (a DAWproject or AAF file opens as a new project).
+//! - Import Project › DAWproject…: its panel, then the store's open (a
+//!   DAWproject file opens as a new project).
+//! - Import Project › AAF…: its panel; with a document's window in front
+//!   the file is read off the UI thread and the Import AAF sheet asks
+//!   where it goes ([`crate::sheets::aaf`]), else the store's open (a new
+//!   project, Swift's defaults).
 //! - Import Audio…: its panel (several files), then the import job on the
 //!   document at Swift's import target (one file: the selected track of
 //!   the shown sequence, else new tracks; at the transport's tick).
@@ -22,15 +26,16 @@
 //! - Bounce…: the Bounce sheet ([`crate::sheets::bounce`]).
 //! - Export › MIDI File… and MIDI Clip File…: their sheet
 //!   ([`crate::sheets::export_midi`]).
-//! - Export › For Another DAW… and DAWproject…: their sheet
-//!   ([`crate::sheets::for_daw`], [`crate::sheets::dawproject`]).
+//! - Export › For Another DAW…, DAWproject… and AAF…: their sheet
+//!   ([`crate::sheets::for_daw`], [`crate::sheets::dawproject`],
+//!   [`crate::sheets::aaf`]).
 //! - Last Import or Export Report…: the session's last report in the
 //!   report sheet ([`crate::sheets::report`]), or the status line `There
 //!   is no import or export report yet.`.
 //! - Open Co-Producer Copy…: panel #2 in the project's copies folder, then
 //!   the store's `open_copy` (a new untitled project).
-//! - The items whose sheets come later do nothing yet
-//!   ([`LATER`]).
+//! - The items whose sheets come later do nothing yet ([`LATER`], empty
+//!   now).
 //!
 //! New, Open…, Create Demo Project, Close, Save and Save As… keep their
 //! slice 1 actions ([`crate::menus::action_for`]).
@@ -50,8 +55,8 @@ use crate::sheet_host::{Sheet, SheetDialog};
 use crate::shell::DocumentWindow;
 
 /// The File items whose sheet or flow lands later; their menu item does
-/// nothing yet: the other Export items (slice 7c).
-pub const LATER: &[&str] = &["file.export_aaf"];
+/// nothing yet. Every one is wired now (slice 7c).
+pub const LATER: &[&str] = &[];
 
 /// Handles the File items that need no document.
 pub fn install(cx: &mut App) {
@@ -68,10 +73,24 @@ fn run_app(id: &str, cx: &mut App) {
             crate::show(doc, cx);
         }
         "file.import_dawproject" => crate::choose_and_open(&panels::IMPORT_DAWPROJECT, cx),
-        // With a project open Swift's Import AAF sheet asks where it goes
-        // (slice 7c); until then it opens as a new project, the sheet's
-        // first choice and what Swift does with no project open.
-        "file.import_aaf" => crate::choose_and_open(&panels::IMPORT_AAF, cx),
+        // With a project in front the Import AAF sheet asks where it goes;
+        // with none it opens as a new project (Swift `store.openAaf`).
+        "file.import_aaf" => {
+            // Read from the app's window list: the window that sent the
+            // item may be mid-update.
+            let front = crate::alerts::front_window(cx).and_then(|w| {
+                let s = AppState::global(cx).read(cx);
+                let entry = s
+                    .windows()
+                    .iter()
+                    .find(|e| gpui::AnyWindowHandle::from(e.handle) == w)?;
+                Some((entry.doc, w))
+            });
+            match front {
+                Some((doc, w)) => crate::sheets::aaf::choose_import(doc, w, cx),
+                None => crate::choose_and_open(&panels::IMPORT_AAF, cx),
+            }
+        }
         _ => {}
     }
 }
@@ -93,6 +112,7 @@ pub(crate) fn run_in_window(
         }
         "file.export_for_daw" => crate::sheets::for_daw::show(view, window, cx),
         "file.export_dawproject" => crate::sheets::dawproject::show(view, window, cx),
+        "file.export_aaf" => crate::sheets::aaf::show_export(view, window, cx),
         "file.interchange_report" => crate::sheets::report::show_last(doc, cx),
         "media.relink" => AppState::global(cx).update(cx, |s, cx| {
             // The presenter shows the sheet once the window is free.

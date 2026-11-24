@@ -282,6 +282,7 @@ impl DocumentStore {
         self.made.remove(&id);
         self.pending.retain(|d| *d != id);
         self.reads.midi_generation.remove(&id);
+        self.reads.aaf_generation.remove(&id);
         // Its alerts are never lost: the front window shows them.
         for (doc, _) in self.alerts.iter_mut() {
             if *doc == Some(id) {

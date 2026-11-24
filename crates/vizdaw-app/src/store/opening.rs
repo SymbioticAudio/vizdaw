@@ -338,6 +338,12 @@ enum ReadAnswer {
 pub(super) enum ReadFor {
     OpenDawproject(String),
     OpenAaf(String),
+    /// The Import AAF sheet's read of document `doc`, the `generation`th.
+    AafImport {
+        doc: DocId,
+        generation: u64,
+        path: String,
+    },
     /// The import sheet's read of document `doc`, the `generation`th.
     MidiImport {
         doc: DocId,
@@ -369,6 +375,8 @@ pub(super) struct Reads {
     pub(super) spawner: Option<Spawner>,
     /// The newest import-sheet read per document.
     pub(super) midi_generation: HashMap<DocId, u64>,
+    /// The newest Import AAF read per document.
+    pub(super) aaf_generation: HashMap<DocId, u64>,
 }
 
 /// A store alert as a control failure ("<title>: <message>").
@@ -875,6 +883,51 @@ impl DocumentStore {
         );
     }
 
+    /// The Import AAF sheet's read of the AAF file at `path` for document
+    /// `doc` (Swift `AafModel.choose`; the core's free function, off the
+    /// UI thread): a newer read replaces it; a refusal is the alert
+    /// "Import Failed".
+    pub fn begin_aaf_import(&mut self, doc: DocId, path: &str) {
+        if !self.documents.contains_key(&doc) {
+            return;
+        }
+        let generation = {
+            let g = self.reads.aaf_generation.entry(doc).or_default();
+            *g += 1;
+            *g
+        };
+        let core = self.core.clone();
+        let p = path.to_owned();
+        self.read(
+            ReadFor::AafImport {
+                doc,
+                generation,
+                path: path.to_owned(),
+            },
+            move || ReadAnswer::Aaf(core.aaf_info(&p)),
+        );
+    }
+
+    /// The Import AAF sheet's Import on document `doc` (Swift
+    /// `startImport`): the sheet goes. "Open as a new project": a project
+    /// at the file's rate imports it with the sheet's choices, as an
+    /// open's (a refusal leaves nothing and alerts "Import Failed"; a job
+    /// that then fails or is cancelled takes the untouched project with
+    /// it); its ID, for its window. "Add to this project": `doc`'s
+    /// session imports it ("AAF Import Failed"); `None`.
+    pub fn start_aaf_import(&mut self, doc: DocId) -> Option<DocId> {
+        let d = self.documents.get_mut(&doc)?;
+        let sheet = d.aaf_import()?.clone();
+        let req = sheet.request();
+        if !sheet.new_project {
+            d.start_aaf_import_here(req);
+            return None;
+        }
+        d.hide_aaf_import();
+        self.import_for_open(sheet.info().sample_rate, |_| FileJob::ImportAaf(req))
+            .ok()
+    }
+
     fn read(&mut self, purpose: ReadFor, work: impl FnOnce() -> ReadAnswer + Send + 'static) {
         let ticket = self.reads.next;
         self.reads.next += 1;
@@ -957,6 +1010,25 @@ impl DocumentStore {
                     self.import_landed(row.sample_rate, FileJob::ImportAaf(req));
                 }
             },
+            (
+                ReadFor::AafImport {
+                    doc,
+                    generation,
+                    path,
+                },
+                ReadAnswer::Aaf(r),
+            ) => {
+                if self.reads.aaf_generation.get(&doc) != Some(&generation) {
+                    return;
+                }
+                let Some(d) = self.documents.get_mut(&doc) else {
+                    return;
+                };
+                match r {
+                    Err(e) => self.post_alert(AlertItem::from_error(&e, IMPORT_FAILED)),
+                    Ok(info) => d.aaf_read_landed(crate::aaf::AafRead { path, info }),
+                }
+            }
             (
                 ReadFor::MidiImport {
                     doc,

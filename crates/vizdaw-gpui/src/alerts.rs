@@ -122,6 +122,8 @@ pub fn present(cx: &mut App) {
         crate::sheets::export_midi::present(cx, |_, _| false);
         crate::sheets::for_daw::present(cx, |_, _| false);
         crate::sheets::dawproject::present(cx, |_, _| false);
+        crate::sheets::aaf::present_export(cx, |_, _| false);
+        crate::sheets::aaf::present_import(cx, |_, _| false);
         crate::sheets::report::present(cx, |_, _| false);
         return;
     }
@@ -173,6 +175,8 @@ pub fn present(cx: &mut App) {
     crate::sheets::export_midi::present(cx, |w, cx| !busy(Target::Window(w), cx));
     crate::sheets::for_daw::present(cx, |w, cx| !busy(Target::Window(w), cx));
     crate::sheets::dawproject::present(cx, |w, cx| !busy(Target::Window(w), cx));
+    crate::sheets::aaf::present_export(cx, |w, cx| !busy(Target::Window(w), cx));
+    crate::sheets::aaf::present_import(cx, |w, cx| !busy(Target::Window(w), cx));
     crate::sheets::report::present(cx, |w, cx| !busy(Target::Window(w), cx));
     crate::sheets::relink::present(cx, |w, cx| !busy(Target::Window(w), cx));
 }

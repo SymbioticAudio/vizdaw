@@ -1,6 +1,7 @@
 //! Application logic for the VizDAW UI. Never depends on GPUI.
 #![recursion_limit = "256"]
 
+pub mod aaf;
 pub mod alerts;
 pub mod arrangement;
 pub mod audio_format;
