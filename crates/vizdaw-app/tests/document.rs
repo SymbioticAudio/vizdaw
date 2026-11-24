@@ -260,3 +260,120 @@ fn select_track_replaces_or_extends() {
     m.select_track(30, false);
     assert_eq!(m.selected_lanes(), [30]);
 }
+
+// ---------------------------------------------------------------------
+// Recovered Recordings (Swift `RecordModel` offer, `RecordModelTests`)
+
+fn recovered(path: &str, size_known: bool) -> vizdaw_ffi::record::RecoveredFileRow {
+    vizdaw_ffi::record::RecoveredFileRow {
+        path: path.into(),
+        frames: 48_000,
+        size_known,
+        readable: true,
+    }
+}
+
+#[test]
+fn the_recovery_message_counts_and_names_the_recordings() {
+    use vizdaw_app::document::recovery_message as m;
+    let crash = recovered("Media/Recorded/Take 1.caf", false);
+    let kept = recovered("Media/Recorded/Take 2.caf", true);
+    assert_eq!(
+        m(std::slice::from_ref(&crash)),
+        "A recording was left by VizDAW quitting unexpectedly: Take 1."
+    );
+    assert_eq!(
+        m(&[crash.clone(), crash.clone()]),
+        "2 recordings were left by VizDAW quitting unexpectedly: Take 1, Take 1."
+    );
+    assert_eq!(
+        m(std::slice::from_ref(&kept)),
+        "A recording is not in the project: Take 2."
+    );
+    assert_eq!(
+        m(&[crash.clone(), kept.clone(), kept]),
+        "3 recordings are not in the project (1 left by VizDAW quitting unexpectedly): \
+         Take 1, Take 2, Take 2."
+    );
+    // An unreadable file a crash left is "not in the project".
+    let unreadable = vizdaw_ffi::record::RecoveredFileRow {
+        readable: false,
+        ..crash
+    };
+    assert_eq!(
+        m(&[unreadable]),
+        "A recording is not in the project: Take 1."
+    );
+}
+
+#[test]
+fn the_offer_shows_until_answered_and_import_brings_them_in() {
+    let f = Arc::new(demo_fake());
+    f.set_recovered_files(vec![recovered("Media/Recorded/Take 1.caf", false)]);
+    let mut m = model(&f);
+    assert_eq!(m.recovery_offer(), None, "offered only when asked");
+    m.offer_recovery();
+    assert_eq!(
+        m.recovery_offer().as_deref(),
+        Some("A recording was left by VizDAW quitting unexpectedly: Take 1.")
+    );
+    m.answer_recovery(Some(true));
+    assert_eq!(f.count("recover_recordings(true)"), 1);
+    assert_eq!(m.recovery_offer(), None);
+}
+
+#[test]
+fn later_leaves_the_files_for_the_next_open_and_trash_moves_them() {
+    let f = Arc::new(demo_fake());
+    f.set_recovered_files(vec![recovered("Media/Recorded/Take 1.caf", true)]);
+    let mut m = model(&f);
+    m.offer_recovery();
+    m.answer_recovery(None);
+    assert_eq!(m.recovery_offer(), None);
+    assert_eq!(f.count("recover_recordings(true)"), 0);
+    assert_eq!(f.count("recover_recordings(false)"), 0);
+    // Offered again on the next open.
+    m.offer_recovery();
+    assert!(m.recovery_offer().is_some());
+    m.answer_recovery(Some(false));
+    assert_eq!(f.count("recover_recordings(false)"), 1);
+    // Nothing left: no offer.
+    m.offer_recovery();
+    assert_eq!(m.recovery_offer(), None);
+}
+
+#[test]
+fn a_busy_or_failed_answer_holds_the_offer_until_the_next_poll() {
+    let f = Arc::new(demo_fake());
+    f.set_recovered_files(vec![recovered("Media/Recorded/Take 1.caf", false)]);
+    let mut m = model(&f);
+    m.offer_recovery();
+    f.fail_next(
+        "recover_recordings",
+        VizError::Busy {
+            message: "busy".into(),
+        },
+    );
+    m.answer_recovery(Some(true));
+    assert_eq!(m.recovery_offer(), None, "held");
+    assert!(m.alert.is_none(), "busy is no alert");
+    m.idle();
+    assert!(m.recovery_offer().is_some(), "offered again");
+    f.fail_next(
+        "recover_recordings",
+        VizError::Io {
+            message: "the disk went".into(),
+        },
+    );
+    m.answer_recovery(Some(true));
+    assert_eq!(m.recovery_offer(), None, "held");
+    let a = m.alert.take().unwrap();
+    assert_eq!(
+        (a.title.as_str(), a.message.as_str()),
+        ("Recovery Failed", "the disk went")
+    );
+    // "Later" after a held offer keeps it (the dismissal follows a button).
+    m.answer_recovery(None);
+    m.idle();
+    assert!(m.recovery_offer().is_some());
+}

@@ -11,8 +11,8 @@ use gpui::{
     Context, Entity, IntoElement, Modifiers, ParentElement, Pixels, Point, Render, Styled,
     TestAppContext, VisualTestContext, Window, WindowHandle, div, px,
 };
+use vizdaw_app::DocumentStore;
 use vizdaw_app::testing::{FakeSession, demo_fake};
-use vizdaw_app::{AlertItem, DocumentStore};
 use vizdaw_gpui::registry::{Registry, RegistryScope};
 use vizdaw_gpui::{AppState, DocumentWindow};
 
@@ -157,13 +157,27 @@ fn title_shows_the_dirty_mark(cx: &mut TestAppContext) {
 fn registry_paths_follow_the_view_tree(cx: &mut TestAppContext) {
     let mut s = setup(cx, demo_fake());
     let before = element_id(&mut s, "button", "Play");
-    // An alert banner is drawn above the transport bar: the bar moves down
-    // one place in the view tree, so Play's path changes.
-    s.app.update(&mut s.cx, |a, cx| {
-        a.store.post_alert(AlertItem::new("Open Failed", "nope"));
-        cx.notify();
-    });
+    // A disk banner is drawn before the transport bar: the bar moves one
+    // place in the view tree, so Play's path changes.
+    s.fake
+        .set_transport(|t| t.faults = vec!["stream-underrun".into()]);
+    for _ in 0..5 {
+        s.cx.executor().advance_clock(Duration::from_millis(100));
+        s.cx.run_until_parked();
+    }
+    s.cx.update(|window, _| window.refresh());
     s.cx.run_until_parked();
+    assert!(
+        s.window
+            .read_with(&s.cx, |v, _| v
+                .registry()
+                .borrow()
+                .elements()
+                .iter()
+                .any(|e| e.label == "Dismiss"))
+            .unwrap(),
+        "the disk banner shows"
+    );
     let after = element_id(&mut s, "button", "Play");
     assert_ne!(before, after);
     let stale = s
@@ -266,16 +280,26 @@ fn save_on_an_untitled_document_asks_for_a_path(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn an_alert_shows_until_dismissed(cx: &mut TestAppContext) {
+fn a_refused_open_is_a_prompt_with_ok_on_the_window(cx: &mut TestAppContext) {
     let mut s = setup(cx, demo_fake());
     // A folder without the extension is refused with an alert.
     let opened =
         s.cx.update(|_, cx| vizdaw_gpui::open_path(Path::new("/tmp/folder"), cx));
     assert!(opened.is_none());
     s.cx.run_until_parked();
-    click(&mut s, "button", "Dismiss");
+    assert_eq!(
+        s.cx.pending_prompt(),
+        Some((
+            "Open Failed".into(),
+            "folder is not a .vizdaw project.".into()
+        ))
+    );
+    // No banner: the alert left the store for the prompt.
     let left = s.app.read_with(&s.cx, |a, _| a.store.alert().cloned());
     assert_eq!(left, None);
+    s.cx.simulate_prompt_answer("OK");
+    s.cx.run_until_parked();
+    assert!(!s.cx.has_pending_prompt());
 }
 
 impl Setup {

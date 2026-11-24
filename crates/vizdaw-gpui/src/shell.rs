@@ -1,5 +1,5 @@
 //! The document window: one window per open document, with the menu bar
-//! (off macOS), the alert banner, the transport bar, the pane host's
+//! (off macOS), the transport bar, the pane host's
 //! regions (the centre: the arrangement's tool bar and the track header
 //! column beside the arrangement canvas, or the Mix view's mixer; the
 //! left, bottom and right panes), and the status line.
@@ -8,12 +8,15 @@
 //!
 //! A document's Mixer window (Swift `MixerWindow`, Window › Mixer) is a
 //! `DocumentWindow` too, of kind [`WindowKind::Mixer`]: titled "Mixer —
-//! <title>", it draws the menu bar (off macOS), the alert banner, its own
+//! <title>", it draws the menu bar (off macOS), its own
 //! transport bar without the document-only items (Main View, the pane
 //! toggles), and the mixer's Window placement. It has its own focus, bar
 //! fields, shuttle and keyboard token; it closes without asking, and it
 //! closes itself when its document goes. Its transport is the document's
 //! (the document window polls it).
+//!
+//! Either kind shows one modal sheet at a time over itself
+//! ([`crate::sheet_host`]); alerts are prompts ([`crate::alerts`]).
 
 use std::cell::{Cell, RefCell};
 use std::path::Path;
@@ -70,12 +73,14 @@ pub struct DocumentWindow {
     token: WindowToken,
     /// A document's own window, or its Mixer window.
     kind: WindowKind,
-    focus: FocusHandle,
+    pub(crate) focus: FocusHandle,
     registry: SharedRegistry,
     /// The title last given to the platform window.
     title: String,
     /// A save-changes prompt is showing.
     prompting: bool,
+    /// The sheet over the window, if one is up.
+    pub(crate) sheet: crate::sheet_host::SheetHost,
     /// The in-window menu bar, when this window draws one (off macOS).
     menu_bar: Option<MenuBar>,
     /// The track header column (its rename field, its Add Track menu).
@@ -181,9 +186,18 @@ impl DocumentWindow {
                 return Err(e.to_string());
             }
         };
+        let offer = !crate::control::channel_on(cx);
         app.update(cx, |s, _| {
             s.add_window(doc, token, handle, WindowKind::Document);
             s.store.focus_document(doc, token);
+            // Recordings a crash left in a saved project are offered
+            // (never under the control channel).
+            if offer
+                && let Some(d) = s.store.document_mut(doc)
+                && d.path().is_some()
+            {
+                d.offer_recovery();
+            }
         });
         handle
             .update(cx, |v, window, cx| {
@@ -342,6 +356,7 @@ impl DocumentWindow {
             registry: SharedRegistry::default(),
             title: String::new(),
             prompting: false,
+            sheet: crate::sheet_host::SheetHost::new(cx),
             menu_bar: cfg!(not(target_os = "macos"))
                 .then(|| MenuBar::new(menus::menu_model(None, &Default::default()))),
             track_headers: TrackHeaders::default(),
@@ -1194,34 +1209,29 @@ impl DocumentWindow {
         false
     }
 
-    fn alert_banner(
-        alert: &AlertItem,
-        scope: &mut RegistryScope,
+    /// A sheet opened: a held Rewind or Fast Forward ends (its key-up
+    /// goes to the sheet).
+    pub(crate) fn sheet_opened(&mut self, cx: &mut Context<Self>) {
+        self.end_shuttle(cx);
+    }
+
+    /// The window's content with its sheet, if one is up, over it. The
+    /// sheet is outside the content's key context: no window binding or
+    /// key handler sees a key typed into it.
+    fn with_sheet(
+        &mut self,
+        content: AnyElement,
+        root: &mut RegistryScope,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
+        let sheet = self.render_sheet(&mut root.container(), window, cx);
         div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_3()
-            .px_3()
-            .py_2()
-            .bg(rgb(0x5a2a2a))
-            .child(
-                div()
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .child(alert.title.clone()),
-            )
-            .child(div().flex_1().child(alert.message.clone()))
-            .child(
-                transport_bar::button("dismiss-alert", "Dismiss", true, colors::BUTTON, scope)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.app.update(cx, |s, cx| {
-                            s.dismiss_alert();
-                            cx.notify();
-                        })
-                    })),
-            )
+            .size_full()
+            .relative()
+            .child(content)
+            .children(sheet)
+            .into_any_element()
     }
 }
 
@@ -1522,12 +1532,11 @@ impl DocumentWindow {
     /// Window placement.
     fn render_mixer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let doc = self.doc;
-        let (title, alert, bar, model, front, layout) = {
+        let (title, bar, model, front, layout) = {
             let s = self.app.read(cx);
             let d = s.store.document(doc);
             (
                 d.map(crate::app_state::mixer_title).unwrap_or_default(),
-                s.store.alert().cloned(),
                 s.readout(doc).zip(d).map(|(readout, d)| BarState {
                     readout,
                     can_play: s.can_play(doc),
@@ -1576,8 +1585,6 @@ impl DocumentWindow {
             .menu_bar
             .as_ref()
             .map(|b| b.render(&mut root.container(), window, cx));
-        let alert =
-            alert.map(|a| Self::alert_banner(&a, &mut root.container(), cx).into_any_element());
         let bar = bar.map(|bar| {
             transport_bar::render(
                 &bar,
@@ -1595,9 +1602,9 @@ impl DocumentWindow {
             let content = mixer_view::render(&view, &mut scope, window, cx);
             panes::mixer(content, &scope)
         });
-        self.root(cx)
+        let content = self
+            .root(cx)
             .children(menu_bar)
-            .children(alert)
             .children(bar)
             .child(div().h(px(1.)).flex_none().bg(rgb(colors::BORDER)))
             .child(
@@ -1611,7 +1618,8 @@ impl DocumentWindow {
                     .children(content),
             )
             .children(self.frame_probe())
-            .into_any_element()
+            .into_any_element();
+        self.with_sheet(content, &mut root, window, cx)
     }
 }
 
@@ -1629,7 +1637,6 @@ impl Render for DocumentWindow {
         let (
             title,
             dirty,
-            alert,
             bar,
             model,
             front,
@@ -1651,7 +1658,6 @@ impl Render for DocumentWindow {
             (
                 s.title(doc).unwrap_or_default(),
                 s.is_dirty(doc),
-                s.store.alert().cloned(),
                 s.readout(doc).zip(d).map(|(readout, d)| BarState {
                     readout,
                     can_play: s.can_play(doc),
@@ -1803,11 +1809,9 @@ impl Render for DocumentWindow {
         );
         // After the regions, so their paths stay put as bars come and go.
         let bars = banners::render(banners, &mut root, cx);
-        self.root(cx)
+        let content = self
+            .root(cx)
             .children(menu_bar)
-            .when_some(alert, |d, alert| {
-                d.child(Self::alert_banner(&alert, &mut root.container(), cx))
-            })
             .when_some(bar, |d, bar| {
                 d.child(transport_bar::render(
                     &bar,
@@ -1825,7 +1829,8 @@ impl Render for DocumentWindow {
                 d.child(Self::status_line(status, &mut root.container(), cx))
             })
             .children(self.frame_probe())
-            .into_any_element()
+            .into_any_element();
+        self.with_sheet(content, &mut root, window, cx)
     }
 }
 

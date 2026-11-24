@@ -3,6 +3,12 @@
 
 mod block_drag;
 mod editing;
+mod recovery;
+
+pub use recovery::{
+    RECOVERY_FAILED, RECOVERY_IMPORT, RECOVERY_LATER, RECOVERY_TITLE, RECOVERY_TRASH,
+    recovery_message,
+};
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -83,6 +89,8 @@ pub struct DocumentModel {
     pub(crate) opened_file_end: Option<Option<String>>,
     /// The MIDI file the import sheet reads (slice 7c shows it).
     pub(crate) midi_read: Option<crate::store::MidiRead>,
+    /// The Recovered Recordings offer.
+    recovery: recovery::RecoveryOffer,
 }
 
 /// What the arrangement reads of one track, read when first asked for.
@@ -188,6 +196,7 @@ impl DocumentModel {
             opened_file: false,
             opened_file_end: None,
             midi_read: None,
+            recovery: recovery::RecoveryOffer::default(),
         };
         model.refresh_project_info();
         model.reset_infos();
@@ -281,6 +290,10 @@ impl DocumentModel {
         }
         if !self.jobs.is_empty() {
             self.poll_jobs();
+            arrived = true;
+        }
+        // A held Recovered Recordings offer shows again.
+        if self.reoffer_if_held() {
             arrived = true;
         }
         pending || arrived

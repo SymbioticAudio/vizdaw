@@ -1,5 +1,6 @@
 //! The VizDAW GPUI application.
 
+pub mod alerts;
 pub mod app_state;
 pub mod arrangement;
 pub mod banners;
@@ -20,6 +21,7 @@ pub mod panes;
 pub mod piano_roll;
 pub mod registry;
 pub mod screenshot;
+pub mod sheet_host;
 pub mod shell;
 pub mod strip_palette;
 pub mod text_input;
@@ -32,7 +34,7 @@ use std::path::Path;
 
 use gpui::{App, PromptLevel, WindowHandle};
 use vizdaw_app::alerts::AlertItem;
-use vizdaw_app::store::{CrashChoice, Opened};
+use vizdaw_app::store::Opened;
 use vizdaw_app::{DocId, DocumentStore};
 
 pub use app_state::{AppState, WindowKind};
@@ -48,6 +50,10 @@ pub fn install(store: DocumentStore, cx: &mut App) -> gpui::Entity<AppState> {
     let state = app_state::create(store, cx);
     // No window key acts while a file panel is up.
     file_panels::install(cx);
+    // A window's keys stay in its sheet while one is up.
+    sheet_host::install(cx);
+    // Alerts and questions show as prompts when the state changes.
+    alerts::install(&state, cx);
     // The store's file reads (DAWproject and AAF opens) run off the UI
     // thread from now on.
     control::files::install_spawner(cx);
@@ -86,25 +92,36 @@ pub fn new_demo(cx: &mut App) -> Option<WindowHandle<DocumentWindow>> {
 
 /// Opens the project at `path` (File › Open once the dialog answers). A
 /// project already open brings its window to the front. A refusal or
-/// failure is an alert, and `None`.
+/// failure is an alert, and `None`; a project that asks a recovery
+/// question first opens once it is answered ([`alerts`]).
 pub fn open_path(path: &Path, cx: &mut App) -> Option<WindowHandle<DocumentWindow>> {
     let app = AppState::global(cx);
+    // Shift held while opening asks the crash question (Swift).
+    let shift = cx
+        .active_window()
+        .and_then(|w| w.update(cx, |_, window, _| window.modifiers().shift).ok())
+        .unwrap_or(false);
     let opened = app.update(cx, |s, cx| {
         cx.notify();
-        match s.store.open(path) {
+        s.store.set_shift_held(Box::new(move || shift));
+        let opened = s.store.open(path);
+        s.store.set_shift_held(Box::new(|| false));
+        match opened {
             Ok(Opened::Doc(d)) => Some(d),
-            // Until slice 7b's prompts: opened as before, normally and
-            // from the last save.
-            Ok(Opened::Asking) => s
-                .store
-                .answer_crash(CrashChoice::Normally)
-                .or_else(|| s.store.answer_autosave(false)),
-            // The file is read first, off the UI thread; its project's
-            // window opens when the read lands (`control::files::settle`).
-            Ok(Opened::Reading) | Err(_) => None,
+            // The question shows first ([`alerts::present`]); the file is
+            // read first, off the UI thread, and its project's window
+            // opens when the read lands (`control::files::settle`).
+            Ok(Opened::Asking) | Ok(Opened::Reading) | Err(_) => None,
         }
     });
-    let doc = opened?;
+    let handle = opened.and_then(|doc| show_or_front(doc, cx));
+    alerts::present(cx);
+    handle
+}
+
+/// `doc`'s window brought to the front, or opened.
+pub(crate) fn show_or_front(doc: DocId, cx: &mut App) -> Option<WindowHandle<DocumentWindow>> {
+    let app = AppState::global(cx);
     if let Some(entry) = app.read(cx).window_of(doc).cloned() {
         entry
             .handle
@@ -115,16 +132,12 @@ pub fn open_path(path: &Path, cx: &mut App) -> Option<WindowHandle<DocumentWindo
     show(Some(doc), cx)
 }
 
-/// A window for `doc`; with none, the store's alert is all there is.
+/// A window for `doc`; with none, the store's alert shows in a dialog
+/// window of its own ([`alerts`]).
 pub(crate) fn show(doc: Option<DocId>, cx: &mut App) -> Option<WindowHandle<DocumentWindow>> {
     let app = AppState::global(cx);
     let handle = doc.and_then(|d| DocumentWindow::open(&app, d, cx).ok());
-    if handle.is_none() && app.read(cx).windows().is_empty() {
-        // No window to show the alert in (slice 2: an app-level alert).
-        if let Some(a) = app.read(cx).store.alert() {
-            eprintln!("{}: {}", a.title, a.message);
-        }
-    }
+    alerts::present(cx);
     handle
 }
 
@@ -248,6 +261,11 @@ pub fn run() {
     gpui_platform::application().run(move |cx: &mut App| {
         let state = install(DocumentStore::live(), cx);
         file_panels::use_native(cx);
+        // Off macOS the platform has no prompt: GPUI's prompts are drawn
+        // as the sheet card (with Return and Esc).
+        if cfg!(not(target_os = "macos")) {
+            sheet_host::use_sheet_prompts(cx);
+        }
         // The preferences under the launch home (a throwaway e2e home
         // keeps its own).
         state.update(cx, |s, _| s.set_prefs(vizdaw_app::Prefs::open()));

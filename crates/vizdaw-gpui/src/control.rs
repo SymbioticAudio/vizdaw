@@ -191,10 +191,30 @@ pub struct Tick {
     pub deferred: usize,
 }
 
+/// The control channel is on (Swift `ControlChannel.active`): a server
+/// was started, or calls were pumped. No prompt, sheet or offer shows
+/// then; the channel answers and reports them.
+#[derive(Default)]
+struct ChannelOn(bool);
+
+impl Global for ChannelOn {}
+
+/// Whether the control channel is on ([`start`] ran, or [`pump`] did).
+pub fn channel_on(cx: &App) -> bool {
+    cx.try_global::<ChannelOn>().is_some_and(|c| c.0)
+}
+
+fn set_channel_on(cx: &mut App) {
+    if !channel_on(cx) {
+        cx.set_global(ChannelOn(true));
+    }
+}
+
 /// Takes and answers up to [`MAX_CALLS_PER_TICK`] calls, then checks the
 /// pending waits. Call it from a top-level update (the pump timer's), not
 /// from inside an entity's or a window's update.
 pub fn pump(calls: &impl CallSource, cx: &mut App) -> Tick {
+    set_channel_on(cx);
     let mut tick = Tick::default();
     while tick.handled < MAX_CALLS_PER_TICK && !tick.quit {
         let Some(call) = calls.next_call() else { break };
@@ -1440,6 +1460,7 @@ fn not_yet(what: &str) -> ControlError {
 pub fn start(path: &Path, cx: &mut App) -> Result<(), StartError> {
     let server = Rc::new(RefCell::new(Server::start(path, Config::default())?));
     eprintln!("control channel on {}", path.display());
+    set_channel_on(cx);
     let on_quit = server.clone();
     cx.on_app_quit(move |_| {
         match on_quit.try_borrow_mut() {

@@ -701,25 +701,22 @@ impl DocumentStore {
     }
 
     fn alert_ids(&self) -> Vec<u64> {
-        self.alert
-            .iter()
-            .chain(self.queued_alerts.iter())
-            .map(|a| a.id)
-            .collect()
+        self.alerts.iter().map(|(_, a)| a.id).collect()
     }
 
-    /// The newest alert posted since `before` was taken, removed.
+    /// The newest alert posted since `before` was taken, removed (the
+    /// first waiting one when it is new).
     fn take_new_alert(&mut self, before: &[u64]) -> Option<AlertItem> {
-        if let Some(a) = &self.alert
+        if let Some(a) = self.alert()
             && !before.contains(&a.id)
         {
             return self.take_alert();
         }
         let i = self
-            .queued_alerts
+            .alerts
             .iter()
-            .rposition(|a| !before.contains(&a.id))?;
-        self.queued_alerts.remove(i)
+            .rposition(|(_, a)| !before.contains(&a.id))?;
+        self.alerts.remove(i).map(|(_, a)| a)
     }
 
     // -----------------------------------------------------------------
@@ -774,8 +771,7 @@ impl DocumentStore {
         // A job that ended at once has already taken the project.
         if self.settle_opened_file(id) {
             return Err(self
-                .alert
-                .as_ref()
+                .alert()
                 .map(|a| a.message.clone())
                 .unwrap_or_else(|| "the import was cancelled".into()));
         }

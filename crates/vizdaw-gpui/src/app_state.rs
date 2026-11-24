@@ -384,11 +384,6 @@ impl AppState {
             title
         }
     }
-
-    /// Dismisses the alert showing; the next queued one takes its place.
-    pub fn dismiss_alert(&mut self) {
-        self.store.take_alert();
-    }
 }
 
 /// A Mixer window's title (Swift `MixerWindow`): "Mixer — <title>".

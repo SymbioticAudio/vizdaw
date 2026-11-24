@@ -194,3 +194,88 @@ fn with_document_lends_the_document_and_moves_its_alert_to_the_store() {
     assert_eq!(s.count(), 1);
     assert!(s.with_document(vizdaw_app::DocId(99), |_, _| ()).is_none());
 }
+
+// ---------------------------------------------------------------------
+// Where alerts show (slice 7b Task 2): a document's alert names its
+// document; a store alert names none; a closed document's go to the front.
+
+fn save_failing_store() -> (DocumentStore, Arc<FakeSession>) {
+    let fake = Arc::new(demo_fake());
+    fake.set_path(Some("/tmp/song.vizdaw"));
+    fake.set_save_error(Some(VizError::Io {
+        message: "disk full".into(),
+    }));
+    let shared = fake.clone();
+    let s = DocumentStore::new(
+        Box::new(|| Ok(Arc::new(FakeSession::new(vec![])))),
+        Box::new(move || Ok(shared.clone())),
+        Box::new(|_| Ok(Arc::new(demo_fake()))),
+    );
+    (s, fake)
+}
+
+fn waiting(s: &DocumentStore) -> Vec<(Option<vizdaw_app::DocId>, String)> {
+    s.alerts().map(|(d, a)| (d, a.title.clone())).collect()
+}
+
+#[test]
+fn a_documents_alert_names_its_document_and_a_store_alert_none() {
+    let (mut s, _) = save_failing_store();
+    let id = s.new_demo().unwrap();
+    s.post_alert(AlertItem::new("Open Failed", "nope"));
+    s.with_document(id, |doc, _| doc.save());
+    assert_eq!(
+        waiting(&s),
+        vec![
+            (None, "Open Failed".to_owned()),
+            (Some(id), "Save Failed".to_owned())
+        ]
+    );
+    // The channel's view is unchanged: the oldest first.
+    assert_eq!(s.alert().unwrap().title, "Open Failed");
+}
+
+#[test]
+fn a_closed_documents_alerts_go_to_the_front_window_in_order() {
+    let (mut s, _) = save_failing_store();
+    let id = s.new_demo().unwrap();
+    s.with_document(id, |doc, _| doc.save());
+    s.post_alert(AlertItem::new("Third", "3"));
+    s.close(id);
+    assert_eq!(
+        waiting(&s),
+        vec![(None, "Save Failed".to_owned()), (None, "Third".to_owned())]
+    );
+}
+
+#[test]
+fn an_alert_taken_to_show_leaves_the_rest_waiting_and_can_come_back_first() {
+    let mut s = store();
+    s.post_alert(AlertItem::new("One", "1"));
+    s.post_alert(AlertItem::new("Two", "2"));
+    s.post_alert(AlertItem::new("Three", "3"));
+    let two = s.alerts().nth(1).unwrap().1.id;
+    let taken = s.take_alert_id(two).unwrap();
+    assert_eq!(taken.title, "Two");
+    assert!(s.take_alert_id(two).is_none(), "taken once");
+    let titles =
+        |s: &DocumentStore| -> Vec<String> { s.alerts().map(|(_, a)| a.title.clone()).collect() };
+    assert_eq!(titles(&s), ["One", "Three"]);
+    // A prompt that could not show (its window closed) puts it back first.
+    s.return_alert(None, taken);
+    assert_eq!(titles(&s), ["Two", "One", "Three"]);
+    assert_eq!(s.alert().unwrap().title, "Two");
+}
+
+#[test]
+fn a_document_alert_left_on_the_document_is_collected() {
+    let mut s = store();
+    let id = s.new_demo().unwrap();
+    s.document_mut(id).unwrap().alert = Some(AlertItem::new("Mixer Unavailable", "x"));
+    s.collect_document_alerts();
+    assert!(s.document(id).unwrap().alert.is_none());
+    assert_eq!(
+        waiting(&s),
+        vec![(Some(id), "Mixer Unavailable".to_owned())]
+    );
+}

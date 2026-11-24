@@ -100,8 +100,9 @@ pub struct DocumentStore {
     key_window: Option<(DocId, WindowToken)>,
     /// Documents whose window was key, most recent first.
     recent_key: Vec<DocId>,
-    alert: Option<AlertItem>,
-    queued_alerts: VecDeque<AlertItem>,
+    /// The alerts waiting to show, oldest first, each with the document
+    /// whose window shows it (`None`: the front window).
+    alerts: VecDeque<(Option<DocId>, AlertItem)>,
     last_failure: Option<String>,
     default_format: ProjectFormatRow,
     /// Projects made for a file that landed later, waiting for a window.
@@ -138,8 +139,7 @@ impl DocumentStore {
             next_id: 1,
             key_window: None,
             recent_key: Vec::new(),
-            alert: None,
-            queued_alerts: VecDeque::new(),
+            alerts: VecDeque::new(),
             last_failure: None,
             default_format: crate::formats::FALLBACK_FORMAT,
             pending: VecDeque::new(),
@@ -178,7 +178,7 @@ impl DocumentStore {
     /// the store). The document is out of the store while `f` runs, so `f`
     /// must not open, close or look up documents; it is put back after.
     /// An alert the document raised (save, undo) moves to the store, the
-    /// single alert channel. An import into a project the store made for
+    /// single alert channel, naming the document (its window shows it). An import into a project the store made for
     /// its file that failed or was cancelled (polled in `f`) closes the
     /// project while untouched (see [`DocumentStore::take_closed`]).
     /// `None` when `id` is not open.
@@ -189,10 +189,11 @@ impl DocumentStore {
     ) -> Option<R> {
         let mut doc = self.documents.remove(&id)?;
         let result = f(&mut doc, self);
-        if let Some(alert) = doc.alert.take() {
-            self.post_alert(alert);
-        }
+        let alert = doc.alert.take();
         self.documents.insert(id, doc);
+        if let Some(alert) = alert {
+            self.post_document_alert(id, alert);
+        }
         // An import into a project made for its file ended badly.
         self.settle_opened_file(id);
         Some(result)
@@ -278,7 +279,16 @@ impl DocumentStore {
         self.made.remove(&id);
         self.pending.retain(|d| *d != id);
         self.reads.midi_generation.remove(&id);
+        // Its alerts are never lost: the front window shows them.
+        for (doc, _) in self.alerts.iter_mut() {
+            if *doc == Some(id) {
+                *doc = None;
+            }
+        }
         if let Some(mut doc) = self.documents.remove(&id) {
+            if let Some(a) = doc.alert.take() {
+                self.alerts.push_back((None, a));
+            }
             doc.audition_off_all();
             // No mixer touch outlives its document.
             doc.end_mixer_drags(std::time::Instant::now());
@@ -298,25 +308,64 @@ impl DocumentStore {
     }
 
     /// Shows `item` now, or after the alerts already showing or waiting;
-    /// none is dropped.
+    /// none is dropped. A store alert: the front window shows it.
     pub fn post_alert(&mut self, item: AlertItem) {
-        if self.alert.is_none() && self.queued_alerts.is_empty() {
-            self.alert = Some(item);
-        } else {
-            self.queued_alerts.push_back(item);
-        }
+        self.alerts.push_back((None, item));
     }
 
-    /// The alert showing now, if any.
+    /// As [`post_alert`](Self::post_alert), shown in `doc`'s own window
+    /// (the front window once it is closed).
+    pub fn post_document_alert(&mut self, doc: DocId, item: AlertItem) {
+        let doc = self.documents.contains_key(&doc).then_some(doc);
+        self.alerts.push_back((doc, item));
+    }
+
+    /// The alert showing now (the oldest waiting), if any: what the
+    /// control channel reports.
     pub fn alert(&self) -> Option<&AlertItem> {
-        self.alert.as_ref()
+        self.alerts.front().map(|(_, a)| a)
     }
 
     /// The store-level alert, cleared; the next queued one takes its place.
     pub fn take_alert(&mut self) -> Option<AlertItem> {
-        let current = self.alert.take().or_else(|| self.queued_alerts.pop_front());
-        self.alert = self.queued_alerts.pop_front();
-        current
+        self.alerts.pop_front().map(|(_, a)| a)
+    }
+
+    /// Every alert waiting, oldest first, with the document whose window
+    /// shows it (`None`: the front window).
+    pub fn alerts(&self) -> impl Iterator<Item = (Option<DocId>, &AlertItem)> {
+        self.alerts.iter().map(|(d, a)| (*d, a))
+    }
+
+    /// The waiting alert `id`, removed (the app shows it now).
+    pub fn take_alert_id(&mut self, id: u64) -> Option<AlertItem> {
+        let i = self.alerts.iter().position(|(_, a)| a.id == id)?;
+        self.alerts.remove(i).map(|(_, a)| a)
+    }
+
+    /// Puts back an alert the app took but could not show (its window
+    /// closed first): it is the first to show again.
+    pub fn return_alert(&mut self, doc: Option<DocId>, item: AlertItem) {
+        let doc = doc.filter(|d| self.documents.contains_key(d));
+        self.alerts.push_front((doc, item));
+    }
+
+    /// Moves the alert each document holds (one raised outside
+    /// [`with_document`](Self::with_document), the mixer's) to the
+    /// store, naming its document.
+    pub fn collect_document_alerts(&mut self) {
+        let mut ids: Vec<DocId> = self
+            .documents
+            .iter()
+            .filter(|(_, d)| d.alert.is_some())
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort();
+        for id in ids {
+            if let Some(a) = self.documents.get_mut(&id).and_then(|d| d.alert.take()) {
+                self.alerts.push_back((Some(id), a));
+            }
+        }
     }
 }
 
