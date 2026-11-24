@@ -290,12 +290,18 @@ fn job_step(j: &PendingJob, expired: bool, cx: &mut App) -> Option<Result<Value,
                 return Some(Ok(ran_value(&j.command, doc, window, undo, status)));
             }
             // A project the command made shows its window now, and the
-            // reply names it.
+            // reply names it; a window that fails to open is the call's
+            // failure (the project closed with it).
             let made = app.read(cx).store.made_project(doc);
-            if made && app.read(cx).window_of(doc).is_none() {
-                let _ = DocumentWindow::open(&app, doc, cx);
-            }
+            let shown = if made {
+                show(doc, cx).map(|_| ())
+            } else {
+                Ok(())
+            };
             app.update(cx, |s, _| s.store.job_ended(doc, false, |_, _| {}));
+            if let Err(e) = shown {
+                return Some(Err(e));
+            }
             let window = window_number(doc, cx);
             let undo = undo_label(doc, cx);
             Some(Ok(result_json(&ControlResult::Interchange {

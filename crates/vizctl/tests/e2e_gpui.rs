@@ -2130,3 +2130,966 @@ fn gpui_the_left_pane_strip_follows_the_focused_track() {
     });
     app.quit();
 }
+
+// ---------------------------------------------------------------------
+// Files over the channel (slice 7a): ported from `e2e.rs`. Every step
+// runs but the audio editor one, which waits for its slice.
+
+/// A 48 kHz stereo float CAF of `frames` frames of a 0.25 constant (the
+/// app's importer reads CAF like any other format).
+fn audio_file(path: &std::path::Path, frames: usize) {
+    let mut w = core_media::caf::CafWriter::create(
+        path,
+        48_000,
+        2,
+        core_model::format::BitDepth::Float32,
+        core_media::caf::WriteMode::Normal,
+    )
+    .unwrap();
+    w.write(&vec![0.25f32; 2 * frames]).unwrap();
+    w.finish().unwrap();
+}
+
+/// `(rate, channels, bits, frames, 16-bit samples)` of a 16-bit PCM WAV.
+fn read_wav16(path: &std::path::Path) -> (u32, u16, u16, u64, Vec<i16>) {
+    let b = std::fs::read(path).unwrap();
+    assert_eq!((&b[0..4], &b[8..12]), (&b"RIFF"[..], &b"WAVE"[..]));
+    let mut at = 12;
+    let (mut rate, mut ch, mut bits, mut data) = (0, 0, 0, Vec::new());
+    while at + 8 <= b.len() {
+        let n = u32::from_le_bytes(b[at + 4..at + 8].try_into().unwrap()) as usize;
+        let body = &b[at + 8..at + 8 + n];
+        match &b[at..at + 4] {
+            b"fmt " => {
+                ch = u16::from_le_bytes(body[2..4].try_into().unwrap());
+                rate = u32::from_le_bytes(body[4..8].try_into().unwrap());
+                bits = u16::from_le_bytes(body[14..16].try_into().unwrap());
+            }
+            b"data" => {
+                data = body
+                    .chunks(2)
+                    .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                    .collect();
+            }
+            _ => {}
+        }
+        at += 8 + n + (n & 1);
+    }
+    let frames = (data.len() / usize::from(ch.max(1))) as u64;
+    (rate, ch, bits, frames, data)
+}
+
+/// The `MTrk` chunks of a Standard MIDI File (after its `MThd`), walked by
+/// their lengths.
+fn mtrk_chunks(bytes: &[u8]) -> usize {
+    let mut at = 0usize;
+    let mut n = 0;
+    while let Some(head) = bytes.get(at..at + 8) {
+        let len = u32::from_be_bytes([head[4], head[5], head[6], head[7]]) as usize;
+        if &head[..4] == b"MTrk" {
+            n += 1;
+        }
+        at += 8 + len;
+    }
+    n
+}
+
+/// The `.wav` files in `dir`.
+fn wavs_in(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "wav"))
+        .collect();
+    out.sort();
+    out
+}
+
+/// Every path under `dir`, files and folders.
+fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    for e in std::fs::read_dir(dir).unwrap() {
+        let p = e.unwrap().path();
+        out.push(p.clone());
+        if p.is_dir() {
+            walk(&p, out);
+        }
+    }
+}
+
+/// Ported from `audio_import_plays_and_reports_media` (README steps
+/// 109–116 through the channel, plan 5a): a 44.1 kHz/16-bit
+/// project stores an imported 48 kHz file in its own format; the demo
+/// imports into a new lane, plays the region without disk faults, and
+/// changes its format with the media converted.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_audio_import_plays_and_reports_media() {
+    let tmp = temp_home();
+    let mut app = App::start(tmp.path(), false);
+    let src = app.launched.home.join("tone.caf");
+    audio_file(&src, 96_000);
+
+    // A new project in a chosen format.
+    let made = app.call(
+        "command.run",
+        json!({"id": "file.new", "params": {"rate": "44100", "depth": "16"}}),
+    );
+    let window = made["window"].clone();
+    let p = app.call("state.get", json!({"target": "project", "window": window}));
+    assert_eq!(
+        (p["rate"].clone(), p["depth"].clone()),
+        (json!(44_100), json!("16")),
+        "{p}"
+    );
+    let r = app.call(
+        "command.run",
+        json!({"id": "media.import", "params": {"path": src}, "window": window}),
+    );
+    assert_eq!(r["undo"], "Import Audio", "{r}");
+    let m = app.call("state.get", json!({"target": "media", "window": window}));
+    let item = &m["items"][0];
+    assert_eq!(item["name"], "tone", "{m}");
+    assert_eq!(item["rate"], 44_100);
+    assert_eq!(item["offline"], false);
+    assert!(
+        item["frames"].as_u64().unwrap().abs_diff(88_200) <= 1,
+        "converted to 44.1 kHz: {item}"
+    );
+
+    // The demo: import into a new lane at bar 1 and play it.
+    let demo = app.call("command.run", json!({"id": "file.create_demo"}));
+    let w2 = demo["window"].clone();
+    let doc = app.call("state.get", json!({"target": "document", "window": w2}));
+    let seq = doc["selected_seq"].as_u64().unwrap();
+    let lanes_before = doc["lanes"].as_array().unwrap().len();
+    let r = app.call(
+        "command.run",
+        json!({"id": "media.import", "params": {"path": src, "seq": seq, "tick": 0}, "window": w2}),
+    );
+    assert_eq!(r["undo"], "Import Audio", "{r}");
+    let doc = app.call("state.get", json!({"target": "document", "window": w2}));
+    let lanes = doc["lanes"].as_array().unwrap();
+    assert_eq!(lanes.len(), lanes_before + 1, "{doc}");
+    assert_eq!(lanes.last().unwrap()["regions"], 1, "{doc}");
+    app.call(
+        "command.run",
+        json!({"id": "transport.play_stop", "window": w2}),
+    );
+    app.wait(&w2, json!({"condition": "playing"}));
+    app.wait(
+        &w2,
+        json!({"condition": "tick_at_least", "tick": 2 * 15_360}),
+    );
+    let t = app.call("state.get", json!({"target": "transport", "window": w2}));
+    let faults: Vec<String> = t["faults"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f.as_str().unwrap_or("").to_string())
+        .collect();
+    assert!(
+        !faults.iter().any(|f| f == "stream-underrun"),
+        "the region streamed in time: {t}"
+    );
+    assert_eq!(t["rate_mismatch"], false, "{t}");
+    app.call(
+        "command.run",
+        json!({"id": "transport.play_stop", "window": w2}),
+    );
+    app.wait(&w2, json!({"condition": "stopped"}));
+
+    // Skipped: the audio editor step (a region clicked by its element,
+    // `editors.audio_editor` and its controls inside the left pane) waits
+    // for the Audio Editor slice; it is not in 7a.
+
+    // Project Settings: 24-bit to float, every file converted.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.project_settings", "params": {"depth": "32f"}, "window": w2}),
+    );
+    assert_eq!(r["undo"], "Change Project Format", "{r}");
+    let p = app.call("state.get", json!({"target": "project", "window": w2}));
+    assert_eq!(
+        (p["depth"].clone(), p["mismatched"].clone()),
+        (json!("32f"), json!(0)),
+        "{p}"
+    );
+    let m = app.call("state.get", json!({"target": "media", "window": w2}));
+    let tone = m["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["name"] == "tone")
+        .unwrap()
+        .clone();
+    assert_eq!(tone["offline"], false, "{m}");
+    app.quit();
+}
+
+/// Ported from `bounces_the_demo_and_checks_the_file`:
+/// README steps 180–184 through the channel (plan 5f-2; spec §12.3 "bounce
+/// and check the file"): a bounce of four bars to a 16-bit WAV, refused
+/// over the same file without `replace`, then Add to project; hostile
+/// calls refused.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_bounces_the_demo_and_checks_the_file() {
+    let tmp = temp_home();
+    let mut app = App::start(tmp.path(), false);
+    let home = app.launched.home.clone();
+    let src = home.join("tone.caf");
+    audio_file(&src, 96_000);
+    let demo = app.call("command.run", json!({"id": "file.create_demo_audio"}));
+    let w = demo["window"].clone();
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let seq = doc["selected_seq"].as_u64().unwrap();
+    let r = app.call(
+        "command.run",
+        json!({"id": "media.import", "params": {"path": src, "seq": seq, "tick": 0}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Import Audio", "{r}");
+
+    // Four bars from tick 0 at 120 BPM: 16 × 15 360 ticks, 16 × 24 000 frames.
+    let (end, range) = (16 * 15_360, 384_000u64);
+    let mix = home.join("mix.wav");
+    let params = json!({"path": mix, "bits": "16", "rate": 48_000, "range": "selection", "start": 0, "end": end});
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.bounce", "params": params.clone(), "window": w}),
+    );
+    let status = r["status"].as_str().unwrap_or("").to_string();
+    assert!(
+        status.starts_with("wrote ") && status.contains(&mix.display().to_string()),
+        "{r}"
+    );
+    let (rate, ch, bits, frames, samples) = read_wav16(&mix);
+    assert_eq!((rate, ch, bits), (48_000, 2, 16), "{status}");
+    assert!(
+        (range..=range + 480_000).contains(&frames),
+        "{frames} frames: the range plus at most the 10 s tail (pre-flight M11)"
+    );
+    assert!(
+        samples[..2 * 96_000].iter().any(|s| *s != 0),
+        "the imported 0.25 tone sounds in the first bar"
+    );
+    let before = std::fs::read(&mix).unwrap();
+
+    // The same path without `replace`: refused, the file unchanged.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.bounce", "params": params, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::Failed, "{e:?}");
+    assert!(e.message.contains("exists"), "{e:?}");
+    assert_eq!(std::fs::read(&mix).unwrap(), before);
+
+    // Add to project: one undo step, a lane "Mix", a Bounced item.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.bounce", "params": {"add_to_project": true, "range": "selection", "start": 0, "end": end}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Bounce", "{r}");
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    assert_eq!(
+        doc["lanes"].as_array().unwrap().last().unwrap()["name"],
+        "Mix",
+        "{doc}"
+    );
+    let m = app.call("state.get", json!({"target": "media", "window": w}));
+    assert!(
+        m["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["origin"] == "bounced"),
+        "{m}"
+    );
+
+    // Hostile calls.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.bounce", "params": {"format": "mp3", "path": mix}, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::InvalidParams, "{e:?}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.bounce", "params": {}, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::DialogRequired, "{e:?}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.bounce", "params": {"add_to_project": false}, "window": w}),
+    );
+    assert_eq!(
+        e.code,
+        core_control::ErrorCode::DialogRequired,
+        "the app's check (pre-flight M6): {e:?}"
+    );
+    app.quit();
+}
+
+/// Ported from `midi_files_round_trip_over_the_channel`:
+/// README 257–266 through the channel (plan 6a Task 10): export the demo
+/// as a MIDI file and a MIDI Clip File, import them back into the demo and
+/// into a new project, and the refusals. No call opens a sheet or a panel;
+/// only the new project's window appears.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_midi_files_round_trip_over_the_channel() {
+    use core_control::ErrorCode;
+    let tmp = temp_home();
+    let mut app = App::start(tmp.path(), false);
+    let home = app.launched.home.clone();
+    let demo = app.call("command.run", json!({"id": "file.create_demo"}));
+    let w = demo["window"].clone();
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let lanes = doc["lanes"].as_array().unwrap().clone();
+    let tracks_before = lanes.len();
+    // What plays is written (a reference's events too), and only tracks
+    // with events make tracks again; the conductor makes none (F11).
+    let midi_tracks = lanes
+        .iter()
+        .filter(|l| l["events"].as_u64().unwrap_or(0) + l["references"].as_u64().unwrap_or(0) > 0)
+        .count();
+    assert!(midi_tracks > 0, "{doc}");
+    let windows = window_numbers(&mut app);
+
+    // A dry run: a report, no file.
+    let smf = home.join("demo.mid");
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.export_midi", "params": {"dry_run": true}, "window": w}),
+    );
+    assert!(r["report"]["summary"].is_string(), "{r}");
+    assert_eq!(r["written"], json!([]), "{r}");
+    assert!(!smf.exists());
+
+    // The file, and what it wrote.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.export_midi", "params": {"path": smf}, "window": w}),
+    );
+    assert_eq!(r["written"], json!([smf.display().to_string()]), "{r}");
+    assert!(r["report"]["summary"].is_string(), "{r}");
+    let bytes = std::fs::read(&smf).unwrap();
+    assert_eq!(&bytes[..4], b"MThd");
+
+    // One track as a MIDI Clip File.
+    let clip = home.join("one.midi2");
+    let lane = lanes
+        .iter()
+        .find(|l| l["events"].as_u64().unwrap_or(0) > 0)
+        .unwrap()["id"]
+        .as_u64()
+        .unwrap();
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.export_midi_clip", "params": {"path": clip, "lanes": lane.to_string()}, "window": w}),
+    );
+    assert_eq!(r["written"], json!([clip.display().to_string()]), "{r}");
+    assert_eq!(&std::fs::read(&clip).unwrap()[..8], b"SMF2CLIP");
+
+    // Back into the demo at bar 9 (the demo is in 4/4): one undo step.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.import_midi", "params": {"path": smf, "tick": 8 * 4 * 15_360}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Import MIDI File", "{r}");
+    let imported = r["report"].clone();
+    assert!(imported["summary"].is_string(), "{r}");
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    assert_eq!(
+        doc["lanes"].as_array().unwrap().len(),
+        tracks_before + midi_tracks,
+        "{doc}"
+    );
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.interchange_report", "window": w}),
+    );
+    assert_eq!(r["report"], imported, "{r}");
+    assert_eq!(
+        window_numbers(&mut app),
+        windows,
+        "no call opened a sheet or a panel"
+    );
+
+    // As a new project: a second document, whose window is shown.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.import_midi", "params": {"path": clip, "new_project": true}, "window": w}),
+    );
+    assert!(r["doc"].is_string() && r["doc"] != demo["doc"], "{r}");
+    assert!(r["window"].is_i64(), "the new project's window: {r}");
+    let after = window_numbers(&mut app);
+    assert_eq!(after.len(), windows.len() + 1, "{after:?}");
+    assert!(
+        after
+            .iter()
+            .any(|(n, k)| *n == r["window"] && k == "document"),
+        "{after:?}"
+    );
+    let made = app.call(
+        "state.get",
+        json!({"target": "document", "window": r["window"]}),
+    );
+    assert_eq!(made["lanes"].as_array().unwrap().len(), 1, "{made}");
+
+    // Refusals: inside the demo's package, and no path.
+    let pkg = home.join("Demo.vizdaw");
+    app.call(
+        "command.run",
+        json!({"id": "file.save_as", "params": {"path": pkg}, "window": w}),
+    );
+    assert!(pkg.is_dir());
+    let inside = pkg.join("inside.mid");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.export_midi", "params": {"path": inside}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::Failed, "{e:?}");
+    assert!(!inside.exists());
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.export_midi", "params": {}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::DialogRequired, "{e:?}");
+    assert!(e.message.contains("Save"), "{e:?}");
+    assert_eq!(window_numbers(&mut app).len(), windows.len() + 1);
+    app.quit();
+}
+
+/// Ported from `exports_for_another_daw_over_the_channel`:
+/// README 267–273 through the channel (plan 6b Task 5): export the demo for
+/// another DAW, re-import its MIDI and stems, export again with "Add the
+/// stems to this project", and the refusals. The reply comes once the
+/// `.exportProject` job ends; no call opens a sheet or a panel.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_exports_for_another_daw_over_the_channel() {
+    use core_control::ErrorCode;
+    let tmp = temp_home();
+    let mut app = App::start(tmp.path(), false);
+    let home = app.launched.home.clone();
+    let demo = app.call("command.run", json!({"id": "file.create_demo"}));
+    let w = demo["window"].clone();
+    let windows = window_numbers(&mut app);
+    let tmp = home.join("Exports");
+    std::fs::create_dir(&tmp).unwrap();
+    let lanes = |app: &mut App| {
+        let doc = app.call("state.get", json!({"target": "document", "window": w}));
+        doc["lanes"].as_array().unwrap().len()
+    };
+
+    // A dry run: a report, nothing written.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.export_for_daw", "params": {"dry_run": true, "path": tmp}, "window": w}),
+    );
+    assert!(r["report"]["summary"].is_string(), "{r}");
+    assert_eq!(r["written"], json!([]), "{r}");
+    assert_eq!(
+        std::fs::read_dir(&tmp).unwrap().count(),
+        0,
+        "tmp stays empty"
+    );
+
+    // The folder and its files.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.export_for_daw", "params": {"path": tmp}, "window": w}),
+    );
+    assert!(r["report"]["summary"].is_string(), "{r}");
+    let written = r["written"].as_array().unwrap();
+    assert_eq!(written.len(), 1, "{r}");
+    let folder = PathBuf::from(written[0].as_str().unwrap());
+    assert_eq!(folder.parent(), Some(tmp.as_path()), "{r}");
+    let name = folder.file_name().unwrap().to_str().unwrap().to_string();
+    assert!(name.ends_with(" for another DAW"), "{name}");
+    for f in [
+        "Tempo map.mid",
+        "About these files.txt",
+        "MIDI/All MIDI.mid",
+    ] {
+        assert!(folder.join(f).is_file(), "{f} in {folder:?}");
+    }
+    let stems = wavs_in(&folder.join("Audio"));
+    assert!(!stems.is_empty(), "at least one stem");
+    let mut all = Vec::new();
+    walk(&tmp, &mut all);
+    assert!(
+        !all.iter()
+            .any(|p| p.to_string_lossy().ends_with(".partial")),
+        "no partial is left: {all:?}"
+    );
+    assert_eq!(
+        window_numbers(&mut app),
+        windows,
+        "no call opened a sheet or a panel"
+    );
+
+    // The MIDI back in at the start: one track per MIDI track after the
+    // conductor (F17).
+    let all_midi = folder.join("MIDI/All MIDI.mid");
+    let bytes = std::fs::read(&all_midi).unwrap();
+    assert_eq!(&bytes[..4], b"MThd");
+    let tracks = mtrk_chunks(&bytes)
+        .checked_sub(1)
+        .expect("a conductor track");
+    assert!(tracks > 0, "{tracks}");
+    let before = lanes(&mut app);
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.import_midi", "params": {"path": all_midi, "tick": 0}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Import MIDI File", "{r}");
+    assert_eq!(lanes(&mut app), before + tracks);
+
+    // And the stems: one track each.
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let seq = doc["selected_seq"].as_u64().unwrap();
+    for (k, stem) in stems.iter().enumerate() {
+        let before = lanes(&mut app);
+        let r = app.call(
+            "command.run",
+            json!({"id": "media.import", "params": {"path": stem, "seq": seq, "tick": 0}, "window": w}),
+        );
+        assert_eq!(r["undo"], "Import Audio", "stem {k}: {r}");
+        assert_eq!(lanes(&mut app), before + 1, "stem {k}");
+    }
+
+    // Again without adding: "… 2", and the undo label stays that of the
+    // last edit.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.export_for_daw", "params": {"path": tmp}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Import Audio", "no edit without Add: {r}");
+    assert_eq!(
+        PathBuf::from(r["written"][0].as_str().unwrap()),
+        tmp.join(format!("{name} 2")),
+        "{r}"
+    );
+
+    // Again, adding the stems: "… 3", the first folder untouched, one
+    // track per stem in one undo step.
+    let first: Vec<PathBuf> = {
+        let mut v = Vec::new();
+        walk(&folder, &mut v);
+        v.sort();
+        v
+    };
+    let before = lanes(&mut app);
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.export_for_daw", "params": {"path": tmp, "add_to_project": true}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Add Stems", "{r}");
+    let second = PathBuf::from(r["written"][0].as_str().unwrap());
+    assert_eq!(second, tmp.join(format!("{name} 3")), "{r}");
+    let added = wavs_in(&second.join("Audio")).len();
+    assert!(added > 0, "{r}");
+    assert_eq!(lanes(&mut app), before + added);
+    app.call("command.run", json!({"id": "edit.undo", "window": w}));
+    assert_eq!(
+        lanes(&mut app),
+        before,
+        "one Undo removes every added track"
+    );
+    let mut again = Vec::new();
+    walk(&folder, &mut again);
+    again.sort();
+    assert_eq!(again, first, "the first folder is untouched");
+    let exported = r["report"].clone();
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.interchange_report", "window": w}),
+    );
+    assert_eq!(r["report"], exported, "{r}");
+
+    // Refusals: inside the demo's package, and no path.
+    let pkg = home.join("Demo.vizdaw");
+    app.call(
+        "command.run",
+        json!({"id": "file.save_as", "params": {"path": pkg}, "window": w}),
+    );
+    assert!(pkg.is_dir());
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.export_for_daw", "params": {"path": pkg}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::Failed, "{e:?}");
+    assert!(
+        e.message.contains(&pkg.display().to_string()),
+        "names the path: {e:?}"
+    );
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.export_for_daw", "params": {}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::DialogRequired, "{e:?}");
+    assert!(e.message.contains("Save"), "{e:?}");
+    assert_eq!(window_numbers(&mut app), windows);
+    app.quit();
+}
+
+/// Ported from `dawproject_round_trip_over_the_channel`:
+/// README 282–290 through the channel (plan 6d Task 13): hostile calls to
+/// both DAWproject commands change nothing and open nothing; a dry run
+/// writes nothing; the export writes a ZIP and refuses to replace it
+/// without `replace`; the import makes a new project with the demo's
+/// tracks and the VizDAW-origin note, and its report is the one
+/// `file.interchange_report` gives. Only the new project's window appears.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_dawproject_round_trip_over_the_channel() {
+    use core_control::ErrorCode;
+    let tmp = temp_home();
+    let mut app = App::start(tmp.path(), false);
+    let home = app.launched.home.clone();
+    let demo = app.call("command.run", json!({"id": "file.create_demo"}));
+    let w = demo["window"].clone();
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let tracks = doc["lanes"].as_array().unwrap().len();
+    assert!(tracks > 0, "{doc}");
+    let windows = window_numbers(&mut app);
+    let file = home.join("demo.dawproject");
+    // Everything under the throwaway home, to show the dry run adds nothing.
+    // The app keeps writing its own files there, so a folder that goes away
+    // mid-walk is skipped.
+    fn walk_quiet(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for p in rd.flatten().map(|e| e.path()) {
+            out.push(p.clone());
+            // lstat: a link is listed, never followed.
+            if std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_dir()) {
+                walk_quiet(&p, out);
+            }
+        }
+    }
+    let listing = || {
+        let mut v = Vec::new();
+        walk_quiet(&home, &mut v);
+        v.sort();
+        v
+    };
+
+    // Hostile calls: each refused, none opens anything.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.export_dawproject", "params": {"path": file, "region_gain": "half"}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{e:?}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.export_dawproject", "params": {"path": "demo.dawproject"}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::InvalidParams, "a relative path: {e:?}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.export_dawproject", "params": {}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::DialogRequired, "{e:?}");
+    assert!(e.message.contains("Save"), "{e:?}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.import_dawproject", "params": {"path": file, "mode": "fuse"}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{e:?}");
+    assert!(!file.exists());
+    assert_eq!(
+        window_numbers(&mut app),
+        windows,
+        "no hostile call opened a sheet, a panel or a window"
+    );
+
+    // A dry run: a report, nothing written anywhere under the home.
+    let before = listing();
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.export_dawproject", "params": {"dry_run": true}, "window": w}),
+    );
+    assert!(r["report"]["summary"].is_string(), "{r}");
+    assert_eq!(r["written"], json!([]), "{r}");
+    let new: Vec<_> = listing()
+        .into_iter()
+        .filter(|p| !before.contains(p))
+        .filter(|p| {
+            p.extension()
+                .is_some_and(|e| e == "dawproject" || e == "partial")
+        })
+        .collect();
+    assert!(new.is_empty(), "the dry run wrote {new:?}");
+    assert!(!file.exists());
+
+    // The file: a ZIP.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.export_dawproject", "params": {"path": file}, "window": w}),
+    );
+    let summary = r["report"]["summary"].as_str().unwrap_or_default();
+    assert!(summary.starts_with("Exported"), "{r}");
+    let bytes = std::fs::read(&file).unwrap();
+    assert_eq!(&bytes[..4], b"PK\x03\x04");
+    assert_eq!(
+        window_numbers(&mut app),
+        windows,
+        "the export opened nothing"
+    );
+
+    // Again without `replace`: refused, naming the file, which is kept.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.export_dawproject", "params": {"path": file}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::Failed, "{e:?}");
+    assert!(
+        e.message.contains("demo.dawproject"),
+        "names the file: {e:?}"
+    );
+    assert_eq!(std::fs::read(&file).unwrap(), bytes, "the old file is kept");
+
+    // Back in as a new project: its window, the demo's tracks and the note.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.import_dawproject", "params": {"path": file, "mode": "new"}, "window": w}),
+    );
+    assert!(r["doc"].is_string() && r["doc"] != demo["doc"], "{r}");
+    assert!(r["window"].is_i64(), "the new project's window: {r}");
+    let imported = r["report"].clone();
+    assert!(
+        imported
+            .to_string()
+            .contains("This file came from a VizDAW project"),
+        "{imported}"
+    );
+    let after = window_numbers(&mut app);
+    assert_eq!(after.len(), windows.len() + 1, "{after:?}");
+    assert!(
+        after
+            .iter()
+            .any(|(n, k)| *n == r["window"] && k == "document"),
+        "{after:?}"
+    );
+    let made = app.call(
+        "state.get",
+        json!({"target": "document", "window": r["window"]}),
+    );
+    assert_eq!(made["lanes"].as_array().unwrap().len(), tracks, "{made}");
+
+    // The new window's report is the import's.
+    let again = app.call(
+        "command.run",
+        json!({"id": "file.interchange_report", "window": r["window"]}),
+    );
+    assert_eq!(again["report"], imported, "{again}");
+    app.quit();
+}
+
+/// Ported from `aaf_round_trip_over_the_channel`:
+/// README 300–309 through the channel (plan 6f Task 9): hostile calls to
+/// both AAF commands are refused and open nothing; the export writes the
+/// "<song> AAF" folder; the import makes a new project with the demo's
+/// audio tracks and the note that the file came from VizDAW, with no
+/// internal error. Only the new project's window appears.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_aaf_round_trip_over_the_channel() {
+    use core_control::ErrorCode;
+    let tmp = temp_home();
+    let mut app = App::start(tmp.path(), false);
+    let home = app.launched.home.clone();
+    let demo = app.call("command.run", json!({"id": "file.create_demo_audio"}));
+    let w = demo["window"].clone();
+    let audio = |d: &Value| {
+        d["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|l| l["kind"] == "audio")
+            .count()
+    };
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let tracks = audio(&doc);
+    assert!(tracks > 0, "the demo has an audio track: {doc}");
+    let windows = window_numbers(&mut app);
+    let out = home.join("aaf-out");
+    std::fs::create_dir(&out).unwrap();
+
+    // Hostile calls: no `path` needs the Save dialog; a relative one is
+    // refused; neither opens anything.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.export_aaf", "params": {}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::DialogRequired, "{e:?}");
+    assert!(e.message.contains("Save"), "{e:?}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.export_aaf", "params": {"path": "aaf-out"}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::InvalidParams, "a relative path: {e:?}");
+    assert_eq!(
+        window_numbers(&mut app),
+        windows,
+        "no hostile call opened a sheet, a panel or a window"
+    );
+
+    // The export: a folder with the AAF.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.export_aaf", "params": {"path": out}, "window": w}),
+    );
+    assert!(r["report"]["summary"].is_string(), "{r}");
+    let folder = PathBuf::from(r["written"][0].as_str().unwrap());
+    let aaf = std::fs::read_dir(&folder)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|e| e == "aaf"))
+        .unwrap_or_else(|| panic!("no .aaf in {folder:?}: {r}"));
+    assert!(aaf.is_file(), "{aaf:?}");
+    assert_eq!(
+        window_numbers(&mut app),
+        windows,
+        "the export opened nothing"
+    );
+
+    // Back in as a new project: its window, no internal error, the note.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.import_aaf", "params": {"path": aaf, "new_project": true}, "window": w}),
+    );
+    assert!(r["doc"].is_string() && r["doc"] != demo["doc"], "{r}");
+    assert!(r["window"].is_i64(), "the new project's window: {r}");
+    let report = r["report"].to_string();
+    assert!(
+        report.contains("This file came from VizDAW; AAF files open as new projects"),
+        "{report}"
+    );
+    assert!(!report.contains("internal"), "{report}");
+    let after = window_numbers(&mut app);
+    assert_eq!(after.len(), windows.len() + 1, "{after:?}");
+    let made = app.call(
+        "state.get",
+        json!({"target": "document", "window": r["window"]}),
+    );
+    assert_eq!(audio(&made), tracks, "{made}");
+    app.quit();
+}
+
+/// Ported from `dawproject_merge_over_the_channel`:
+/// README 291–299 through the channel (plan 6e Task 11): a file from
+/// VizDAW without `mode` is `dialog_required` "Return"; hostile merge calls
+/// are refused and open nothing; a preview and a merge of the project's own
+/// unchanged export find nothing to merge, add no undo step and open no
+/// window; `file.interchange_report` gives the merge's report; and 6d's
+/// path (`mode: "new"`) still makes a new project.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_dawproject_merge_over_the_channel() {
+    use core_control::ErrorCode;
+    const NOTHING: &str = "Nothing to merge: the file matches the project.";
+    let tmp = temp_home();
+    let mut app = App::start(tmp.path(), false);
+    let home = app.launched.home.clone();
+    let demo = app.call("command.run", json!({"id": "file.create_demo"}));
+    let w = demo["window"].clone();
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let tracks = doc["lanes"].as_array().unwrap().len();
+    assert!(tracks > 0, "{doc}");
+    let project = home.join("demo.vizdaw");
+    app.call(
+        "command.run",
+        json!({"id": "file.save_as", "params": {"path": project}, "window": w}),
+    );
+    assert!(project.join("project.json").is_file());
+    let file = home.join("demo.dawproject");
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.export_dawproject", "params": {"path": file}, "window": w}),
+    );
+    let summary = r["report"]["summary"].as_str().unwrap_or_default();
+    assert!(summary.starts_with("Exported"), "{r}");
+    let windows = window_numbers(&mut app);
+
+    // A file from VizDAW needs `mode`; hostile merge calls are refused.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.import_dawproject", "params": {"path": file}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::DialogRequired, "{e:?}");
+    assert!(e.message.contains("Return"), "{e:?}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.import_dawproject",
+               "params": {"path": file, "mode": "merge", "snapshot": "x"}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{e:?}");
+    assert!(e.message.contains("snapshot"), "names `snapshot`: {e:?}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "file.import_dawproject",
+               "params": {"path": file, "mode": "merge", "project": project}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::InvalidParams, "already open: {e:?}");
+    assert_eq!(
+        window_numbers(&mut app),
+        windows,
+        "no refused call opened a sheet, a panel or a window"
+    );
+
+    // A preview: the file matches the project; nothing changes.
+    let before = app.call("state.get", json!({"target": "document", "window": w}));
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.import_dawproject",
+               "params": {"path": file, "mode": "merge", "preview": true}, "window": w}),
+    );
+    assert_eq!(r["report"]["summary"], NOTHING, "{r}");
+    let after = app.call("state.get", json!({"target": "document", "window": w}));
+    assert_eq!(after["undo"], before["undo"], "the preview added no step");
+
+    // The merge: the same summary, no undo step, no window.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.import_dawproject",
+               "params": {"path": file, "mode": "merge"}, "window": w}),
+    );
+    assert_eq!(r["report"]["summary"], NOTHING, "{r}");
+    let merged = r["report"].clone();
+    let after = app.call("state.get", json!({"target": "document", "window": w}));
+    assert_eq!(
+        after["undo"], before["undo"],
+        "nothing to merge adds no step"
+    );
+    assert_eq!(
+        window_numbers(&mut app),
+        windows,
+        "the merge opened nothing"
+    );
+
+    // Its report is the window's last.
+    let again = app.call(
+        "command.run",
+        json!({"id": "file.interchange_report", "window": w}),
+    );
+    assert_eq!(again["report"], merged, "{again}");
+
+    // 6d's path still works: a new project with the demo's tracks.
+    let r = app.call(
+        "command.run",
+        json!({"id": "file.import_dawproject", "params": {"path": file, "mode": "new"}, "window": w}),
+    );
+    assert!(r["window"].is_i64(), "the new project's window: {r}");
+    let now = window_numbers(&mut app);
+    assert_eq!(now.len(), windows.len() + 1, "{now:?}");
+    let made = app.call(
+        "state.get",
+        json!({"target": "document", "window": r["window"]}),
+    );
+    assert_eq!(made["lanes"].as_array().unwrap().len(), tracks, "{made}");
+    app.quit();
+}

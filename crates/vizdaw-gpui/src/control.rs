@@ -904,7 +904,8 @@ fn mixer_state(target: StateTarget, doc: DocId, cx: &App) -> Result<Value, Contr
 
 /// `state.get media` (the pool, read fresh; none when it cannot be read)
 /// and `state.get project` (the format and what does not match it; a
-/// refused read is the call's `busy` or `failed`).
+/// refused read is no state at all, Swift's "No document is open in that
+/// window.").
 fn file_state(target: StateTarget, doc: DocId, cx: &App) -> Result<Value, ControlError> {
     let s = AppState::global(cx);
     let s = s.read(cx);
@@ -917,9 +918,9 @@ fn file_state(target: StateTarget, doc: DocId, cx: &App) -> Result<Value, Contro
         },
         _ => ControlResult::Project {
             doc: doc_id(doc),
-            info: session
-                .project_info()
-                .map_err(|e| vizdaw_app::mixer::commands::thrown(&e, "Project Unavailable"))?,
+            info: session.project_info().map_err(|_| {
+                ControlError::new(ErrorCode::NoDocument, "No document is open in that window.")
+            })?,
         },
     };
     Ok(result_json(&result))

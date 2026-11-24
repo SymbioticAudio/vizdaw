@@ -1013,3 +1013,43 @@ fn the_file_commands_are_no_longer_unavailable(cx: &mut TestAppContext) {
     assert!(e.message.contains("slice 7a"), "{}", e.message);
     assert!(e.message.contains("file.import_*"), "{}", e.message);
 }
+
+#[gpui::test]
+fn state_get_project_on_a_refused_read_answers_no_document(cx: &mut TestAppContext) {
+    // Swift `ControlStates.state` gives nil for a refused read: the
+    // channel's "No document is open in that window." (no title made up).
+    let s = setup(cx);
+    s.fake.set_call_error(
+        "project_info",
+        Some(VizError::Io {
+            message: "the project is gone".into(),
+        }),
+    );
+    let e = call(&s, cx, "state.get", json!({"target": "project"})).unwrap_err();
+    assert_eq!(e.code, ErrorCode::NoDocument);
+    assert_eq!(e.message, "No document is open in that window.");
+}
+
+#[gpui::test]
+fn a_made_project_whose_window_fails_answers_the_failure(cx: &mut TestAppContext) {
+    let s = setup(cx);
+    s.fake.set_midi_file_info("/tmp/Song.mid", midi_info());
+    let made = next_project(&s.core);
+    made.script_job(JobScript::done().report(report("Imported 2 tracks")));
+    // The window's transport cannot be read: the window fails to open.
+    made.set_transport_error(Some(VizError::Io {
+        message: "no transport".into(),
+    }));
+    let before = window_numbers(&s, cx);
+    let e = run(
+        &s,
+        cx,
+        "file.import_midi",
+        json!({"path": "/tmp/Song.mid", "new_project": true}),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Failed);
+    assert!(e.message.contains("no transport"), "{e:?}");
+    assert_eq!(window_numbers(&s, cx), before);
+    assert_eq!(documents(cx), 1, "the made project is not kept hidden");
+}

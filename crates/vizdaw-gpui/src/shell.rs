@@ -38,6 +38,7 @@ use vizdaw_ffi::snapshot::LaneRow;
 
 use crate::app_state::{AppState, WindowKind};
 use crate::arrangement::{self, Arrangement, ArrangementState, ToolbarState};
+use crate::banners;
 use crate::channel_strip_pane;
 use crate::controls::MixerRef;
 use crate::detail_pane::{self, DetailPaneState};
@@ -1676,6 +1677,7 @@ impl Render for DocumentWindow {
             list_after,
             listed,
             rolled,
+            banners,
         ) = {
             let s = self.app.read(cx);
             let d = s.store.document(doc);
@@ -1717,6 +1719,7 @@ impl Render for DocumentWindow {
                 // The roll's axes first: the notes drawn follow them.
                 d.filter(|d| self.piano_roll.prepare(d))
                     .and_then(|d| RollState::of(d, s.transport(doc), Instant::now())),
+                d.map(DocumentModel::banners).unwrap_or_default(),
             )
         };
         match &rolled {
@@ -1831,6 +1834,8 @@ impl Render for DocumentWindow {
             window,
             cx,
         );
+        // After the regions, so their paths stay put as bars come and go.
+        let bars = banners::render(banners, &mut root, cx);
         self.root(cx)
             .children(menu_bar)
             .when_some(alert, |d, alert| {
@@ -1847,6 +1852,7 @@ impl Render for DocumentWindow {
                     cx,
                 ))
             })
+            .children(bars)
             .child(regions)
             .when_some(status, |d, status| {
                 d.child(Self::status_line(status, &mut root.container(), cx))
