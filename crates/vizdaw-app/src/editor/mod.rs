@@ -13,7 +13,7 @@ pub use detail::{DetailEditorKind, DetailState, EditorTarget, ListFilter};
 pub use gesture::{Gesture, LANE_REMOVED};
 pub use layout::{
     BlockRuleSetting, EditorLayout, LightMode, MainView, PaneSetup, PaneSide, PaneState, PaneView,
-    ViewLayouts, off_list,
+    TransportMarks, ViewLayouts, off_list,
 };
 pub use snap::{Division, Snap};
 

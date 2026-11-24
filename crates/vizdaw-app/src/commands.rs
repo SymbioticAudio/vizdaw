@@ -19,6 +19,7 @@ use crate::mixer::commands::{SELECTION_FILLED, SUSPEND, mode_of, suspend};
 use crate::mixer::strips_text;
 use crate::prefs::Prefs;
 use crate::transport_bar::TransportLayout;
+use crate::transport_fields::TransportField;
 
 /// The registry IDs `run` handles.
 pub const DOCUMENT_COMMANDS: &[&str] = &[
@@ -99,8 +100,9 @@ pub const MIXER_COMMANDS: &[&str] = &[
 const NO_DETAIL: &str = "No detail editor is open.";
 const NO_LIST: &str = "Insert Event needs a list editor that has the keyboard.";
 
-/// The registry IDs of the transport commands `run` handles. Recording,
-/// the click, locators and the punch and edit-out fields come later.
+/// The registry IDs of the transport commands `run` handles: the keys,
+/// the record modes, the field keys and the locators. Recording, the
+/// click and arming come later.
 pub const TRANSPORT_COMMANDS: &[&str] = &[
     "transport.play_stop",
     "transport.stop",
@@ -117,6 +119,39 @@ pub const TRANSPORT_COMMANDS: &[&str] = &[
     "transport.loop",
     "transport.go_position",
     "transport.go_edit_in",
+    "transport.overdub",
+    "transport.punch",
+    "transport.go_punch",
+    "locator.go_0",
+    "locator.set_0",
+    "locator.clear_0",
+    "locator.go_1",
+    "locator.set_1",
+    "locator.clear_1",
+    "locator.go_2",
+    "locator.set_2",
+    "locator.clear_2",
+    "locator.go_3",
+    "locator.set_3",
+    "locator.clear_3",
+    "locator.go_4",
+    "locator.set_4",
+    "locator.clear_4",
+    "locator.go_5",
+    "locator.set_5",
+    "locator.clear_5",
+    "locator.go_6",
+    "locator.set_6",
+    "locator.clear_6",
+    "locator.go_7",
+    "locator.set_7",
+    "locator.clear_7",
+    "locator.go_8",
+    "locator.set_8",
+    "locator.clear_8",
+    "locator.go_9",
+    "locator.set_9",
+    "locator.clear_9",
 ];
 
 /// The registry IDs `run_app` handles: app-wide, so they need no document.
@@ -160,6 +195,26 @@ pub struct Ran {
 pub enum FieldFocus {
     Position,
     EditIn,
+    /// Go to Punch Fields: Punch In.
+    Punch,
+}
+
+impl FieldFocus {
+    /// The field that takes the keyboard.
+    pub fn field(self) -> TransportField {
+        match self {
+            FieldFocus::Position => TransportField::Position,
+            FieldFocus::EditIn => TransportField::EditIn,
+            FieldFocus::Punch => TransportField::PunchIn,
+        }
+    }
+}
+
+/// A locator command's operation (`go`, `set`, `clear`) and number.
+pub fn locator(id: &str) -> Option<(&str, usize)> {
+    let rest = id.strip_prefix("locator.")?;
+    let (op, n) = rest.rsplit_once('_')?;
+    Some((op, n.parse().ok()?))
 }
 
 /// Runs an app-wide command (`APP_COMMANDS`) with the channel's `args`
@@ -391,6 +446,8 @@ pub(crate) fn ran(doc: &DocumentModel) -> Ran {
 pub fn is_on(id: &str, doc: &DocumentModel) -> bool {
     match id {
         "editors.snap" => doc.layout().snap.enabled,
+        "transport.overdub" => doc.layout().transport.overdub,
+        "transport.punch" => doc.layout().transport.punch,
         SUSPEND => automation_suspended(),
         _ => crate::view::is_on(id, doc),
     }
@@ -653,7 +710,10 @@ fn transport_enabled(id: &str, doc: &DocumentModel) -> bool {
         "transport.play_stop" | "transport.play" => seq || doc.is_playing(),
         "transport.play_from_edit_in" => seq && doc.selection().time_range.is_some(),
         "transport.return_to_start" => seq && doc.return_key_enabled(),
-        "transport.go_position" | "transport.go_edit_in" => true,
+        "transport.go_position" | "transport.go_edit_in" | "transport.go_punch" => true,
+        "transport.overdub" | "transport.punch" => true,
+        // Locators need no sequence, as in `run`.
+        _ if locator(id).is_some() => true,
         _ => seq,
     }
 }
@@ -731,21 +791,73 @@ fn run_transport(
             }
             doc.return_to_start();
         }
-        "transport.go_position" | "transport.go_edit_in" => {
+        "transport.go_position" | "transport.go_edit_in" | "transport.go_punch" => {
             if let Some(e) = text_gate(doc) {
                 return Err(e);
             }
             let mut ran = ran(doc);
-            ran.focus = Some(if id == "transport.go_position" {
-                FieldFocus::Position
-            } else {
-                FieldFocus::EditIn
+            ran.focus = Some(match id {
+                "transport.go_position" => FieldFocus::Position,
+                "transport.go_edit_in" => FieldFocus::EditIn,
+                _ => FieldFocus::Punch,
             });
             return Ok(ran);
+        }
+        "transport.overdub" | "transport.punch" => {
+            if let Some(e) = text_gate(doc) {
+                return Err(e);
+            }
+            // The layout's switch (saved in `ui.json`): no undo step.
+            let overdub = id == "transport.overdub";
+            doc.update_layout(|l| {
+                let flag = if overdub {
+                    &mut l.transport.overdub
+                } else {
+                    &mut l.transport.punch
+                };
+                *flag = on.unwrap_or(!*flag);
+            });
+        }
+        _ if locator(id).is_some() => {
+            if let Some(e) = text_gate(doc) {
+                return Err(e);
+            }
+            if let Some((op, n)) = locator(id) {
+                run_locator(op, n, doc)?;
+            }
         }
         _ => run_key_command(id, doc)?,
     }
     Ok(ran(doc))
+}
+
+/// Go to, set (at the transport's tick, read first) or clear locator
+/// `n`: the layout's marks, no undo step and no sequence needed.
+fn run_locator(op: &str, n: usize, doc: &mut DocumentModel) -> Result<(), ControlError> {
+    let mut marks = doc.layout().transport.clone();
+    match op {
+        "go" => {
+            let Some(t) = marks.locator(n) else {
+                return Err(unavailable(&format!("Locator {n} is not set.")));
+            };
+            return doc.move_to(t).map_err(|e| from_viz(&e));
+        }
+        "set" => {
+            let _ = doc.poll_transport();
+            if !marks.set_locator(n, Some(doc.last_transport().tick)) {
+                return Err(failed(format!(
+                    "Locator {n} cannot be set at this position."
+                )));
+            }
+        }
+        _ => {
+            if !marks.set_locator(n, None) {
+                return Err(failed(format!("There is no locator {n}.")));
+            }
+        }
+    }
+    doc.update_layout(|l| l.transport = marks);
+    Ok(())
 }
 
 /// The commands that wait for the text fields and then act on the session.

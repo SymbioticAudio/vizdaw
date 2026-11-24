@@ -31,7 +31,7 @@ use gpui::{
     Window, WindowBounds, WindowHandle, WindowOptions, canvas, div, px, rgb, size,
 };
 use vizdaw_app::alerts::{AlertItem, error_message};
-use vizdaw_app::commands::{self, FieldFocus};
+use vizdaw_app::commands;
 use vizdaw_app::editor::{MainView, PaneSide, PaneView, ViewLayouts};
 use vizdaw_app::mixer::MixerPlacement;
 use vizdaw_app::transport::Shuttle;
@@ -565,14 +565,8 @@ impl DocumentWindow {
                         let _ = DocumentWindow::open_mixer(&app, doc, cx);
                     });
                 }
-                match ran.focus {
-                    Some(FieldFocus::Position) => {
-                        self.focus_field(TransportField::Position, window, cx)
-                    }
-                    Some(FieldFocus::EditIn) => {
-                        self.focus_field(TransportField::EditIn, window, cx)
-                    }
-                    None => {}
+                if let Some(focus) = ran.focus {
+                    self.focus_field(focus.field(), window, cx);
                 }
             }
             _ => {}

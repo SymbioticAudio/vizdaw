@@ -473,7 +473,7 @@ fn the_text_editing_owners_gate_the_keys() {
 
 #[test]
 fn every_transport_command_is_in_the_registry() {
-    assert_eq!(TRANSPORT_COMMANDS.len(), 15);
+    assert_eq!(TRANSPORT_COMMANDS.len(), 48);
     for id in TRANSPORT_COMMANDS {
         assert!(registry::find(id).is_some(), "{id}");
     }
@@ -499,4 +499,121 @@ fn transport_commands_refuse_extra_params() {
         );
     }
     assert!(f.calls().is_empty(), "{:?}", f.calls());
+}
+
+fn on(value: bool) -> Vec<(String, ArgValue)> {
+    vec![("on".to_string(), ArgValue::Flag(value))]
+}
+
+#[test]
+fn modes_toggle_or_take_their_flag() {
+    use vizdaw_app::commands::is_on;
+    let (_f, mut m) = demo();
+    assert!(m.layout().transport.overdub, "a new document overdubs");
+    assert!(!m.layout().transport.punch);
+    run("transport.overdub", &on(false), &mut m).unwrap();
+    assert!(!m.layout().transport.overdub);
+    for id in ["transport.overdub", "transport.punch"] {
+        let value = |m: &DocumentModel| {
+            if id == "transport.overdub" {
+                m.layout().transport.overdub
+            } else {
+                m.layout().transport.punch
+            }
+        };
+        run(id, &on(true), &mut m).unwrap();
+        assert!(value(&m) && is_on(id, &m), "{id} on");
+        run(id, &on(true), &mut m).unwrap();
+        assert!(value(&m), "{id} stays on");
+        go(id, &mut m).unwrap();
+        assert!(!value(&m) && !is_on(id, &m), "{id} toggled off");
+        assert!(enabled(id, &m));
+    }
+    assert!(!m.can_undo(), "the modes are no undo step");
+    let bad = vec![("on".to_string(), ArgValue::Int(1))];
+    assert_eq!(
+        failure(run("transport.punch", &bad, &mut m)).code,
+        ErrorCode::InvalidParams
+    );
+}
+
+#[test]
+fn go_to_punch_fields_asks_for_punch_in() {
+    let (_f, mut m) = demo();
+    let ran = go("transport.go_punch", &mut m).unwrap();
+    assert_eq!(ran.focus, Some(FieldFocus::Punch));
+    assert!(enabled("transport.go_punch", &m));
+    let ran = perform_from_menu("transport.go_punch", &mut m).unwrap();
+    assert_eq!(ran.focus, Some(FieldFocus::Punch));
+}
+
+#[test]
+fn locators_are_set_jumped_to_and_cleared() {
+    use vizdaw_app::commands::locator;
+    let (f, mut m) = demo();
+    is(
+        &failure(go("locator.go_3", &mut m)),
+        ErrorCode::Unavailable,
+        "Locator 3 is not set.",
+    );
+    f.set_transport(|t| t.tick = 12_345);
+    go("locator.set_3", &mut m).unwrap();
+    assert_eq!(m.layout().transport.locator(3), Some(12_345));
+    f.set_transport(|t| t.tick = 0);
+    go("locator.go_3", &mut m).unwrap();
+    assert_eq!(tick(&f), 12_345);
+    go("locator.clear_3", &mut m).unwrap();
+    assert_eq!(m.layout().transport.locator(3), None);
+    assert_eq!(locator("locator.clear_9"), Some(("clear", 9)));
+    assert_eq!(locator("locator.go_0"), Some(("go", 0)));
+    assert_eq!(locator("transport.stop"), None);
+    assert!(!m.can_undo(), "locators are no undo step");
+    // The menu's refusal shows in the status line.
+    perform_from_menu("locator.go_7", &mut m).unwrap_err();
+    assert_eq!(m.status(), Some("Locator 7 is not set."));
+}
+
+#[test]
+fn locator_refusals_menus_and_stop_match_their_run() {
+    let (f, mut m) = demo();
+    f.set_transport(|t| t.tick = 1 << 41);
+    is(
+        &failure(go("locator.set_2", &mut m)),
+        ErrorCode::Failed,
+        "Locator 2 cannot be set at this position.",
+    );
+    assert_eq!(m.layout().transport.locator(2), None);
+    let mut e = DocumentModel::new(Arc::new(FakeSession::new(vec![]))).unwrap();
+    assert_eq!(e.selected_seq(), None);
+    for id in ["locator.set_1", "locator.clear_1", "locator.go_1"] {
+        assert!(enabled(id, &e), "{id} runs without a sequence");
+    }
+    go("locator.set_1", &mut e).unwrap();
+    assert_eq!(e.layout().transport.locator(1), Some(0));
+    f.set_transport(|t| t.tick = 0);
+    m.poll_transport().unwrap();
+    f.set_transport(|t| t.playing = true);
+    go("transport.stop", &mut m).expect("not the stale cache");
+    assert!(!playing(&f));
+}
+
+#[test]
+fn the_new_bare_key_commands_wait_for_text_fields() {
+    let (_f, mut m) = demo();
+    m.begin_text_editing("x");
+    for id in [
+        "transport.overdub",
+        "transport.punch",
+        "transport.go_punch",
+        "locator.set_3",
+        "locator.go_1",
+        "locator.clear_1",
+    ] {
+        is(&failure(go(id, &mut m)), ErrorCode::Unavailable, TEXT);
+        assert!(!enabled(id, &m), "{id}");
+    }
+    assert!(m.layout().transport.overdub && !m.layout().transport.punch);
+    assert_eq!(m.layout().transport.locator(3), None);
+    m.end_text_editing("x");
+    go("locator.set_3", &mut m).unwrap();
 }
