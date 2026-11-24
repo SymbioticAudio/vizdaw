@@ -1131,6 +1131,17 @@ impl PluginHost {
                 live.params.send_held(k, v);
             }
         }
+        // A base value queued when an overlay entry went away, which the
+        // last processor never got: the plug-in still holds the removed
+        // value, so it is sent again (and counted until delivered).
+        let back: Vec<(ParamId, f64)> = lost
+            .iter()
+            .filter(|p| !live.sent.contains_key(p))
+            .filter_map(|p| live.base.get(p).map(|v| (*p, *v)))
+            .collect();
+        for (k, v) in back {
+            live.params.send(k, v);
+        }
         Ok(())
     }
 
@@ -1466,13 +1477,13 @@ impl PluginHost {
         };
         // Asked before the state is taken: what it will not hold. That is
         // what the instance says (a VST3's values before its first block)
-        // and what the host queued to the running processor that no
-        // processed block has carried (the engine stopped, no device, a
-        // quick save).
+        // and what the host queued to a processor that no processed block
+        // has carried (the engine stopped, no device, a quick save). Also
+        // while inactive: an instance parked after a refused load still
+        // has the queue its last processor never drained; while inactive,
+        // values go through `set_params` and never touch it.
         let mut unsaved: BTreeSet<ParamId> = live.inst.unsaved_params().into_iter().collect();
-        if live.active {
-            unsaved.extend(live.params.undelivered());
-        }
+        unsaved.extend(live.params.undelivered());
         let bytes = live.inst.save_state()?;
         let overlay = history.doc().plugin_slot(id).map(|s| &s.params);
         let mut keep: BTreeMap<ParamId, f64> = automated

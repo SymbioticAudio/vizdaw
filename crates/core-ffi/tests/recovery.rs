@@ -145,9 +145,8 @@ fn saving_captures_plugin_state() {
         .plugin_slot(core_model::ids::PluginInstanceId(id))
         .unwrap();
     assert!(slot.state.is_some(), "captured on save");
-    // The overlay goes into the state once a processed block has given
-    // the plugin the value; a save before that keeps it in the overlay
-    // (host track H1 Task 6), so the song holds it either way.
+    // Folded into the state once a block gave the plug-in the value, else
+    // kept in the overlay (host track H1 Task 6).
     let kept = slot.params.get(&core_model::mixer::ParamId(0));
     assert!(
         slot.params.is_empty() || kept == Some(&0.5),
@@ -155,6 +154,11 @@ fn saving_captures_plugin_state() {
         slot.params
     );
     assert!(!s.snapshot().unwrap().dirty);
+    drop(s);
+    // The outcome: the saved song opens with the value.
+    let again = Session::open(path.clone()).unwrap();
+    idle_until(&again, |s| status(s) == SlotStatus::Live);
+    assert_eq!(again.debug_plugin_param(id, 0).unwrap(), 0.5);
 }
 
 #[test]
