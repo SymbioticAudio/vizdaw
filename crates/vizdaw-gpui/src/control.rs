@@ -630,16 +630,10 @@ fn run_command(
         }
         _ if TRANSPORT_COMMANDS.contains(&id) => return run_transport(id, args, entry, cx),
         // A key (`ui.key`) runs a File command without arguments: it asks
-        // for its dialog, which is the answer.
-        _ if files::DOC_IDS.contains(&id) => {
-            return match files::run(id, args, entry, cx) {
-                Handled::Reply(r) => r,
-                _ => Err(ControlError::new(
-                    ErrorCode::Unavailable,
-                    format!("{id} answers when it ends: run it with command.run"),
-                )),
-            };
-        }
+        // for its dialog, which is the answer. One that would start a job
+        // or a background read is refused before it starts: nobody waits
+        // for its reply.
+        _ if files::DOC_IDS.contains(&id) => return files::run_now(id, args, entry, cx),
         "file.close" => {
             // Never asks (Swift `control_close_never_prompts`): the window
             // closes without its save prompt and the document goes, saved

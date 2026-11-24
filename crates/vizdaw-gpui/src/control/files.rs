@@ -424,6 +424,26 @@ pub(super) fn run(
     }
 }
 
+/// Runs document File command `id` for a key (`ui.key`), where no caller
+/// waits for a later reply: a command that would start a job or a
+/// background read is refused before anything starts (it answers when it
+/// ends: run it with `command.run`); one answered now (a dialog asked for,
+/// the report) answers.
+pub(super) fn run_now(
+    id: &str,
+    args: &[(String, ArgValue)],
+    entry: &WindowEntry,
+    cx: &mut App,
+) -> Result<Value, ControlError> {
+    match request(id, args, entry.doc, cx)? {
+        Ask::Report => report(id, entry.doc, cx),
+        Ask::Job(_) | Ask::Later(..) => Err(ControlError::new(
+            ErrorCode::Unavailable,
+            format!("{id} answers when it ends: run it with command.run"),
+        )),
+    }
+}
+
 /// What a document File command asks for once its arguments are read.
 enum Ask {
     Job(FileJob),

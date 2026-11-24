@@ -2241,10 +2241,22 @@ fn gpui_audio_import_plays_and_reports_media() {
         (json!(44_100), json!("16")),
         "{p}"
     );
-    let r = app.call(
-        "command.run",
-        json!({"id": "media.import", "params": {"path": src}, "window": window}),
-    );
+    let import = json!({"id": "media.import", "params": {"path": src}, "window": window});
+    if cfg!(target_os = "linux") {
+        // Linux gap, answered by host track H4 (Linux audio import adds a
+        // resampler): the 48 kHz file cannot go into a 44.1 kHz project, so
+        // the import is refused and every later step (which needs it) is
+        // skipped. When H4 lands this assertion fails and forces the update.
+        let e = app.call_err("command.run", import);
+        assert_eq!(e.code, core_control::ErrorCode::Failed, "{e:?}");
+        assert!(
+            e.message.contains("resampling needs the system importer"),
+            "{e:?}"
+        );
+        app.quit();
+        return;
+    }
+    let r = app.call("command.run", import);
     assert_eq!(r["undo"], "Import Audio", "{r}");
     let m = app.call("state.get", json!({"target": "media", "window": window}));
     let item = &m["items"][0];
@@ -2648,64 +2660,82 @@ fn gpui_exports_for_another_daw_over_the_channel() {
     // And the stems: one track each.
     let doc = app.call("state.get", json!({"target": "document", "window": w}));
     let seq = doc["selected_seq"].as_u64().unwrap();
-    for (k, stem) in stems.iter().enumerate() {
-        let before = lanes(&mut app);
-        let r = app.call(
+    if cfg!(target_os = "linux") {
+        // Linux gap, answered by host track H4 (Linux audio import adds a
+        // resampler): the stem needs resampling into the demo's rate, so
+        // the import is refused and the steps that need it (the stems back
+        // in, the later exports and their undo labels) are skipped. When H4
+        // lands this assertion fails and forces the update.
+        let e = app.call_err(
+            "command.run",
+            json!({"id": "media.import", "params": {"path": stems[0], "seq": seq, "tick": 0}, "window": w}),
+        );
+        assert_eq!(e.code, ErrorCode::Failed, "{e:?}");
+        assert!(
+            e.message.contains("resampling needs the system importer"),
+            "{e:?}"
+        );
+        assert_eq!(lanes(&mut app), before + tracks, "nothing was added");
+    } else {
+        for (k, stem) in stems.iter().enumerate() {
+            let before = lanes(&mut app);
+            let r = app.call(
             "command.run",
             json!({"id": "media.import", "params": {"path": stem, "seq": seq, "tick": 0}, "window": w}),
         );
-        assert_eq!(r["undo"], "Import Audio", "stem {k}: {r}");
-        assert_eq!(lanes(&mut app), before + 1, "stem {k}");
-    }
+            assert_eq!(r["undo"], "Import Audio", "stem {k}: {r}");
+            assert_eq!(lanes(&mut app), before + 1, "stem {k}");
+        }
 
-    // Again without adding: "… 2", and the undo label stays that of the
-    // last edit.
-    let r = app.call(
-        "command.run",
-        json!({"id": "file.export_for_daw", "params": {"path": tmp}, "window": w}),
-    );
-    assert_eq!(r["undo"], "Import Audio", "no edit without Add: {r}");
-    assert_eq!(
-        PathBuf::from(r["written"][0].as_str().unwrap()),
-        tmp.join(format!("{name} 2")),
-        "{r}"
-    );
+        // Again without adding: "… 2", and the undo label stays that of the
+        // last edit.
+        let r = app.call(
+            "command.run",
+            json!({"id": "file.export_for_daw", "params": {"path": tmp}, "window": w}),
+        );
+        assert_eq!(r["undo"], "Import Audio", "no edit without Add: {r}");
+        assert_eq!(
+            PathBuf::from(r["written"][0].as_str().unwrap()),
+            tmp.join(format!("{name} 2")),
+            "{r}"
+        );
 
-    // Again, adding the stems: "… 3", the first folder untouched, one
-    // track per stem in one undo step.
-    let first: Vec<PathBuf> = {
-        let mut v = Vec::new();
-        walk(&folder, &mut v);
-        v.sort();
-        v
-    };
-    let before = lanes(&mut app);
-    let r = app.call(
+        // Again, adding the stems: "… 3", the first folder untouched, one
+        // track per stem in one undo step.
+        let first: Vec<PathBuf> = {
+            let mut v = Vec::new();
+            walk(&folder, &mut v);
+            v.sort();
+            v
+        };
+        let before = lanes(&mut app);
+        let r = app.call(
         "command.run",
         json!({"id": "file.export_for_daw", "params": {"path": tmp, "add_to_project": true}, "window": w}),
     );
-    assert_eq!(r["undo"], "Add Stems", "{r}");
-    let second = PathBuf::from(r["written"][0].as_str().unwrap());
-    assert_eq!(second, tmp.join(format!("{name} 3")), "{r}");
-    let added = wavs_in(&second.join("Audio")).len();
-    assert!(added > 0, "{r}");
-    assert_eq!(lanes(&mut app), before + added);
-    app.call("command.run", json!({"id": "edit.undo", "window": w}));
-    assert_eq!(
-        lanes(&mut app),
-        before,
-        "one Undo removes every added track"
-    );
-    let mut again = Vec::new();
-    walk(&folder, &mut again);
-    again.sort();
-    assert_eq!(again, first, "the first folder is untouched");
-    let exported = r["report"].clone();
-    let r = app.call(
-        "command.run",
-        json!({"id": "file.interchange_report", "window": w}),
-    );
-    assert_eq!(r["report"], exported, "{r}");
+        assert_eq!(r["undo"], "Add Stems", "{r}");
+        let second = PathBuf::from(r["written"][0].as_str().unwrap());
+        assert_eq!(second, tmp.join(format!("{name} 3")), "{r}");
+        let added = wavs_in(&second.join("Audio")).len();
+        assert!(added > 0, "{r}");
+        assert_eq!(lanes(&mut app), before + added);
+        app.call("command.run", json!({"id": "edit.undo", "window": w}));
+        assert_eq!(
+            lanes(&mut app),
+            before,
+            "one Undo removes every added track"
+        );
+        let mut again = Vec::new();
+        walk(&folder, &mut again);
+        again.sort();
+        assert_eq!(again, first, "the first folder is untouched");
+        let exported = r["report"].clone();
+        let r = app.call(
+            "command.run",
+            json!({"id": "file.interchange_report", "window": w}),
+        );
+        assert_eq!(r["report"], exported, "{r}");
+    }
 
     // Refusals: inside the demo's package, and no path.
     let pkg = home.join("Demo.vizdaw");

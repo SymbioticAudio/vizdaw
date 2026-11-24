@@ -33,6 +33,8 @@ struct FakeCalls {
     replies: RefCell<Vec<(u64, Result<Value, ControlError>)>>,
     extended: RefCell<Vec<(u64, Duration)>>,
     next: RefCell<u64>,
+    /// Calls whose client left.
+    left: RefCell<Vec<u64>>,
 }
 
 impl FakeCalls {
@@ -92,6 +94,10 @@ impl CallSource for FakeCalls {
     fn extend(&self, token: u64, by: Duration) -> bool {
         self.extended.borrow_mut().push((token, by));
         true
+    }
+
+    fn is_waiting(&self, token: u64) -> bool {
+        !self.left.borrow().contains(&token)
     }
 }
 
@@ -324,6 +330,122 @@ fn a_window_closed_mid_job_answers_once_and_drops_the_reply(cx: &mut TestAppCont
         pump(&s, cx);
     }
     assert_eq!(s.calls.replies_to(token).len(), 1);
+    let tick = cx.update(|cx| control::pump(&s.calls, cx));
+    assert_eq!(tick.deferred, 0);
+}
+
+#[gpui::test]
+fn a_client_that_left_mid_job_gets_no_reply(cx: &mut TestAppContext) {
+    let s = setup(cx);
+    s.fake.script_job(JobScript::done().steps(&[0.5, 0.9]));
+    let token = s.calls.push("command.run", json!({"id": "media.convert"}));
+    pump(&s, cx);
+    assert!(s.calls.replies_to(token).is_empty());
+    // The client goes: the entry is dropped, unanswered.
+    s.calls.left.borrow_mut().push(token);
+    let tick = cx.update(|cx| control::pump(&s.calls, cx));
+    assert_eq!(tick.deferred, 0);
+    // The job ends later: still no reply.
+    for _ in 0..5 {
+        pump(&s, cx);
+    }
+    assert!(s.calls.replies_to(token).is_empty());
+    assert_eq!(s.fake.jobs_started().len(), 1);
+}
+
+#[gpui::test]
+fn a_background_call_that_never_lands_expires_once(cx: &mut TestAppContext) {
+    let s = setup(cx);
+    let token = s.calls.push(
+        "command.run",
+        json!({"id": "file.export_midi", "params": {"dry_run": true}}),
+    );
+    // The pump alone, and the clock moved without running anything: the
+    // background read never runs.
+    let later = |by: u64| {
+        cx.dispatcher
+            .scheduler()
+            .clock()
+            .advance(Duration::from_secs(by))
+    };
+    cx.update(|cx| control::pump(&s.calls, cx));
+    later(599);
+    cx.update(|cx| control::pump(&s.calls, cx));
+    assert!(s.calls.replies_to(token).is_empty(), "not yet expired");
+    later(1);
+    let tick = cx.update(|cx| control::pump(&s.calls, cx));
+    assert_eq!(tick.deferred, 0);
+    let replies = s.calls.replies_to(token);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    let e = replies[0].clone().unwrap_err();
+    assert_eq!(e.code, ErrorCode::Timeout);
+    assert_eq!(e.message, "the call did not end in time");
+    // The read lands after: dropped, never a second reply.
+    for _ in 0..3 {
+        pump(&s, cx);
+    }
+    assert_eq!(s.calls.replies_to(token).len(), 1);
+}
+
+#[gpui::test]
+fn a_job_busy_until_the_deadline_answers_the_expiry_once(cx: &mut TestAppContext) {
+    let s = setup(cx);
+    s.fake.script_job(JobScript::done().steps(&[0.5]));
+    let token = s.calls.push("command.run", json!({"id": "media.convert"}));
+    pump(&s, cx);
+    s.fake.set_call_error(
+        "job",
+        Some(VizError::Busy {
+            message: "the session is busy".into(),
+        }),
+    );
+    // Busy: read again every tick, no reply.
+    for _ in 0..5 {
+        pump(&s, cx);
+    }
+    assert!(s.calls.replies_to(token).is_empty());
+    cx.executor().advance_clock(Duration::from_secs(599));
+    pump(&s, cx);
+    assert!(s.calls.replies_to(token).is_empty(), "not yet expired");
+    cx.executor().advance_clock(Duration::from_secs(1));
+    pump(&s, cx);
+    let id = s.fake.jobs_started()[0].id;
+    let replies = s.calls.replies_to(token);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    let e = replies[0].clone().unwrap_err();
+    assert_eq!(e.code, ErrorCode::Timeout);
+    assert_eq!(
+        e.message,
+        format!("job {id} is still running after 10 minutes; it was not cancelled")
+    );
+    // Readable again: never a second reply.
+    s.fake.set_call_error("job", None);
+    for _ in 0..3 {
+        pump(&s, cx);
+    }
+    assert_eq!(s.calls.replies_to(token).len(), 1);
+    assert!(s.fake.cancelled_jobs().is_empty());
+}
+
+#[gpui::test]
+fn a_key_run_file_command_starts_no_job(cx: &mut TestAppContext) {
+    use core_control::bindings::Chord;
+    let s = setup(cx);
+    // F6 bound to Convert Media (a user's own binding).
+    cx.update(|cx| {
+        AppState::global(cx).update(cx, |a, _| {
+            a.keymap
+                .bind("media.convert", &[Chord::new(97, 0).unwrap()], true)
+                .unwrap();
+        });
+    });
+    s.fake.script_job(JobScript::done().steps(&[0.5]));
+    let r = call(&s, cx, "ui.key", json!({"key": "f6"}));
+    assert!(r.is_ok(), "the key goes through: {r:?}");
+    for _ in 0..3 {
+        pump(&s, cx);
+    }
+    assert!(s.fake.jobs_started().is_empty(), "no orphaned job");
     let tick = cx.update(|cx| control::pump(&s.calls, cx));
     assert_eq!(tick.deferred, 0);
 }

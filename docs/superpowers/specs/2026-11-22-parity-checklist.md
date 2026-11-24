@@ -596,3 +596,4 @@ unknown.
 | AU inserts in Mac projects | Shown as placeholders that keep their settings (design section 10); no automatic swap | |
 | `ui.screenshot` of a native Wayland window (the GPUI pin has no offscreen render off macOS) | X11 `GetImage` of the window (XWayland, Xvfb); a native Wayland window answers `unavailable` "Screenshots need an X11 window on Linux." until GPUI or the compositor gives a capture | |
 | Keypad − and + as Rewind and Fast Forward keys (GPUI at the pin does not tell keypad keys from main keys; Mac too) | The ⇧, and ⇧. keys and the buttons; the control channel's `keypad_minus`/`keypad_plus` work. Closes when GPUI reports the keypad | |
+| Media import across sample rates on Linux (no resampler: `media.import` answers `failed` "… resampling needs the system importer"; the e2e import steps assert that refusal on Linux) | Host track H4: Linux audio import adds a resampler | |
