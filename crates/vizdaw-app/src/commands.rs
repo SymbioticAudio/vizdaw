@@ -101,8 +101,8 @@ const NO_DETAIL: &str = "No detail editor is open.";
 const NO_LIST: &str = "Insert Event needs a list editor that has the keyboard.";
 
 /// The registry IDs of the transport commands `run` handles: the keys,
-/// the record modes, the field keys and the locators. Recording, the
-/// click and arming come later.
+/// Record and its loop passes, the record modes, the click, arming, the
+/// field keys and the locators (Swift `TransportCommands.ids`).
 pub const TRANSPORT_COMMANDS: &[&str] = &[
     "transport.play_stop",
     "transport.stop",
@@ -119,8 +119,16 @@ pub const TRANSPORT_COMMANDS: &[&str] = &[
     "transport.loop",
     "transport.go_position",
     "transport.go_edit_in",
+    "transport.record",
+    "record.keep_pass",
+    "record.discard_pass",
     "transport.overdub",
     "transport.punch",
+    "transport.click",
+    "transport.set_click_level",
+    "transport.set_click_mode",
+    "transport.arm_previous",
+    "transport.arm_next",
     "transport.go_punch",
     "locator.go_0",
     "locator.set_0",
@@ -153,6 +161,32 @@ pub const TRANSPORT_COMMANDS: &[&str] = &[
     "locator.set_9",
     "locator.clear_9",
 ];
+
+/// The record commands only the channel sends (Swift `ControlCommands`'
+/// arms): Record Options, recovery, the marker chores and MIDI injection.
+/// `run` handles them; see `record::run_record`.
+pub const RECORD_COMMANDS: &[&str] = &[
+    "record.set",
+    "record.recover",
+    "marker.add",
+    "marker.rename",
+    "marker.remove",
+    "midi.inject",
+];
+
+/// The click's three commands: Click toggles it; the level and mode take
+/// their argument from the channel. Project settings, one undo step each.
+const CLICK_COMMANDS: &[&str] = &[
+    "transport.click",
+    "transport.set_click_level",
+    "transport.set_click_mode",
+];
+
+/// What a key or menu item of a click setting says: it has no argument.
+pub const CLICK_LEVEL_NEEDS: &str = "Click Level needs a level, such as -12 dB.";
+pub const CLICK_MODE_NEEDS: &str = "Click Mode needs a mode: play_and_record or record_only.";
+/// Arming moved nothing and the core said nothing.
+pub const ARM_DID_NOT_MOVE: &str = "Record arm did not move.";
 
 /// The registry IDs `run_app` handles: app-wide, so they need no document.
 pub const APP_COMMANDS: &[&str] = &[
@@ -338,6 +372,9 @@ pub fn enabled(id: &str, doc: &DocumentModel) -> bool {
     if TRANSPORT_COMMANDS.contains(&id) {
         return transport_enabled(id, doc);
     }
+    if RECORD_COMMANDS.contains(&id) {
+        return crate::record::record_command_enabled(id, doc);
+    }
     if EDITOR_COMMANDS.contains(&id) {
         return match id {
             "editors.close_detail" => doc.layout().detail.is_some(),
@@ -379,6 +416,9 @@ pub fn perform_from_menu(id: &str, doc: &mut DocumentModel) -> Result<Ran, Contr
     }
     if TRANSPORT_COMMANDS.contains(&id) {
         return transport_from_menu(id, doc);
+    }
+    if RECORD_COMMANDS.contains(&id) {
+        return crate::record::run_record(id, &[], doc).map_err(|e| refused(doc, e));
     }
     if EDITOR_COMMANDS.contains(&id) {
         return run_editor(id, &[], doc).map_err(|e| refused(doc, e));
@@ -448,6 +488,7 @@ pub fn is_on(id: &str, doc: &DocumentModel) -> bool {
         "editors.snap" => doc.layout().snap.enabled,
         "transport.overdub" => doc.layout().transport.overdub,
         "transport.punch" => doc.layout().transport.punch,
+        "transport.click" => doc.last_transport().click.is_some_and(|c| c.on),
         SUSPEND => automation_suspended(),
         _ => crate::view::is_on(id, doc),
     }
@@ -497,6 +538,9 @@ pub fn run(
 ) -> Result<Ran, ControlError> {
     if TRANSPORT_COMMANDS.contains(&id) {
         return run_transport(id, args, doc);
+    }
+    if RECORD_COMMANDS.contains(&id) {
+        return crate::record::run_record(id, args, doc);
     }
     if EDITOR_COMMANDS.contains(&id) {
         return run_editor(id, args, doc);
@@ -698,14 +742,30 @@ fn insert_event_ready(doc: &DocumentModel) -> bool {
     doc.list_open() && doc.transport_keys_enabled()
 }
 
+/// Whether `id` waits while a text field has the keyboard: every
+/// transport command but the loop passes (no key), arming (a chorded key)
+/// and the click (Swift `TransportCommands.typesText`).
+fn types_text(id: &str) -> bool {
+    !matches!(
+        id,
+        "record.keep_pass"
+            | "record.discard_pass"
+            | "transport.arm_previous"
+            | "transport.arm_next"
+    ) && !CLICK_COMMANDS.contains(&id)
+}
+
 /// Whether a transport command can run now (its menu item is enabled).
 fn transport_enabled(id: &str, doc: &DocumentModel) -> bool {
-    if !doc.transport_keys_enabled() {
+    if types_text(id) && !doc.transport_keys_enabled() {
         return false;
     }
     let seq = doc.selected_seq().is_some();
     match id {
         "transport.scrub" => false,
+        "transport.record" => doc.record_button_enabled(),
+        "record.keep_pass" | "record.discard_pass" => doc.record().is_loop_recording(),
+        _ if CLICK_COMMANDS.contains(&id) => true,
         "transport.stop" => doc.is_playing(),
         "transport.play_stop" | "transport.play" => seq || doc.is_playing(),
         "transport.play_from_edit_in" => seq && doc.selection().time_range.is_some(),
@@ -744,6 +804,9 @@ fn transport_from_menu(id: &str, doc: &mut DocumentModel) -> Result<Ran, Control
             }
             Ok(ran(doc))
         }
+        // A key or menu item has no argument to give.
+        "transport.set_click_level" => Err(refused(doc, unavailable(CLICK_LEVEL_NEEDS))),
+        "transport.set_click_mode" => Err(refused(doc, unavailable(CLICK_MODE_NEEDS))),
         _ => run_transport(id, &[], doc).map_err(|e| refused(doc, e)),
     }
 }
@@ -762,7 +825,25 @@ fn run_transport(
 ) -> Result<Ran, ControlError> {
     check_names(id, args)?;
     let on = on_flag(id, args)?;
+    // A typed punch time not yet set refuses Record before the text-field
+    // gate (the punch field holds the keyboard), on every path.
+    if id == "transport.record" && !doc.record().is_recording() && doc.has_open_punch_draft() {
+        return Err(failed(crate::record::OPEN_DRAFT));
+    }
     match id {
+        "transport.record" => {
+            if let Some(e) = text_gate(doc) {
+                return Err(e);
+            }
+            doc.toggle_record()?;
+        }
+        "record.keep_pass" | "record.discard_pass" => {
+            doc.press_pass(id == "record.keep_pass")?;
+        }
+        _ if CLICK_COMMANDS.contains(&id) => run_click(id, args, doc)?,
+        "transport.arm_previous" | "transport.arm_next" => {
+            move_record_arm(id == "transport.arm_next", doc)?;
+        }
         "transport.play_stop" => {
             let _ = doc.poll_transport();
             if doc.selected_seq().is_none() && !doc.is_playing() {
@@ -829,6 +910,51 @@ fn run_transport(
         _ => run_key_command(id, doc)?,
     }
     Ok(ran(doc))
+}
+
+/// One of the click commands with the channel's `args` as given: the
+/// session checks them and makes one undo step; the transport is read
+/// again, so Click's check follows. A refusal raises no alert.
+fn run_click(
+    id: &str,
+    args: &[(String, ArgValue)],
+    doc: &mut DocumentModel,
+) -> Result<(), ControlError> {
+    if doc.gesture_open() {
+        return Err(unavailable(GESTURE_OPEN));
+    }
+    let result = doc
+        .session()
+        .run_click(id.to_owned(), crate::mixer::commands::control_args(args));
+    doc.apply_result(result).map_err(|e| from_viz(&e))?;
+    let _ = doc.poll_transport();
+    Ok(())
+}
+
+/// Arm Previous or Next Track on the shown sequence: one undo step "Move
+/// Record Arm" (with none armed, Previous arms the last track). The core's
+/// refusal, Busy too, shows in the status line.
+fn move_record_arm(forward: bool, doc: &mut DocumentModel) -> Result<(), ControlError> {
+    let Some(seq) = doc.selected_seq() else {
+        return Err(unavailable(NO_SEQUENCE));
+    };
+    if doc.gesture_open() {
+        return Err(unavailable(GESTURE_OPEN));
+    }
+    let result = doc.session().move_record_arm(seq, forward);
+    doc.apply_result(result).map_err(|e| {
+        let mut message = error_message(&e);
+        if message.is_empty() {
+            message = ARM_DID_NOT_MOVE.into();
+        }
+        doc.set_status(Some(message.clone()));
+        let code = if matches!(e, VizError::Busy { .. }) {
+            ErrorCode::Busy
+        } else {
+            ErrorCode::Failed
+        };
+        ControlError::new(code, message)
+    })
 }
 
 /// Go to, set (at the transport's tick, read first) or clear locator

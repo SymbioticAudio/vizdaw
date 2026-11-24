@@ -849,3 +849,390 @@ fn the_options_start_from_the_defaults() {
         (1, 2, true)
     );
 }
+
+// ---- The record commands (slice 8a Task 4; Swift `RecordControlTests`) ----
+
+use core_control::ControlError;
+use core_control::registry::ArgValue;
+use vizdaw_app::commands::{self, RECORD_COMMANDS, Ran};
+
+fn run(id: &str, pairs: &[(&str, ArgValue)], m: &mut DocumentModel) -> Result<Ran, ControlError> {
+    let args: Vec<(String, ArgValue)> = pairs
+        .iter()
+        .map(|(n, v)| ((*n).to_string(), v.clone()))
+        .collect();
+    commands::run(id, &args, m)
+}
+
+fn fails(r: Result<Ran, ControlError>) -> (ErrorCode, String) {
+    let e = r.expect_err("expected a refusal");
+    (e.code, e.message)
+}
+
+fn flag(v: bool) -> ArgValue {
+    ArgValue::Flag(v)
+}
+
+fn int(v: i64) -> ArgValue {
+    ArgValue::Int(v)
+}
+
+fn text(v: &str) -> ArgValue {
+    ArgValue::Text(v.into())
+}
+
+#[test]
+fn every_record_command_is_in_the_registry() {
+    for id in RECORD_COMMANDS {
+        assert!(core_control::registry::find(id).is_some(), "{id}");
+    }
+}
+
+/// Swift `recordSetSetsTheModesAndOptions`.
+#[test]
+fn record_set_sets_the_modes_and_options() {
+    let (_f, mut m) = armed();
+    run(
+        "record.set",
+        &[
+            ("replace", flag(false)),
+            ("punch", flag(true)),
+            ("loop", flag(true)),
+            ("pre_roll", int(2)),
+            ("count_in", int(1)),
+            ("passes_as_takes", flag(true)),
+        ],
+        &mut m,
+    )
+    .unwrap();
+    assert!(m.layout().transport.overdub && m.layout().transport.punch && m.looping());
+    assert_eq!(m.record().pre_roll_bars(), 2);
+    assert_eq!(m.record().count_in_bars(), 1);
+    assert!(m.record().midi_passes_as_takes());
+    let spec = m.record_spec();
+    assert!(!spec.replace && spec.looped && spec.punch.is_some() && spec.passes_as_takes);
+    // Loop already on stays on.
+    run("record.set", &[("loop", flag(true))], &mut m).unwrap();
+    assert!(m.looping());
+    run("record.set", &[("replace", flag(true))], &mut m).unwrap();
+    assert!(!m.layout().transport.overdub);
+}
+
+/// Swift `recordSetAppliesAllOrNothing`: validated before anything is
+/// applied; a failing loop leaves the rest alone and is the call's
+/// failure, not an alert; an open gesture refuses it.
+#[test]
+fn record_set_applies_all_or_nothing() {
+    let (f, mut m) = armed();
+    let overdub = m.layout().transport.overdub;
+    assert_eq!(
+        fails(run(
+            "record.set",
+            &[("replace", flag(overdub)), ("count_in", int(9))],
+            &mut m
+        )),
+        (
+            ErrorCode::InvalidParams,
+            "record.set: `count_in` is 0 to 4".into()
+        )
+    );
+    assert_eq!(
+        fails(run(
+            "record.set",
+            &[("replace", flag(overdub)), ("pre_roll", int(-1))],
+            &mut m
+        )),
+        (
+            ErrorCode::InvalidParams,
+            "record.set: `pre_roll` is 0 to 8".into()
+        )
+    );
+    assert_eq!(m.layout().transport.overdub, overdub);
+    assert_eq!(m.record().count_in_bars(), 0);
+    f.set_loop_error(Some(VizError::Engine {
+        message: "no loop".into(),
+    }));
+    assert_eq!(
+        fails(run(
+            "record.set",
+            &[
+                ("loop", flag(true)),
+                ("replace", flag(overdub)),
+                ("pre_roll", int(3)),
+            ],
+            &mut m
+        )),
+        (ErrorCode::Failed, "Loop Failed: no loop".into())
+    );
+    assert_eq!(m.layout().transport.overdub, overdub);
+    assert_eq!(m.record().pre_roll_bars(), 0);
+    assert!(!m.looping() && m.alert.is_none());
+    f.set_loop_error(None);
+    assert!(m.begin_gesture("Move", vec![]));
+    assert_eq!(
+        fails(run("record.set", &[("replace", flag(overdub))], &mut m)),
+        (ErrorCode::Unavailable, "Finish the drag first.".into())
+    );
+    assert_eq!(m.layout().transport.overdub, overdub);
+}
+
+/// Swift `recordWhileRecordingStopsAndRecordSetIsRefusedThen`, and Task
+/// 15: a pass that ended by itself is not recording for `record.set`.
+#[test]
+fn record_set_is_refused_while_recording() {
+    let (f, mut m) = armed();
+    run("transport.record", &[], &mut m).unwrap();
+    assert!(m.record().is_recording());
+    assert_eq!(
+        fails(run("record.set", &[("loop", flag(true))], &mut m)),
+        (ErrorCode::Unavailable, "Stop recording first.".into())
+    );
+    assert!(!m.looping());
+    f.end_pass_by_itself();
+    run("record.set", &[("loop", flag(true))], &mut m).unwrap();
+    assert!(m.looping());
+    // The pre-read fails quietly.
+    f.set_call_error(
+        "record_state",
+        Some(VizError::Engine {
+            message: "no state".into(),
+        }),
+    );
+    run("record.set", &[("loop", flag(false))], &mut m).unwrap();
+    assert_eq!(m.status(), None);
+    assert!(!m.looping());
+}
+
+/// Swift `recoverAnswersTheOfferAndStateGetReadsTheCore`: nothing to
+/// recover is unavailable and asks the core nothing; `trash` and `import`
+/// answer; a failure is the call's, never an alert or the offer.
+#[test]
+fn record_recover_answers_without_side_effects() {
+    let (f, mut m) = armed();
+    assert_eq!(
+        fails(run("record.recover", &[("action", text("import"))], &mut m)),
+        (
+            ErrorCode::Unavailable,
+            "There are no recovered recordings.".into()
+        )
+    );
+    assert_eq!(f.count("recover_recordings(true)"), 0);
+    let file = vizdaw_ffi::record::RecoveredFileRow {
+        path: "Media/Recorded/a.caf".into(),
+        frames: 10,
+        size_known: false,
+        readable: true,
+    };
+    f.set_recovered_files(vec![file.clone()]);
+    run("record.recover", &[("action", text("trash"))], &mut m).unwrap();
+    assert_eq!(f.count("recover_recordings(false)"), 1);
+    f.set_recovered_files(vec![file.clone()]);
+    f.fail_next(
+        "recover_recordings",
+        VizError::Io {
+            message: "disk".into(),
+        },
+    );
+    assert_eq!(
+        fails(run("record.recover", &[("action", text("import"))], &mut m)),
+        (ErrorCode::Failed, "Recovery Failed: disk".into())
+    );
+    assert!(m.alert.is_none() && m.recovery_offer().is_none());
+    f.fail_next(
+        "recover_recordings",
+        VizError::Busy {
+            message: "busy".into(),
+        },
+    );
+    assert_eq!(
+        fails(run("record.recover", &[("action", text("import"))], &mut m)),
+        (ErrorCode::Busy, "busy".into())
+    );
+    assert!(m.begin_gesture("Move", vec![]));
+    assert_eq!(
+        fails(run("record.recover", &[("action", text("import"))], &mut m)),
+        (ErrorCode::Unavailable, "Finish the drag first.".into())
+    );
+    m.cancel_gesture();
+    run("record.recover", &[("action", text("import"))], &mut m).unwrap();
+    assert_eq!(f.count("recover_recordings(true)"), 1);
+    assert!(m.alert.is_none() && m.recovery_offer().is_none());
+}
+
+/// Swift `midiInjectSendsHexBytes`, `aPayloadTheCoreRefusesIsInvalidParams`
+/// and `hexBytesWantPairs`.
+#[test]
+fn midi_inject_sends_hex_bytes() {
+    let (f, mut m) = armed();
+    let hex = "midi.inject: `bytes` are hex bytes such as \"90 3c 64\"";
+    f.set_inject_taken(true);
+    run(
+        "midi.inject",
+        &[("port", text("Keys")), ("bytes", text("90 3c 64"))],
+        &mut m,
+    )
+    .unwrap();
+    assert_eq!(
+        f.injected().last().cloned(),
+        Some(("Keys".to_string(), vec![0x90, 0x3C, 0x64]))
+    );
+    run(
+        "midi.inject",
+        &[("port", text("Keys")), ("bytes", text("f0 7E f7"))],
+        &mut m,
+    )
+    .unwrap();
+    assert_eq!(f.injected().last().unwrap().1, [0xF0, 0x7E, 0xF7]);
+    let long = "90 ".repeat(1025);
+    for bad in [
+        "",
+        "9g",
+        "900",
+        "90,3c",
+        "9 3c 64",
+        "90 3 64",
+        long.as_str(),
+    ] {
+        assert_eq!(
+            fails(run(
+                "midi.inject",
+                &[("port", text("Keys")), ("bytes", text(bad))],
+                &mut m
+            )),
+            (ErrorCode::InvalidParams, hex.into()),
+            "{}",
+            &bad[..bad.len().min(10)]
+        );
+    }
+    assert_eq!(
+        fails(run("midi.inject", &[("bytes", text("90 3c 64"))], &mut m)),
+        (ErrorCode::InvalidParams, hex.into()),
+        "no port"
+    );
+    assert_eq!(f.injected().len(), 2);
+    let send = |m: &mut DocumentModel| {
+        run(
+            "midi.inject",
+            &[("port", text("Keys")), ("bytes", text("90 3c 64"))],
+            m,
+        )
+    };
+    f.set_inject_taken(false);
+    assert_eq!(
+        fails(send(&mut m)),
+        (
+            ErrorCode::Unavailable,
+            "Play or record first: this document does not hold the audio engine.".into()
+        )
+    );
+    f.fail_next(
+        "inject_midi",
+        VizError::Model {
+            message: "byte 0xf0 does not start a channel message".into(),
+        },
+    );
+    assert_eq!(
+        fails(send(&mut m)),
+        (
+            ErrorCode::InvalidParams,
+            "midi.inject: byte 0xf0 does not start a channel message".into()
+        )
+    );
+    f.fail_next(
+        "inject_midi",
+        VizError::Engine {
+            message: "no engine".into(),
+        },
+    );
+    assert_eq!(
+        fails(send(&mut m)),
+        (ErrorCode::Failed, "MIDI Injection Failed: no engine".into())
+    );
+}
+
+/// Plan 8c Ruling 4: the marker commands are chores, one undo step each
+/// with the arguments as given; a refusal is `failed` (Busy `busy`) and
+/// raises no alert; an open gesture refuses them.
+#[test]
+fn marker_commands_are_chores_with_their_undo_names() {
+    let (f, mut m) = armed();
+    let add = [
+        ("seq", int(3)),
+        ("tick", int(7680)),
+        ("name", text("Bridge")),
+    ];
+    run("marker.add", &add, &mut m).unwrap();
+    assert_eq!(m.undo_title(), "Undo Add Marker");
+    let (id, args) = f.chores_run().last().cloned().unwrap();
+    assert_eq!((id.as_str(), args.len()), ("marker.add", 3));
+    run(
+        "marker.rename",
+        &[("seq", int(3)), ("index", int(1)), ("name", text("Coda"))],
+        &mut m,
+    )
+    .unwrap();
+    assert_eq!(m.undo_title(), "Undo Rename Marker");
+    run(
+        "marker.remove",
+        &[("seq", int(3)), ("index", int(1))],
+        &mut m,
+    )
+    .unwrap();
+    assert_eq!(m.undo_title(), "Undo Remove Marker");
+    f.fail_next(
+        "run_chore",
+        VizError::Model {
+            message: "there is no marker 4".into(),
+        },
+    );
+    assert_eq!(
+        fails(run(
+            "marker.remove",
+            &[("seq", int(3)), ("index", int(4))],
+            &mut m
+        )),
+        (ErrorCode::Failed, "there is no marker 4".into())
+    );
+    f.fail_next(
+        "run_chore",
+        VizError::Busy {
+            message: "Stop recording first.".into(),
+        },
+    );
+    assert_eq!(
+        fails(run("marker.add", &add, &mut m)),
+        (ErrorCode::Busy, "Stop recording first.".into())
+    );
+    assert!(m.alert.is_none());
+    assert!(m.begin_gesture("Move", vec![]));
+    let n = f.chores_run().len();
+    assert_eq!(
+        fails(run("marker.add", &add, &mut m)),
+        (ErrorCode::Unavailable, "Finish the drag first.".into())
+    );
+    assert_eq!(f.chores_run().len(), n);
+}
+
+/// The record commands refuse parameters they do not take, and say when
+/// they can run.
+#[test]
+fn record_commands_refuse_extra_params_and_say_when_they_run() {
+    let (f, mut m) = armed();
+    for id in RECORD_COMMANDS {
+        assert_eq!(
+            fails(run(id, &[("bars", int(2))], &mut m)).0,
+            ErrorCode::InvalidParams,
+            "{id}"
+        );
+        assert!(commands::enabled(id, &m), "{id}");
+    }
+    assert!(f.chores_run().is_empty() && f.injected().is_empty());
+    m.toggle_record().unwrap();
+    assert!(!commands::enabled("record.set", &m));
+    m.toggle_record().unwrap();
+    assert!(m.begin_gesture("Move", vec![]));
+    for id in ["record.set", "record.recover", "marker.add"] {
+        assert!(!commands::enabled(id, &m), "{id}");
+    }
+    assert!(commands::enabled("midi.inject", &m));
+}

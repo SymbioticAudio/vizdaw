@@ -601,8 +601,7 @@ pub fn run_mixer_item(op: MixerOp, doc: &mut DocumentModel) {
 
 /// The Transport menu: every transport command with a menu item, in
 /// registry order, with Swift's dividers (after the markers, after Click,
-/// after the field keys). Recording, Overdub, Punch, Click, the punch
-/// fields and arming are not handled yet, so they show disabled.
+/// after the field keys). Each item is enabled as its command says.
 fn transport_items(front: Option<&DocumentModel>, keymap: &Keymap) -> Vec<ItemSpec> {
     let mut items = Vec::new();
     for c in registry::COMMANDS

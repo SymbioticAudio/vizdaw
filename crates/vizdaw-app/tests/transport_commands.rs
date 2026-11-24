@@ -473,7 +473,7 @@ fn the_text_editing_owners_gate_the_keys() {
 
 #[test]
 fn every_transport_command_is_in_the_registry() {
-    assert_eq!(TRANSPORT_COMMANDS.len(), 48);
+    assert_eq!(TRANSPORT_COMMANDS.len(), 56);
     for id in TRANSPORT_COMMANDS {
         assert!(registry::find(id).is_some(), "{id}");
     }
@@ -616,4 +616,288 @@ fn the_new_bare_key_commands_wait_for_text_fields() {
     assert_eq!(m.layout().transport.locator(3), None);
     m.end_text_editing("x");
     go("locator.set_3", &mut m).unwrap();
+}
+
+// ---- Recording, the click and arming (slice 8a Task 4) ----
+
+fn armed_lanes(f: &FakeSession) -> Vec<bool> {
+    use vizdaw_app::DocSession;
+    f.lanes(3).unwrap().iter().map(|l| l.arm).collect()
+}
+
+/// Swift `recordArmMovesAndARefusalShows`: Arm Next moves the arm, one
+/// undo step; the core's refusal is `failed` in its words and shows in the
+/// status line.
+#[test]
+fn record_arm_moves_and_a_refusal_shows() {
+    let (f, mut m) = demo();
+    go("transport.arm_next", &mut m).unwrap();
+    assert_eq!(f.count("move_record_arm(3,true)"), 1);
+    assert_eq!(armed_lanes(&f), [true, false], "none armed: the first");
+    assert_eq!(m.undo_title(), "Undo Move Record Arm");
+    go("transport.arm_next", &mut m).unwrap();
+    assert_eq!(armed_lanes(&f), [false, true]);
+    let e = failure(go("transport.arm_next", &mut m));
+    is(
+        &e,
+        ErrorCode::Failed,
+        "there is no track after the armed one",
+    );
+    assert_eq!(m.status(), Some("there is no track after the armed one"));
+    go("transport.arm_previous", &mut m).unwrap();
+    assert_eq!(armed_lanes(&f), [true, false]);
+}
+
+/// e2e `records_audio_loop_takes_and_midi`: with none armed, ⌥⇧↑ arms the
+/// last track.
+#[test]
+fn arm_previous_with_none_armed_arms_the_last_track() {
+    let (f, mut m) = demo();
+    perform_from_menu("transport.arm_previous", &mut m).unwrap();
+    assert_eq!(armed_lanes(&f), [false, true]);
+}
+
+/// Swift `busyIsBusyAndAnOpenDragBlocksArming` (the arm half).
+#[test]
+fn busy_is_busy_and_an_open_drag_blocks_arming() {
+    let (f, mut m) = demo();
+    f.fail_next(
+        "move_record_arm",
+        VizError::Busy {
+            message: "The core is busy.".into(),
+        },
+    );
+    is(
+        &failure(go("transport.arm_next", &mut m)),
+        ErrorCode::Busy,
+        "The core is busy.",
+    );
+    assert!(m.begin_gesture("Move", vec![]));
+    is(
+        &failure(go("transport.arm_next", &mut m)),
+        ErrorCode::Unavailable,
+        "Finish the drag first.",
+    );
+    assert_eq!(f.count("move_record_arm(3,true)"), 0);
+}
+
+/// Arming needs a sequence; it does not wait for a text field (it has a
+/// chorded key), in the menu or on the channel.
+#[test]
+fn arming_needs_a_sequence_but_no_free_keyboard() {
+    let (f, mut m) = demo();
+    m.begin_text_editing("track-rename");
+    for id in ["transport.arm_next", "transport.arm_previous"] {
+        assert!(enabled(id, &m), "{id}");
+    }
+    go("transport.arm_next", &mut m).unwrap();
+    perform_from_menu("transport.arm_next", &mut m).unwrap();
+    assert_eq!(f.count("move_record_arm(3,true)"), 2);
+    m.end_text_editing("track-rename");
+    m.select(None);
+    for id in ["transport.arm_next", "transport.arm_previous"] {
+        assert!(!enabled(id, &m), "{id}");
+        is(
+            &failure(go(id, &mut m)),
+            ErrorCode::Unavailable,
+            "Select a sequence first.",
+        );
+    }
+}
+
+fn args(pairs: &[(&str, ArgValue)]) -> Vec<(String, ArgValue)> {
+    pairs
+        .iter()
+        .map(|(n, v)| ((*n).to_string(), v.clone()))
+        .collect()
+}
+
+/// Swift `clickTogglesAndShowsItsCheck`: Click's check follows the
+/// transport read; without `on` it flips, with `on` it sets, one session
+/// call each. It waits for no text field.
+#[test]
+fn click_toggles_and_shows_its_check() {
+    use vizdaw_app::commands::is_on;
+    use vizdaw_ffi::ClickRow;
+    use vizdaw_ffi::control::{ControlArg, ControlValue};
+    use vizdaw_ffi::session::click::ClickModeRow;
+    let (f, mut m) = demo();
+    assert!(!is_on("transport.click", &m));
+    assert!(enabled("transport.click", &m));
+    f.set_transport(|t| {
+        t.click = Some(ClickRow {
+            on: true,
+            level_db: -6.0,
+            mode: ClickModeRow::PlayAndRecord,
+        })
+    });
+    m.poll_transport().unwrap();
+    assert!(is_on("transport.click", &m), "the check follows the read");
+    f.set_click_row(ClickRow {
+        on: true,
+        level_db: -6.0,
+        mode: ClickModeRow::PlayAndRecord,
+    });
+    perform_from_menu("transport.click", &mut m).unwrap();
+    assert!(!is_on("transport.click", &m), "flipped off");
+    let last = f.clicks_run().last().cloned().unwrap();
+    assert_eq!((last.0.as_str(), last.1.len()), ("transport.click", 0));
+    m.begin_text_editing("track-rename");
+    assert!(enabled("transport.click", &m), "no text gate");
+    go("transport.click", &mut m).unwrap();
+    assert!(is_on("transport.click", &m), "flipped on");
+    run("transport.click", &on(true), &mut m).unwrap();
+    assert_eq!(
+        f.clicks_run().last().unwrap().1,
+        [ControlArg {
+            name: "on".into(),
+            value: ControlValue::Flag { value: true },
+        }],
+        "the channel's on is passed on"
+    );
+    f.fail_next(
+        "run_click",
+        VizError::Model {
+            message: "no".into(),
+        },
+    );
+    is(
+        &failure(go("transport.click", &mut m)),
+        ErrorCode::Failed,
+        "no",
+    );
+    assert!(m.alert.is_none(), "a refusal raises no alert");
+    assert!(m.begin_gesture("Move", vec![]));
+    is(
+        &failure(go("transport.click", &mut m)),
+        ErrorCode::Unavailable,
+        "Finish the drag first.",
+    );
+}
+
+/// Swift `clickLevelAndModeReachTheSession`: the level and mode go to the
+/// session with the channel's arguments; a key or menu item (no
+/// arguments) is unavailable and reaches no session.
+#[test]
+fn click_level_and_mode_reach_the_session() {
+    use vizdaw_ffi::session::click::ClickModeRow;
+    let (f, mut m) = demo();
+    let level = args(&[("level_db", ArgValue::Text("-12".into()))]);
+    run("transport.set_click_level", &level, &mut m).unwrap();
+    let last = f.clicks_run().last().cloned().unwrap();
+    assert_eq!(last.0, "transport.set_click_level");
+    assert_eq!(m.last_transport().click.map(|c| c.level_db), Some(-12.0));
+    let mode = args(&[("mode", ArgValue::Text("record_only".into()))]);
+    run("transport.set_click_mode", &mode, &mut m).unwrap();
+    assert_eq!(
+        m.last_transport().click.map(|c| c.mode),
+        Some(ClickModeRow::RecordOnly)
+    );
+    let runs = f.clicks_run().len();
+    assert_eq!(
+        failure(go("transport.set_click_level", &mut m)).code,
+        ErrorCode::Failed,
+        "the session refuses no level"
+    );
+    is(
+        &failure(perform_from_menu("transport.set_click_level", &mut m)),
+        ErrorCode::Unavailable,
+        "Click Level needs a level, such as -12 dB.",
+    );
+    is(
+        &failure(perform_from_menu("transport.set_click_mode", &mut m)),
+        ErrorCode::Unavailable,
+        "Click Mode needs a mode: play_and_record or record_only.",
+    );
+    assert_eq!(
+        m.status(),
+        Some("Click Mode needs a mode: play_and_record or record_only.")
+    );
+    assert_eq!(f.clicks_run().len(), runs, "a key reaches no session");
+}
+
+/// Record waits for a free keyboard (its key is bare R), but an open punch
+/// draft refuses it first, on every path.
+#[test]
+fn record_refuses_an_open_draft_before_the_text_gate() {
+    use vizdaw_app::transport_fields::TransportField;
+    let (f, mut m) = demo();
+    m.begin_text_editing("track-rename");
+    assert!(!enabled("transport.record", &m));
+    is(
+        &failure(go("transport.record", &mut m)),
+        ErrorCode::Unavailable,
+        TEXT,
+    );
+    m.end_text_editing("track-rename");
+    assert!(enabled("transport.record", &m));
+    m.set_record_popover(true);
+    m.punch_focus_changed(None, Some(TransportField::PunchIn));
+    m.set_punch_text(TransportField::PunchIn, "5");
+    assert!(
+        !m.transport_keys_enabled(),
+        "the punch field has the keyboard"
+    );
+    let draft = "Press Return to set the punch, or Esc to discard it.";
+    is(
+        &failure(go("transport.record", &mut m)),
+        ErrorCode::Failed,
+        draft,
+    );
+    is(
+        &failure(perform_from_menu("transport.record", &mut m)),
+        ErrorCode::Failed,
+        draft,
+    );
+    assert_eq!(m.status(), Some(draft));
+    assert_eq!(
+        m.punch_text(TransportField::PunchIn),
+        "5",
+        "the draft stays"
+    );
+    assert!(m.record().shows_popover());
+    assert_eq!(f.count("record(3)"), 0);
+    m.select(None);
+    assert!(!enabled("transport.record", &m));
+}
+
+/// Record over the channel records and, again, stops; keep and discard
+/// run only while loop recording, with no text gate.
+#[test]
+fn record_keep_and_discard_run_from_the_commands() {
+    let (f, _) = demo();
+    f.set_lanes(3, vec![armed_audio(30)]);
+    let mut m = DocumentModel::new(f.clone()).unwrap();
+    assert!(!enabled("record.keep_pass", &m));
+    is(
+        &failure(go("record.keep_pass", &mut m)),
+        ErrorCode::Unavailable,
+        "Keep and discard act on loop passes while recording.",
+    );
+    m.toggle_loop();
+    go("transport.record", &mut m).unwrap();
+    assert!(m.record().is_recording());
+    assert!(enabled("transport.record", &m));
+    m.begin_text_editing("track-rename");
+    assert!(enabled("record.keep_pass", &m) && enabled("record.discard_pass", &m));
+    f.next_pass();
+    go("record.keep_pass", &mut m).unwrap();
+    assert_eq!(f.count("keep_pass"), 1);
+    perform_from_menu("record.discard_pass", &mut m).unwrap();
+    assert_eq!(f.count("discard_pass"), 1);
+    m.end_text_editing("track-rename");
+    go("transport.record", &mut m).unwrap();
+    assert!(!m.record().is_recording());
+    assert_eq!(m.undo_title(), "Undo Record");
+}
+
+fn armed_audio(id: u64) -> vizdaw_ffi::snapshot::LaneRow {
+    let mut l = support::lane_row(id, "Vocal", false);
+    l.arm = true;
+    l.input = Some(vizdaw_ffi::edit::LaneInputRow::Audio {
+        first: 0,
+        stereo: false,
+        return_of: None,
+    });
+    l
 }

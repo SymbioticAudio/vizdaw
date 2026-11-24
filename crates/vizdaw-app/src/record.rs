@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 
+use core_control::registry::ArgValue;
 use core_control::{ControlError, ErrorCode};
 use vizdaw_ffi::BitDepthRow;
 use vizdaw_ffi::VizError;
@@ -17,9 +18,10 @@ use vizdaw_ffi::record::{RecordSpecRow, RecordStateRow};
 use vizdaw_ffi::selection::TickRange;
 
 use crate::alerts::error_message;
-use crate::commands::{self, from_viz};
+use crate::commands::{self, Ran, check_names, from_viz, ran};
 use crate::document::DocumentModel;
 use crate::editor::GESTURE_OPEN;
+use crate::mixer::commands::{control_args, thrown};
 use crate::transport_fields::{TransportField, commit_field, field_text};
 
 /// Why Record is refused with no sequence shown.
@@ -51,6 +53,17 @@ pub const MODE_HELP: &str =
 pub const MIDI_TAKES_HELP: &str = "Loop recording: each MIDI pass becomes a new take. Off: passes layer into the playing take. Audio passes always become takes.";
 /// The text-editing owner while a popover punch field has focus.
 pub const POPOVER_OWNER: &str = "record_popover";
+/// `record.set` while a pass records.
+pub const STOP_RECORDING_FIRST: &str = "Stop recording first.";
+/// `record.recover` with nothing to recover.
+pub const NO_RECOVERED: &str = "There are no recovered recordings.";
+/// `midi.inject` while another document holds the audio engine.
+pub const INJECT_NO_ENGINE: &str =
+    "Play or record first: this document does not hold the audio engine.";
+/// `midi.inject`'s `bytes` (or `port`) are not what it takes.
+const INJECT_HEX: &str = "`bytes` are hex bytes such as \"90 3c 64\"";
+/// The most bytes `midi.inject` takes at once.
+const INJECT_MAX: usize = 1024;
 /// The most bars of count-in and pre-roll.
 pub const MAX_COUNT_IN: u8 = 4;
 pub const MAX_PRE_ROLL: u8 = 8;
@@ -228,6 +241,101 @@ fn refused(message: &str) -> ControlError {
     ControlError::new(ErrorCode::Failed, message)
 }
 
+/// `text` as hex byte pairs separated by white space (`90 3c 64`): one
+/// to 1024 of them, or `None` (Swift `ControlLanes.hexBytes`).
+pub fn hex_bytes(text: &str) -> Option<Vec<u8>> {
+    let parts: Vec<&str> = text.split_whitespace().collect();
+    if parts.is_empty() || parts.len() > INJECT_MAX {
+        return None;
+    }
+    parts
+        .into_iter()
+        .map(|p| {
+            (p.len() == 2 && p.bytes().all(|b| b.is_ascii_hexdigit()))
+                .then(|| u8::from_str_radix(p, 16).ok())
+                .flatten()
+        })
+        .collect()
+}
+
+fn arg<'a>(args: &'a [(String, ArgValue)], name: &str) -> Option<&'a ArgValue> {
+    args.iter().find(|(n, _)| n == name).map(|(_, v)| v)
+}
+
+/// The flag `name`: absent, or true or false.
+fn flag_arg(
+    id: &str,
+    args: &[(String, ArgValue)],
+    name: &str,
+) -> Result<Option<bool>, ControlError> {
+    match arg(args, name) {
+        None => Ok(None),
+        Some(ArgValue::Flag(f)) => Ok(Some(*f)),
+        Some(_) => Err(ControlError::params(
+            id,
+            format!("`{name}` is true or false"),
+        )),
+    }
+}
+
+/// The bar count `name`, at most `max`: absent, or a whole number in range.
+fn bars_arg(
+    id: &str,
+    args: &[(String, ArgValue)],
+    name: &str,
+    max: u8,
+) -> Result<Option<u8>, ControlError> {
+    match arg(args, name) {
+        None => Ok(None),
+        Some(ArgValue::Int(n)) if (0..=i64::from(max)).contains(n) => Ok(u8::try_from(*n).ok()),
+        Some(_) => Err(ControlError::params(id, format!("`{name}` is 0 to {max}"))),
+    }
+}
+
+fn text_arg<'a>(args: &'a [(String, ArgValue)], name: &str) -> Option<&'a str> {
+    match arg(args, name) {
+        Some(ArgValue::Text(t)) => Some(t),
+        _ => None,
+    }
+}
+
+/// Whether a record command (`commands::RECORD_COMMANDS`) can run now:
+/// Record Options while no pass records, and none of them but MIDI
+/// injection during a drag.
+pub fn record_command_enabled(id: &str, doc: &DocumentModel) -> bool {
+    match id {
+        "midi.inject" => true,
+        "record.set" => !doc.record.is_recording() && !doc.gesture_open(),
+        _ => !doc.gesture_open(),
+    }
+}
+
+/// Runs a record command (`commands::RECORD_COMMANDS`) with the channel's
+/// `args` (Swift `ControlCommands`' arms). None raises an alert: a failure
+/// is the call's.
+pub fn run_record(
+    id: &str,
+    args: &[(String, ArgValue)],
+    doc: &mut DocumentModel,
+) -> Result<Ran, ControlError> {
+    check_names(id, args)?;
+    match id {
+        "record.set" => doc.record_set(id, args)?,
+        "record.recover" => doc.recover_from_channel(id, args)?,
+        "midi.inject" => doc.inject_midi(id, args)?,
+        _ => {
+            // A marker chore (plan 8c Ruling 4): one undo step, the
+            // arguments as given; the core checks them.
+            if doc.gesture_open() {
+                return Err(unavailable(GESTURE_OPEN));
+            }
+            let result = doc.session.run_chore(id.to_owned(), control_args(args));
+            doc.apply_result(result).map_err(|e| from_viz(&e))?;
+        }
+    }
+    Ok(ran(doc))
+}
+
 fn is_punch(f: TransportField) -> bool {
     matches!(f, TransportField::PunchIn | TransportField::PunchOut)
 }
@@ -306,6 +414,99 @@ impl DocumentModel {
         self.session.record(seq, spec).map_err(|e| from_viz(&e))?;
         self.after_record_call();
         Ok(())
+    }
+
+    /// `record.set`: the transport's modes and the record options, all or
+    /// nothing. The state is read quietly first (a pass can end by
+    /// itself); every argument is checked before any is applied, and the
+    /// loop, which can fail, goes first (its failure is the call's, not an
+    /// alert).
+    fn record_set(&mut self, id: &str, args: &[(String, ArgValue)]) -> Result<(), ControlError> {
+        self.refresh_record(true);
+        if self.record.is_recording() {
+            return Err(unavailable(STOP_RECORDING_FIRST));
+        }
+        if self.gesture_open() {
+            return Err(unavailable(GESTURE_OPEN));
+        }
+        let count_in = bars_arg(id, args, "count_in", MAX_COUNT_IN)?;
+        let pre_roll = bars_arg(id, args, "pre_roll", MAX_PRE_ROLL)?;
+        let looped = flag_arg(id, args, "loop")?;
+        let replace = flag_arg(id, args, "replace")?;
+        let punch = flag_arg(id, args, "punch")?;
+        let takes = flag_arg(id, args, "passes_as_takes")?;
+        if let Some(on) = looped
+            && on != self.looping()
+        {
+            self.toggle_loop();
+            if self.looping() != on {
+                return Err(match self.alert.take() {
+                    Some(a) => refused(&format!("{}: {}", a.title, a.message)),
+                    None => refused("Loop Failed"),
+                });
+            }
+        }
+        if replace.is_some() || punch.is_some() {
+            self.update_layout(|l| {
+                if let Some(r) = replace {
+                    l.transport.overdub = !r;
+                }
+                if let Some(p) = punch {
+                    l.transport.punch = p;
+                }
+            });
+        }
+        if let Some(n) = count_in {
+            self.record.set_count_in(n);
+        }
+        if let Some(n) = pre_roll {
+            self.record.set_pre_roll(n);
+        }
+        if let Some(on) = takes {
+            self.record.set_midi_passes_as_takes(on);
+        }
+        Ok(())
+    }
+
+    /// `record.recover {action}`: imports the recordings a crash left
+    /// (one undo step) or moves them to the Trash. It never opens the
+    /// Recovered Recordings alert and leaves the window's offer alone; a
+    /// failure is the call's, "Recovery Failed: …".
+    fn recover_from_channel(
+        &mut self,
+        id: &str,
+        args: &[(String, ArgValue)],
+    ) -> Result<(), ControlError> {
+        let Some(action) = text_arg(args, "action") else {
+            return Err(ControlError::params(id, "missing `action`"));
+        };
+        let found = self.session.recovered_recordings().unwrap_or_default();
+        if found.is_empty() {
+            return Err(unavailable(NO_RECOVERED));
+        }
+        if self.gesture_open() {
+            return Err(unavailable(GESTURE_OPEN));
+        }
+        let result = self.session.recover_recordings(action == "import");
+        self.apply_result(result)
+            .map_err(|e| thrown(&e, crate::document::RECOVERY_FAILED))
+    }
+
+    /// `midi.inject {port, bytes}`: feeds hex bytes as if `port` sent them.
+    /// The core's refusal of the payload or port is `invalid_params`.
+    fn inject_midi(&mut self, id: &str, args: &[(String, ArgValue)]) -> Result<(), ControlError> {
+        let (Some(port), Some(bytes)) = (
+            text_arg(args, "port"),
+            text_arg(args, "bytes").and_then(hex_bytes),
+        ) else {
+            return Err(ControlError::params(id, INJECT_HEX));
+        };
+        match self.session.inject_midi(port.to_owned(), bytes) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(unavailable(INJECT_NO_ENGINE)),
+            Err(VizError::Model { message }) => Err(ControlError::params(id, message)),
+            Err(e) => Err(thrown(&e, "MIDI Injection Failed")),
+        }
     }
 
     /// `record.keep_pass` (`keep`) or `record.discard_pass`.

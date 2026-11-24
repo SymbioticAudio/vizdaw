@@ -2854,6 +2854,8 @@ impl DocSession for FakeSession {
         s.calls.push(format!("run_click({id})"));
         s.rec.clicks_run.push((id, args));
         s.rec.click = Some(click);
+        // As the core's: the transport read carries the click.
+        s.transport.click = Some(click);
         Ok(Self::command_result(&mut s))
     }
     fn step_entry(
@@ -2925,8 +2927,19 @@ impl DocSession for FakeSession {
         let mut s = self.st();
         Self::scripted(&mut s, "run_chore")?;
         s.calls.push(format!("run_chore({id})"));
+        // The core names a marker chore's undo step (`FFI/session.rs`).
+        let label = match id.as_str() {
+            "marker.add" => Some("Add Marker"),
+            "marker.rename" => Some("Rename Marker"),
+            "marker.remove" => Some("Remove Marker"),
+            _ => None,
+        };
         s.rec.chores.push((id, args));
-        Ok(Self::command_result(&mut s))
+        Self::command_result(&mut s);
+        if let Some(label) = label {
+            s.snap.undo_label = Some(label.into());
+        }
+        Ok(s.snap.clone())
     }
     fn input_info(&self) -> Result<InputInfoRow, VizError> {
         let mut s = self.st();

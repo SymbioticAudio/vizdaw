@@ -346,7 +346,7 @@ fn new_bus(args: &[(String, ArgValue)], doc: &mut DocumentModel) -> Result<Ran, 
 }
 
 /// The channel's arguments as the core's.
-fn control_args(args: &[(String, ArgValue)]) -> Vec<ControlArg> {
+pub(crate) fn control_args(args: &[(String, ArgValue)]) -> Vec<ControlArg> {
     args.iter()
         .map(|(name, v)| ControlArg {
             name: name.clone(),
