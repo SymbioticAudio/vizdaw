@@ -2,8 +2,8 @@
 //! `EqSlotView`, `StripInserts`) and sends (`SendKnobRow`, `SendKnob`) in
 //! the Mix view, through GPUI's test platform with the scripted session:
 //! the Swift labels, the slot and send menus, the insert drag, the send
-//! knob and box, and the parts that wait for the plugin windows and the
-//! catalogue (shown disabled).
+//! knob and box, the gestures that open the plug-in and Built-in Synth
+//! windows, and the parts that wait for the catalogue (shown disabled).
 
 use std::sync::Arc;
 
@@ -13,21 +13,32 @@ use gpui::{
 };
 use vizdaw_app::DocumentStore;
 use vizdaw_app::mixer::{MixerPlacement, StripEntry};
-use vizdaw_app::testing::{FakeSession, mixer_fake, slot_row, strip_row};
+use vizdaw_app::testing::{FakeSession, dest_row, mixer_fake, slot_row, strip_row};
+use vizdaw_ffi::BuiltinSound;
 use vizdaw_ffi::automation::GesturePhaseRow;
 use vizdaw_ffi::events::AutomationTargetRow as T;
-use vizdaw_ffi::mixer::{SendRow, StripKindRow};
+use vizdaw_ffi::mixer::{DestRow, SendRow, StripKindRow};
 use vizdaw_ffi::snapshot::SlotStatus;
 use vizdaw_gpui::mixer_view::MixerView;
+use vizdaw_gpui::plugin_windows::Subject;
 use vizdaw_gpui::registry::Element;
 use vizdaw_gpui::{AppState, DocumentWindow, RunCommand};
 
 /// Audio 1 (5: EQ "Q" 50, inserts Comp 51 and Verb 52 bypassed, a
 /// pre-fader send to Bus 1 at −6 dB), Audio 2 (6: no slots, no sends),
 /// Pad (7: a plugin instrument, slot 53), Synth (1, the Built-in Synth),
-/// Bus 1 (2), then Master (0).
+/// Bus 1 (2), then Master (0). Destinations 8 and 9 are Built-in
+/// Synths.
 fn fake() -> FakeSession {
     let f = mixer_fake();
+    f.edit_destinations(|d| {
+        for id in [8, 9] {
+            d.push(DestRow {
+                builtin_sound: Some(BuiltinSound::Piano),
+                ..dest_row(id, "Built-in Synth")
+            });
+        }
+    });
     f.edit_mixer(|m| {
         let mut a1 = strip_row(5, "Audio 1", StripKindRow::AudioPath { path: 1 });
         a1.eq = Some(slot_row(50, "Q"));
@@ -188,6 +199,26 @@ impl Setup {
         self.cx.run_until_parked();
     }
 
+    /// Whether the document has a window for `subject`.
+    fn is_open(&mut self, subject: Subject) -> bool {
+        let doc = self.window.read_with(&self.cx, |v, _| v.doc()).unwrap();
+        self.app
+            .read_with(&self.cx, |a, _| a.plugin_windows().is_open(doc, subject))
+    }
+
+    fn open_windows(&mut self) -> usize {
+        self.app
+            .read_with(&self.cx, |a, _| a.plugin_windows().len())
+    }
+
+    fn double_click(&mut self, role: &str, label: &str) {
+        let at = self.element(role, label).bounds.center();
+        for count in [1, 2] {
+            self.down(at, count);
+            self.up(at, count);
+        }
+    }
+
     fn calls_like(&self, prefix: &str) -> Vec<String> {
         self.fake
             .calls()
@@ -237,7 +268,7 @@ fn slot_rows_show_the_swift_labels(cx: &mut TestAppContext) {
     // The instruments.
     assert!(s.find("button", "Pad, instrument").is_some());
     let synth = s.element("button", "Built-in Synth, instrument");
-    assert!(!synth.enabled, "its menu and sound window come later");
+    assert!(synth.enabled, "its double-click opens its sounds");
     // Taller rows in one strip move every fader down alike.
     faders_line_up(&mut s);
 }
@@ -264,15 +295,17 @@ fn an_insert_menu_bypasses_sidechains_and_removes(cx: &mut TestAppContext) {
     assert_eq!(
         s.items(),
         [
-            ("Open".into(), false, false),
+            ("Open".into(), true, false),
             ("Bypass".into(), true, false),
             ("Sidechain".into(), true, false),
             ("Remove".into(), true, false),
         ]
     );
-    // Open waits for the plugin windows: nothing happens.
+    // Open opens the insert's window.
     s.click("menuitem", "Open");
-    assert!(s.fake.calls().is_empty(), "{:?}", s.fake.calls());
+    assert!(s.is_open(Subject::Plugin(51)));
+    assert!(s.titles().is_empty(), "the menu closed");
+    s.right_click("button", "Comp");
     // Sidechain ▸ None, then every other strip but master.
     s.click("menuitem", "Sidechain");
     let titles = s.titles();
@@ -307,7 +340,7 @@ fn the_eq_menu_offers_remove_eq_and_waits_for_replace(cx: &mut TestAppContext) {
     assert_eq!(
         s.items(),
         [
-            ("Open".into(), false, false),
+            ("Open".into(), true, false),
             ("Replace\u{2026}".into(), false, false),
             ("Bypass".into(), true, false),
             ("Remove EQ".into(), true, false),
@@ -327,15 +360,15 @@ fn the_instrument_slot_menu_bypasses_and_loads_a_held_slot(cx: &mut TestAppConte
     assert_eq!(
         s.items(),
         [
-            ("Open".into(), false, false),
+            ("Open".into(), true, false),
             ("Load".into(), true, false),
             ("Bypass".into(), true, false),
         ]
     );
     s.click("menuitem", "Load");
     assert_eq!(s.fake.loaded(), [vec![53]]);
-    // A click on the slot or the Built-in Synth's (their menus and
-    // windows come later) does nothing.
+    // A click on the slot or the Built-in Synth's (their instrument menu
+    // comes with the catalogue) does nothing.
     s.click("button", "Pad, instrument");
     s.click("button", "Built-in Synth, instrument");
     s.right_click("button", "Built-in Synth, instrument");
@@ -786,4 +819,77 @@ fn a_drag_whose_mouse_up_was_lost_never_drops_on_a_later_click(cx: &mut TestAppC
         "{:?}",
         s.fake.calls()
     );
+}
+
+#[gpui::test]
+fn open_in_the_eq_and_instrument_menus_opens_their_windows(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    s.right_click("group", "EQ of Audio 1");
+    s.click("menuitem", "Open");
+    assert!(s.is_open(Subject::Plugin(50)));
+    s.right_click("button", "Pad, instrument");
+    s.click("menuitem", "Open");
+    assert!(s.is_open(Subject::Plugin(53)));
+    assert_eq!(s.open_windows(), 2);
+}
+
+#[gpui::test]
+fn a_double_click_on_an_insert_opens_its_window_and_arms_no_drag(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    let comp = s.element("button", "Comp").bounds.center();
+    s.down(comp, 1);
+    s.up(comp, 1);
+    assert!(!s.is_open(Subject::Plugin(51)), "a click opens nothing");
+    s.down(comp, 2);
+    let v = s.view();
+    assert!(
+        v.read_with(&s.cx, |v, _| v.insert_drag()).is_none(),
+        "the double-click arms no drag"
+    );
+    // Moving on with the button down drags nothing.
+    s.move_to(point(comp.x, comp.y + px(22.)), true);
+    assert!(v.read_with(&s.cx, |v, _| v.insert_drag()).is_none());
+    s.up(point(comp.x, comp.y + px(22.)), 2);
+    assert!(s.calls_like("move_insert").is_empty());
+    assert!(s.is_open(Subject::Plugin(51)));
+    assert_eq!(s.open_windows(), 1);
+}
+
+#[gpui::test]
+fn a_double_click_on_an_instrument_slot_opens_its_window(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    s.click("button", "Pad, instrument");
+    assert!(!s.is_open(Subject::Plugin(53)));
+    s.double_click("button", "Pad, instrument");
+    assert!(s.is_open(Subject::Plugin(53)));
+    assert_eq!(s.open_windows(), 1);
+}
+
+#[gpui::test]
+fn the_eq_slot_opens_on_a_single_click_and_its_bypass_does_not(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    s.click("button", "Bypass EQ of Audio 1");
+    assert!(!s.is_open(Subject::Plugin(50)), "the bypass only bypasses");
+    let eq = s.element("group", "EQ of Audio 1").bounds;
+    // On the name, left of the bypass button.
+    s.click_at(point(eq.origin.x + px(8.), eq.center().y));
+    assert!(s.is_open(Subject::Plugin(50)));
+    // The empty EQ's "EQ ＋" waits for the catalogue.
+    s.click("button", "EQ of Audio 2");
+    assert_eq!(s.open_windows(), 1);
+}
+
+#[gpui::test]
+fn a_double_click_on_the_builtin_synth_slot_opens_its_sounds(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    // Its single click is the instrument menu: not yet.
+    s.click("button", "Built-in Synth, instrument");
+    assert_eq!(s.open_windows(), 0);
+    s.double_click("button", "Built-in Synth, instrument");
+    // Nothing focused: the first Built-in Synth.
+    assert!(s.is_open(Subject::BuiltinSynth(8)));
+    assert_eq!(s.open_windows(), 1);
+    // Again: the same window.
+    s.double_click("button", "Built-in Synth, instrument");
+    assert_eq!(s.open_windows(), 1);
 }

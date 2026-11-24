@@ -44,8 +44,8 @@
 //!   there the editor opens with no parent view (the scripted session
 //!   takes it; the real core refuses it as "no parent view").
 //!
-//! The header's controls and the parameter list are drawn by the plug-in
-//! window's view; this slice draws the header's place and the editor's.
+//! The windows' drawing (the header, the parameter list, the Built-in
+//! Synth window's sounds) is `view.rs`'s.
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -53,6 +53,7 @@ mod linux;
 mod macos;
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod other;
+mod view;
 #[cfg(target_os = "linux")]
 mod x11;
 
@@ -64,12 +65,13 @@ use macos as platform;
 use other as platform;
 
 pub use platform::{EditorHost, Parked};
+pub use view::PluginWindowView;
 
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyWindowHandle, App, AppContext, Bounds, Context, Entity, IntoElement, ParentElement, Render,
-    Styled, Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions, div, px, rgb, size,
+    AnyWindowHandle, App, AppContext, Bounds, TitlebarOptions, Window, WindowBounds, WindowOptions,
+    px, size,
 };
 use vizdaw_app::alerts::AlertItem;
 use vizdaw_app::builtin_synth_window::{self, BuiltinSynthWindowModel};
@@ -78,7 +80,7 @@ use vizdaw_app::plugin_window::{HEADER_HEIGHT, INITIAL_SIZE, MIN_CONTENT, Plugin
 use vizdaw_app::{DocId, DocumentModel, DocumentStore, WindowToken};
 
 use crate::app_state::{AppState, FAST_POLL, WindowKind};
-use crate::registry::{RegistryScope, SharedRegistry};
+use crate::registry::SharedRegistry;
 
 /// How often the windows' tick runs (Swift's 60 Hz tick).
 pub const TICK_EVERY: Duration = FAST_POLL;
@@ -264,6 +266,37 @@ impl PluginWindows {
             ),
             Model::Synth(_) => (builtin_synth_window::SIZE, false),
         })
+    }
+
+    /// Runs `f` with window `token`'s plug-in model and its document.
+    fn with_plugin<R>(
+        &mut self,
+        token: WindowToken,
+        store: &mut DocumentStore,
+        f: impl FnOnce(&mut PluginWindowModel, &mut DocumentModel) -> R,
+    ) -> Option<R> {
+        let e = self.entries.iter_mut().find(|e| e.token == token)?;
+        let Model::Plugin(m) = &mut e.model else {
+            return None;
+        };
+        let d = store.document_mut(e.doc)?;
+        Some(f(m, d))
+    }
+
+    /// Runs `f` with window `token`'s Built-in Synth model and its
+    /// document.
+    fn with_synth<R>(
+        &mut self,
+        token: WindowToken,
+        store: &mut DocumentStore,
+        f: impl FnOnce(&mut BuiltinSynthWindowModel, &mut DocumentModel) -> R,
+    ) -> Option<R> {
+        let e = self.entries.iter_mut().find(|e| e.token == token)?;
+        let Model::Synth(m) = &mut e.model else {
+            return None;
+        };
+        let d = store.document_mut(e.doc)?;
+        Some(f(m, d))
     }
 
     // Registering and closing.
@@ -594,6 +627,15 @@ pub fn show_plugin_window(doc: DocId, slot: u64, cx: &mut App) -> Option<AnyWind
 /// Built-in Synth.
 pub fn show_builtin_synth_window(doc: DocId, dest: u64, cx: &mut App) -> Option<AnyWindowHandle> {
     show(doc, Subject::BuiltinSynth(dest), cx)
+}
+
+/// Opens (`doc`, `subject`)'s window, or brings it to the front, on a
+/// later turn of the main loop: what a gesture or a menu item calls, never
+/// inside the event's own dispatch or the platform's callback.
+pub fn show_later(doc: DocId, subject: Subject, cx: &App) {
+    later(cx, move |cx| {
+        show(doc, subject, cx);
+    });
 }
 
 fn show(doc: DocId, subject: Subject, cx: &mut App) -> Option<AnyWindowHandle> {
@@ -934,90 +976,7 @@ pub(crate) fn install(cx: &mut App) {
 /// The registry of a plug-in or Built-in Synth window.
 pub(crate) fn registry(handle: AnyWindowHandle, cx: &App) -> Option<SharedRegistry> {
     let h = handle.downcast::<PluginWindowView>()?;
-    h.read(cx).ok().map(|v| v.registry.clone())
-}
-
-// The window.
-
-/// A plug-in or Built-in Synth window's view. Its model and editor host
-/// live in the registry ([`PluginWindows`]); the view draws them.
-pub struct PluginWindowView {
-    app: Entity<AppState>,
-    token: WindowToken,
-    subject: Subject,
-    registry: SharedRegistry,
-    _subscriptions: Vec<Subscription>,
-}
-
-impl PluginWindowView {
-    fn new(
-        app: Entity<AppState>,
-        _doc: DocId,
-        subject: Subject,
-        token: WindowToken,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let subscriptions = vec![
-            cx.observe_in(&app, window, move |_, app, window, cx| {
-                // Its entry went (its document closed, quit, its slot
-                // went): the window goes; its editor is already closed.
-                if app.read(cx).plugin_windows.entry(token).is_none() {
-                    window.remove_window();
-                    return;
-                }
-                cx.notify();
-            }),
-            cx.observe_window_bounds(window, move |_, window, cx| {
-                let v = window.viewport_size();
-                let content = (
-                    f64::from(f32::from(v.width)),
-                    f64::from(f32::from(v.height)),
-                );
-                // Later, on its own turn of the main loop: the editor is
-                // asked outside this window's update and the platform's
-                // resize callback, and its answer is not applied from
-                // inside the resize handler.
-                later(cx, move |cx| user_resized(token, content, cx));
-            }),
-            cx.on_release(move |_, cx| {
-                // Closed some other way (the platform tearing it down):
-                // the editor closes now, if it has not.
-                if AppState::global(cx)
-                    .read(cx)
-                    .plugin_windows
-                    .entry(token)
-                    .is_some()
-                {
-                    close(token, cx);
-                }
-            }),
-        ];
-        window.on_window_should_close(cx, move |_, cx| {
-            // The close runs later, outside this window's update and the
-            // platform's close callback; the window goes once its editor
-            // and container have.
-            later(cx, move |cx| close(token, cx));
-            false
-        });
-        PluginWindowView {
-            app,
-            token,
-            subject,
-            registry: SharedRegistry::default(),
-            _subscriptions: subscriptions,
-        }
-    }
-
-    /// What this window shows.
-    pub fn subject(&self) -> Subject {
-        self.subject
-    }
-
-    /// The elements this window drew last.
-    pub fn registry(&self) -> &SharedRegistry {
-        &self.registry
-    }
+    h.read(cx).ok().map(|v| v.registry().clone())
 }
 
 /// Runs `f` on a later turn of the main loop (a task), never inside the
@@ -1044,52 +1003,5 @@ fn user_resized(token: WindowToken, content: (f64, f64), cx: &mut App) {
     {
         h.update(cx, |_, window, cx| apply_size(token, window, cx))
             .ok();
-    }
-}
-
-/// The colours of this slice (themes come later).
-mod colors {
-    pub const BACKGROUND: u32 = 0x1e1e25;
-    pub const HEADER: u32 = 0x26262e;
-    pub const DIVIDER: u32 = 0x3a3a46;
-}
-
-impl Render for PluginWindowView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let _root = RegistryScope::root(&self.registry);
-        let s = self.app.read(cx);
-        let root = div().size_full().bg(rgb(colors::BACKGROUND));
-        let Some(e) = s.plugin_windows.entry(self.token) else {
-            return root;
-        };
-        let Model::Plugin(m) = &e.model else {
-            return root;
-        };
-        // The header's place: 37 points with its divider.
-        let header = div()
-            .w_full()
-            .h(px(HEADER_HEIGHT as f32))
-            .flex_none()
-            .bg(rgb(colors::HEADER))
-            .border_b_1()
-            .border_color(rgb(colors::DIVIDER));
-        let body = match m.editor_size() {
-            Some(ed) => {
-                let area = div()
-                    .flex_none()
-                    .w(px(ed.width as f32))
-                    .h(px(ed.height as f32));
-                match e.host.as_ref().and_then(EditorHost::native_view) {
-                    Some(v) => area.child(v.clone()),
-                    None => area,
-                }
-            }
-            None => div().w_full().flex_1(),
-        };
-        root.flex()
-            .flex_col()
-            .overflow_hidden()
-            .child(header)
-            .child(body)
     }
 }

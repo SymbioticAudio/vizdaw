@@ -12,9 +12,11 @@
 //! menu, the pan, the fader with its scale and meter, the level, M S R I
 //! and the automation mode. Master has no sends, output, pan or solo (a
 //! blank keeps the row). A strip silent because others solo dims to
-//! half; the selected strip's edge is the accent. What needs a plugin
-//! window or the plugin catalogue ("Open", a slot's double-click, the
-//! instrument menu, "+", "EQ ＋", "Replace…") shows disabled.
+//! half; the selected strip's edge is the accent. "Open" and a slot's
+//! double-click (the EQ slot's click) open its plug-in window, and the
+//! Built-in Synth slot's double-click its sound window. What needs the
+//! plugin catalogue (the instrument menu, "+", "EQ ＋", "Replace…") shows
+//! disabled.
 //!
 //! A grouped strip shows its group tag under its kind (its menu: Link
 //! Mutes, Link Solos, Remove from Group, Ungroup); a drag of its fader is
@@ -55,6 +57,7 @@ use gpui::{
     deferred, div, point, px, rgb,
 };
 use vizdaw_app::DocumentModel;
+use vizdaw_app::builtin_synth_window::builtin_synth_destination;
 use vizdaw_app::mixer::layout::{
     RowHeights, StripGrid, StripLayout, StripRowKind, midi_rows, rows_of, vca_rows,
 };
@@ -74,6 +77,7 @@ use crate::controls::{
     self, ControlBinding, Entry, Grip, KnobSize, MixerRef, NumberBinding, NumberBox, Toggle, fader,
 };
 use crate::frame_stats;
+use crate::plugin_windows::{self, Subject};
 use crate::registry::RegistryScope;
 use crate::strip_palette::{KnobFunction, tokens};
 use crate::text_input::{TextInput, TextInputEvent};
@@ -1776,7 +1780,7 @@ fn strip(
     if let (Some(part), (Some(y), Some(_))) = (&s.instrument, row(StripRowKind::Instrument)) {
         let el = match part {
             InstrumentPart::Plugin(x) => slot_holder(view, s.id, x, None, scope, window, cx),
-            InstrumentPart::BuiltinSynth => builtin_synth_slot(scope),
+            InstrumentPart::BuiltinSynth => builtin_synth_slot(view, scope, cx),
         };
         out = out.child(at(side, y, inner, RowHeights::SLOT).child(el));
     }
@@ -2225,9 +2229,10 @@ fn open_entries(
 
 /// A slot of `strip` (the instrument's, or insert `place` of `count`):
 /// `button` in the tree, its label the plugin ("<plugin>, instrument" for
-/// an instrument). A right-click opens its menu; an insert is pressed to
-/// be dragged. A click or double-click (the instrument menu, the plugin
-/// window) does nothing yet.
+/// an instrument). A right-click opens its menu; a double-click opens its
+/// plug-in window (an insert's arms no drag); an insert's single press is
+/// pressed to be dragged. An instrument's single click (the instrument
+/// menu) comes with the catalogue.
 fn slot_holder(
     view: &Entity<MixerView>,
     strip: u64,
@@ -2250,17 +2255,23 @@ fn slot_holder(
                 .ok();
             cx.stop_propagation();
         });
-    if let Some((place, count)) = insert {
-        let pressed = view.downgrade();
-        el = el.on_mouse_down(MouseButton::Left, move |e: &MouseDownEvent, _, cx| {
+    let doc = view.read(cx).mixer.doc;
+    let pressed = view.downgrade();
+    el = el.on_mouse_down(MouseButton::Left, move |e: &MouseDownEvent, _, cx| {
+        if e.click_count >= 2 {
+            // The window, not a drag: the first click's up ended its press.
+            pressed.update(cx, |v, _| v.insert_drag = None).ok();
+            plugin_windows::show_later(doc, Subject::Plugin(slot), cx);
+            cx.stop_propagation();
+        } else if let Some((place, count)) = insert {
             pressed
                 .update(cx, |v, _| {
                     v.press_insert(strip, slot, place, count, e.position.y)
                 })
                 .ok();
             cx.stop_propagation();
-        });
-    }
+        }
+    });
     let mut holder = div().relative().size_full().child(el);
     if let Some(items) = open_entries(view, strip, StripMenu::Slot(slot), cx, |mx, m, _| {
         slot_entries(mx, m, slot)
@@ -2270,12 +2281,13 @@ fn slot_holder(
     holder.into_any_element()
 }
 
-/// The Built-in Synth's slot (Swift `BuiltinSynthSlotView`): its click
-/// (the instrument menu) and double-click (its sounds) come with the
-/// catalogue and the sound window, so it records disabled. Its Swift hint
-/// still names them.
-fn builtin_synth_slot(scope: &mut RegistryScope) -> AnyElement {
+/// The Built-in Synth's slot (Swift `BuiltinSynthSlotView`): a
+/// double-click opens the sound window of the Built-in Synth the focused
+/// track plays (else the first). Its click (the instrument menu) comes
+/// with the catalogue.
+fn builtin_synth_slot(view: &Entity<MixerView>, scope: &mut RegistryScope, cx: &App) -> AnyElement {
     let t = tokens();
+    let mixer = view.read(cx).mixer.clone();
     div()
         .relative()
         .size_full()
@@ -2285,7 +2297,22 @@ fn builtin_synth_slot(scope: &mut RegistryScope) -> AnyElement {
             false,
             false,
         ))
-        .child(scope.control("button", SlotLabels::BUILTIN_SYNTH_LABEL, false))
+        .child(scope.control("button", SlotLabels::BUILTIN_SYNTH_LABEL, true))
+        .on_mouse_down(MouseButton::Left, move |e: &MouseDownEvent, _, cx| {
+            if e.click_count < 2 {
+                return;
+            }
+            let dest = mixer
+                .read(cx, |m, d| {
+                    let focus = d.focus_lanes().first().and_then(|l| l.midi_dest);
+                    builtin_synth_destination(m.destinations(), focus)
+                })
+                .flatten();
+            if let Some(dest) = dest {
+                plugin_windows::show_later(mixer.doc, Subject::BuiltinSynth(dest), cx);
+            }
+            cx.stop_propagation();
+        })
         .into_any_element()
 }
 
@@ -2314,8 +2341,9 @@ fn add_face(text: &str, label: &str, value: Option<&str>, scope: &mut RegistrySc
 
 /// The EQ slot (Swift `EqSlotView`): empty, the disabled "EQ ＋" (`EQ of
 /// <strip>`, value `empty`); loaded, a `group` `EQ of <strip>` valued
-/// with its plugin: the dot, the name and the bypass button. A
-/// right-click opens its menu.
+/// with its plugin: the dot, the name and the bypass button. A click on
+/// it (not its bypass) opens its plug-in window; a right-click opens its
+/// menu.
 fn eq_slot(
     view: &Entity<MixerView>,
     s: &StripParts,
@@ -2362,7 +2390,9 @@ fn eq_slot(
         .child(group.control("button", &bypass_label, true))
         .on_click(move |_, _, cx| {
             bypassing.with(cx, |m, d| m.toggle_bypass(d, slot));
+            cx.stop_propagation();
         });
+    let doc = view.read(cx).mixer.doc;
     let menu = view.downgrade();
     let mut holder = div()
         .relative()
@@ -2374,10 +2404,16 @@ fn eq_slot(
         .bg(rgb(t.surface_inset))
         .child(
             div()
+                .id(gpui::ElementId::Name(
+                    format!("mixer-eq-face:{slot}").into(),
+                ))
                 .flex_1()
                 .min_w_0()
                 .h(px(RowHeights::SLOT as f32))
-                .child(slot_face(eq.dot, &eq.name, eq.bypass, eq.dim).border_0()),
+                .child(slot_face(eq.dot, &eq.name, eq.bypass, eq.dim).border_0())
+                .on_click(move |_, _, cx| {
+                    plugin_windows::show_later(doc, Subject::Plugin(slot), cx);
+                }),
         )
         .child(bypass)
         .child(scope.control_with("group", &label, true, Some(&eq.name), false))
@@ -2800,9 +2836,9 @@ fn strip_entries(
 }
 
 /// Slot `slot`'s menu (Swift `SlotView.menu`, `EqSlotView.menu`): Open
-/// (disabled: the plugin windows come later), Load (held), Replace… (the
-/// EQ; disabled: the catalogue comes later), Bypass or Turn On, Sidechain
-/// ▸, Remove (an insert) or Remove EQ.
+/// (its plug-in window), Load (held), Replace… (the EQ; disabled: the
+/// catalogue comes later), Bypass or Turn On, Sidechain ▸, Remove (an
+/// insert) or Remove EQ.
 fn slot_entries(mixer: &MixerRef, m: &MixerModel, slot: u64) -> Vec<MenuEntry> {
     let Some((s, x, place)) = m.slot(slot) else {
         return vec![];
@@ -2814,7 +2850,13 @@ fn slot_entries(mixer: &MixerRef, m: &MixerModel, slot: u64) -> Vec<MenuEntry> {
             let mx = mixer.clone();
             match item {
                 SlotMenuItem::Divider => MenuEntry::Separator,
-                SlotMenuItem::Open | SlotMenuItem::Replace => MenuEntry::waiting(item.title()),
+                SlotMenuItem::Open => {
+                    let doc = mixer.doc;
+                    MenuEntry::item(item.title(), move |_, cx| {
+                        plugin_windows::show_later(doc, Subject::Plugin(slot), cx);
+                    })
+                }
+                SlotMenuItem::Replace => MenuEntry::waiting(item.title()),
                 SlotMenuItem::Sidechain(ref choices) => {
                     let items = choices
                         .iter()
