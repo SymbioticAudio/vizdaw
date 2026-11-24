@@ -16,7 +16,7 @@
 //! (the document window polls it).
 
 use std::cell::{Cell, RefCell};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -1093,33 +1093,33 @@ impl DocumentWindow {
         }
     }
 
+    /// Swift's save panel (row 4); a name typed without `.vizdaw` gets it,
+    /// and the app asks before replacing a project there.
     fn prompt_save_as(&mut self, close: bool, window: &mut Window, cx: &mut Context<Self>) {
         let doc = self.doc;
-        let (dir, name) = {
+        let place = {
             let s = self.app.read(cx);
-            (s.save_directory(doc), s.suggested_name(doc))
+            crate::file_panels::PanelPlace {
+                directory: Some(s.save_directory(doc)),
+                name: s.save_title(doc),
+                ext: String::new(),
+            }
         };
-        let chosen = cx.prompt_for_new_path(&dir, Some(&name));
+        let chosen = crate::file_panels::choose_save(
+            &vizdaw_app::panels::SAVE_PROJECT,
+            place,
+            window.window_handle(),
+            cx,
+        );
         cx.spawn_in(window, async move |this, cx| {
             let answer = chosen.await;
-            this.update_in(cx, |this, window, cx| {
-                let path = match answer {
-                    Ok(Ok(Some(path))) => Some(path),
-                    Ok(Err(e)) => {
-                        this.app.update(cx, |s, cx| {
-                            cx.notify();
-                            s.store
-                                .post_alert(AlertItem::new("Save Failed", e.to_string()));
-                        });
-                        None
-                    }
-                    _ => None,
-                };
-                let Some(path) = path else { return };
-                match crate::app_state::silent_replacement(&path) {
-                    Some(existing) => this.confirm_replace(doc, path, existing, close, window, cx),
-                    None => this.finish_save_as(doc, &path, close, window, cx),
-                }
+            this.update_in(cx, |this, window, cx| match answer {
+                Ok(Some(path)) => this.finish_save_as(doc, &path, close, window, cx),
+                Ok(None) => {}
+                Err(e) => this.app.update(cx, |s, cx| {
+                    cx.notify();
+                    s.store.post_alert(AlertItem::new("Save Failed", e));
+                }),
             })
             .ok();
         })
@@ -1141,39 +1141,6 @@ impl DocumentWindow {
         if saved && close {
             window.remove_window();
         }
-    }
-
-    /// The panel did not ask (the name had no extension), so ask before
-    /// saving over the existing project.
-    fn confirm_replace(
-        &mut self,
-        doc: DocId,
-        path: PathBuf,
-        existing: PathBuf,
-        close: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let name = existing
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let answer = window.prompt(
-            PromptLevel::Warning,
-            &format!("\u{201c}{name}\u{201d} already exists. Do you want to replace it?"),
-            Some("Replacing it overwrites the project that is there."),
-            &["Replace", "Cancel"],
-            cx,
-        );
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(0) = answer.await {
-                this.update_in(cx, |this, window, cx| {
-                    this.finish_save_as(doc, &path, close, window, cx)
-                })
-                .ok();
-            }
-        })
-        .detach();
     }
 
     /// True when the window may close now; with unsaved changes it asks

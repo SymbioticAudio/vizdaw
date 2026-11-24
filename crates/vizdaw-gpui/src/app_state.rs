@@ -371,17 +371,18 @@ impl AppState {
             .unwrap_or_else(|| PathBuf::from("/"))
     }
 
-    /// The name Save As suggests.
-    pub fn suggested_name(&self, doc: DocId) -> String {
+    /// The title Save As names the file after ("Untitled" when empty).
+    pub fn save_title(&self, doc: DocId) -> String {
         let title = self
             .store
             .document(doc)
             .map(|d| d.snapshot().title.clone())
             .unwrap_or_default();
-        format!(
-            "{}.vizdaw",
-            if title.is_empty() { "Untitled" } else { &title }
-        )
+        if title.is_empty() {
+            "Untitled".to_owned()
+        } else {
+            title
+        }
     }
 
     /// Dismisses the alert showing; the next queued one takes its place.
@@ -397,14 +398,6 @@ pub fn mixer_title(d: &DocumentModel) -> String {
 
 fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
-}
-
-/// The existing project `path` would silently replace: `Some` when adding
-/// the `.vizdaw` extension changed the path (so the save panel never asked
-/// about replacing it) and the result exists.
-pub fn silent_replacement(path: &Path) -> Option<PathBuf> {
-    let full = with_extension(path);
-    (full != path && full.exists()).then_some(full)
 }
 
 /// `path`, ending in `.vizdaw`.

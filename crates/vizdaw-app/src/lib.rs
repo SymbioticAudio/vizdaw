@@ -14,6 +14,7 @@ pub mod interchange_commands;
 pub mod jobs;
 pub mod list;
 pub mod mixer;
+pub mod panels;
 pub mod piano_roll;
 pub mod position;
 pub mod prefs;

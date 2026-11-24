@@ -298,6 +298,7 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "getrandom 0.4.3",
+ "raw-window-handle",
  "serde",
  "serde_repr",
  "wayland-backend",
@@ -6398,15 +6399,21 @@ dependencies = [
 name = "vizdaw-gpui"
 version = "26.0.0"
 dependencies = [
+ "ashpd",
  "core-control",
  "core-ffi",
  "gpui",
  "gpui_platform",
  "image",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "objc2-uniform-type-identifiers",
  "raw-window-handle",
  "serde_json",
  "tempfile",
  "unicode-segmentation",
+ "url",
  "vizdaw-app",
  "x11rb",
 ]

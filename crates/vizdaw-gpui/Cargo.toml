@@ -26,6 +26,19 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f4fe0be1
 [target.'cfg(target_os = "linux")'.dependencies]
 # ui.screenshot reads the window's pixels from the X server.
 x11rb = "0.13"
+# The file panels (file_panels/linux.rs): the portal file chooser, the
+# version and runtime GPUI's Linux platform uses (async-io, no tokio), so
+# one copy; `raw_handle` makes the window identifier from GPUI's handles.
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "file_chooser", "raw_handle"] }
+url = "2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The file panels (file_panels/macos.rs): the versions GPUI's macOS
+# platform already uses.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSOpenPanel", "NSPanel", "NSResponder", "NSSavePanel", "NSWindow", "objc2-uniform-type-identifiers"] }
+objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std", "UTType"] }
 
 [features]
 # ui.screenshot on macOS: GPUI's `Window::render_to_image` exists at this

@@ -7,6 +7,7 @@ mod channel_strip_pane;
 pub mod control;
 pub mod controls;
 pub mod detail_pane;
+pub mod file_panels;
 mod fit;
 #[doc(hidden)]
 pub mod frame_stats;
@@ -29,7 +30,7 @@ mod vca_strip;
 
 use std::path::Path;
 
-use gpui::{App, PathPromptOptions, PromptLevel, WindowHandle};
+use gpui::{App, PromptLevel, WindowHandle};
 use vizdaw_app::alerts::AlertItem;
 use vizdaw_app::store::{CrashChoice, Opened};
 use vizdaw_app::{DocId, DocumentStore};
@@ -125,31 +126,32 @@ pub(crate) fn show(doc: Option<DocId>, cx: &mut App) -> Option<WindowHandle<Docu
     handle
 }
 
-/// File › Open…: GPUI's path prompt (a `.vizdaw` project is a folder).
+/// File › Open…: Swift's open panel (one project, MIDI, DAWproject or
+/// AAF file; on Linux a project is chosen by its `project.json`).
 pub fn prompt_open(cx: &mut App) {
-    let chosen = cx.prompt_for_paths(PathPromptOptions {
-        files: true,
-        directories: true,
-        multiple: true,
-        prompt: Some("Open".into()),
-    });
+    let window = cx.active_window();
+    let chosen = file_panels::choose(
+        &vizdaw_app::panels::OPEN_PROJECT,
+        file_panels::PanelPlace::default(),
+        window,
+        cx,
+    );
     cx.spawn(async move |cx| {
         let answer = chosen.await;
         cx.update(|cx| match answer {
-            Ok(Ok(Some(paths))) => {
+            Ok(Some(paths)) => {
                 for p in paths {
                     open_path(&p, cx);
                 }
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 let app = AppState::global(cx);
                 app.update(cx, |s, cx| {
-                    s.store
-                        .post_alert(AlertItem::new("Open Failed", e.to_string()));
+                    s.store.post_alert(AlertItem::new("Open Failed", e));
                     cx.notify();
                 });
             }
-            _ => {}
+            Ok(None) => {}
         });
     })
     .detach();
@@ -243,6 +245,7 @@ pub fn run() {
     let options = control::LaunchOptions::from_env();
     gpui_platform::application().run(move |cx: &mut App| {
         let state = install(DocumentStore::live(), cx);
+        file_panels::use_native(cx);
         // The preferences under the launch home (a throwaway e2e home
         // keeps its own).
         state.update(cx, |s, _| s.set_prefs(vizdaw_app::Prefs::open()));
