@@ -914,9 +914,10 @@ impl DocumentWindow {
         let regions = self.regions.clone();
         let weak = cx.entity().downgrade();
         canvas(
-            move |bounds, _, cx| {
+            move |bounds, window, cx| {
                 if regions.get() != bounds.size {
                     regions.set(bounds.size);
+                    window.request_animation_frame();
                     let weak = weak.clone();
                     cx.defer(move |cx| {
                         weak.update(cx, |_, cx| cx.notify()).ok();

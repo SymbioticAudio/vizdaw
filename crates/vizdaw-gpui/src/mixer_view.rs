@@ -358,6 +358,11 @@ impl MixerView {
         self.scroll
     }
 
+    /// How far the strips scrolled at most last frame (x, y).
+    pub fn room(&self) -> (f64, f64) {
+        self.room
+    }
+
     /// Scrolls the strips to (x, y) (kept inside them at the next draw).
     pub fn scroll_to(&mut self, x: f64, y: f64, cx: &mut Context<Self>) {
         self.scroll = (x.max(0.), y.max(0.));
@@ -531,6 +536,14 @@ impl MixerView {
         let over = (d.from as f64 + places).clamp(0., last) as usize;
         if d.over != Some(over) {
             d.over = Some(over);
+            cx.notify();
+        }
+    }
+
+    /// A press while an insert drag is open: its mouse-up never came, so
+    /// it ends where it started.
+    fn cancel_insert_drag(&mut self, cx: &mut Context<Self>) {
+        if self.insert_drag.take().is_some() {
             cx.notify();
         }
     }
@@ -973,8 +986,12 @@ pub fn render(
     let remeasure = weak.clone();
     let dragging = weak.clone();
     let measure = canvas(
-        move |bounds, _, cx| {
+        move |bounds, window, cx| {
             if measured.get().size != bounds.size {
+                // Drawn for the old size: the next frame is drawn for this
+                // one (the platform's frame, not only the notify chain, so
+                // a stopped mixer does not keep a stale layout).
+                window.request_animation_frame();
                 let w = remeasure.clone();
                 cx.defer(move |cx| {
                     w.update(cx, |_, cx| cx.notify()).ok();
@@ -985,17 +1002,26 @@ pub fn render(
         // An insert's drag follows the pointer anywhere in the window:
         // these listeners are registered on every paint and see at the
         // event whether an insert is pressed (the mouse-up may come before
-        // the frame after the press).
+        // the frame after the press). They listen in the capture phase,
+        // so no element that stops the event can keep the drop from them;
+        // and a press while a drag is still open (its mouse-up was lost)
+        // ends that drag first, moving nothing.
         move |_, _, window, _| {
+            let pressed = dragging.clone();
+            window.on_mouse_event(move |_: &MouseDownEvent, phase, _, cx| {
+                if phase == DispatchPhase::Capture {
+                    pressed.update(cx, |v, cx| v.cancel_insert_drag(cx)).ok();
+                }
+            });
             let moved = dragging.clone();
             window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
-                if phase == DispatchPhase::Bubble {
+                if phase == DispatchPhase::Capture {
                     moved.update(cx, |v, cx| v.drag_insert(e, cx)).ok();
                 }
             });
             let dropped = dragging.clone();
             window.on_mouse_event(move |e: &MouseUpEvent, phase, _, cx| {
-                if phase == DispatchPhase::Bubble && e.button == MouseButton::Left {
+                if phase == DispatchPhase::Capture && e.button == MouseButton::Left {
                     dropped.update(cx, |v, cx| v.drop_insert(cx)).ok();
                 }
             });

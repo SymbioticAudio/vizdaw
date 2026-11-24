@@ -435,7 +435,7 @@ fn mixer_items(front: Option<&DocumentModel>) -> Vec<ItemSpec> {
         title: title.to_owned(),
         enabled,
     };
-    let new_vca = || item(MixerOp::NewVca, "New VCA", front.is_some());
+    let new_vca = || item(MixerOp::NewVca, "New VCA", mixer.is_some());
     let vcas = mixer.map_or(&[][..], |(m, _)| m.vcas());
     let mut assign: Vec<ItemSpec> = vcas
         .iter()

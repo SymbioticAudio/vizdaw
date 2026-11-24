@@ -666,6 +666,12 @@ fn the_mixer_menu_follows_the_selection_groups_and_vcas() {
     let m = menu_of(&menu_model(Some(&doc), &keymap), "Mixer").to_vec();
     assert!(matches!(&m[4], ItemSpec::Submenu { enabled: false, .. }));
     assert_eq!(m[3], mixer(MixerOp::NewVca, "New VCA", true));
+    // A document whose mixer was never made: New VCA is off (Swift's
+    // `mixer == nil`).
+    let plain = demo_doc();
+    assert!(plain.mixer().is_none());
+    let m = menu_of(&menu_model(Some(&plain), &keymap), "Mixer").to_vec();
+    assert_eq!(m[3], mixer(MixerOp::NewVca, "New VCA", false));
     // No document: all off.
     let m = menu_of(&menu_model(None, &keymap), "Mixer").to_vec();
     assert_eq!(m[3], mixer(MixerOp::NewVca, "New VCA", false));

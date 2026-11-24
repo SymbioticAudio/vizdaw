@@ -544,3 +544,188 @@ fn a_sends_menu_switches_pre_fader_and_on_and_removes_it(cx: &mut TestAppContext
     assert!(s.find("slider", "Send knob 1 of Audio 1").is_none());
     assert!(s.find("button", "New bus fed by Audio 1").is_some());
 }
+
+#[gpui::test]
+fn at_the_default_window_size_the_strips_fit_their_area(cx: &mut TestAppContext) {
+    // The demo's strips plus two buses and a send.
+    let f = mixer_fake();
+    f.edit_mixer(|m| {
+        let mut b2 = strip_row(3, "Bus 2", StripKindRow::Bus);
+        b2.sends = vec![SendRow {
+            target: 2,
+            level_db: 0.0,
+            pre_fader: false,
+            enabled: true,
+        }];
+        m.strips.insert(2, b2);
+        m.buses.push(vizdaw_ffi::mixer::BusRow {
+            id: 3,
+            name: "Bus 2".into(),
+        });
+    });
+    let mut s = setup(cx, f);
+    let size = s.cx.update(|w, _| w.viewport_size());
+    assert_eq!(
+        (f32::from(size.width), f32::from(size.height)),
+        (1440., 900.)
+    );
+    // A status line shows too (it takes its height from the regions).
+    let doc = s.window.read_with(&s.cx, |v, _| v.doc()).unwrap();
+    s.app.update(&mut s.cx, |a, cx| {
+        a.store
+            .with_document(doc, |d, _| d.set_status(Some("Nothing is playing.".into())));
+        cx.notify();
+    });
+    s.cx.run_until_parked();
+    let area = s.element("group", "Mixer").bounds;
+    let all = s.elements();
+    modes_inside(&all, area);
+    let room = s.view().read_with(&s.cx, |v, _| v.room());
+    assert_eq!(room.1, 0.0, "nothing to scroll down");
+}
+
+/// Every automation mode menu inside the mixer's area `area`.
+fn modes_inside(all: &[Element], area: gpui::Bounds<Pixels>) {
+    let modes: Vec<&Element> = all
+        .iter()
+        .filter(|e| e.role == "menu" && e.label.starts_with("Automation of "))
+        .collect();
+    assert!(!modes.is_empty());
+    for e in modes {
+        assert!(
+            e.bounds.bottom() <= area.bottom() && e.bounds.top() >= area.top(),
+            "{} at {:?} outside the mixer {:?}",
+            e.label,
+            e.bounds,
+            area
+        );
+    }
+}
+
+#[gpui::test]
+fn the_real_demo_fits_the_default_window_when_the_status_line_comes(cx: &mut TestAppContext) {
+    use vizdaw_app::DocSession;
+    use vizdaw_ffi::Session;
+    // The demo, two buses and a send, on the real core.
+    let session = Session::new_demo().unwrap();
+    session.add_bus("Bus 1".into()).unwrap();
+    session.add_bus("Bus 2".into()).unwrap();
+    let m = session.mixer().unwrap();
+    session.add_send(m.strips[0].id, m.buses[0].id).unwrap();
+    let shared: Arc<dyn DocSession> = session;
+    let store = DocumentStore::new(
+        Box::new(|| Ok(Arc::new(FakeSession::new(vec![])))),
+        Box::new(move || Ok(shared.clone())),
+        Box::new(|_| Ok(Arc::new(mixer_fake()))),
+    );
+    let window = cx.update(|cx| {
+        vizdaw_gpui::install(store, cx);
+        vizdaw_gpui::new_demo(cx).expect("a demo window")
+    });
+    let mut vcx = VisualTestContext::from_window(window.into(), cx);
+    vcx.run_until_parked();
+    let elements = |vcx: &mut VisualTestContext| {
+        window
+            .read_with(vcx, |v, _| v.registry().borrow().elements().to_vec())
+            .unwrap()
+    };
+    let mixer = |all: &[Element]| {
+        all.iter()
+            .find(|e| e.role == "group" && e.label == "Mixer")
+            .expect("the mixer")
+            .bounds
+    };
+    vcx.dispatch_action(RunCommand::new("ui.view_mix"));
+    vcx.run_until_parked();
+    let all = elements(&mut vcx);
+    let before = mixer(&all);
+    modes_inside(&all, before);
+    // Stop: "Nothing is playing." takes the status line's height.
+    vcx.dispatch_action(RunCommand::new("transport.stop"));
+    vcx.run_until_parked();
+    let all = elements(&mut vcx);
+    let area = mixer(&all);
+    assert!(
+        area.size.height < before.size.height,
+        "the status line shows"
+    );
+    modes_inside(&all, area);
+    let view = window
+        .read_with(&vcx, |v, _| v.mixer_view(MixerPlacement::View))
+        .unwrap()
+        .unwrap();
+    assert_eq!(view.read_with(&vcx, |v, _| v.room()).1, 0.0);
+}
+
+#[gpui::test]
+fn a_press_and_release_in_one_frame_leave_no_drag_open(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    // An insert: down and up with no frame between.
+    let comp = s.element("button", "Comp").bounds.center();
+    let ev = |button| MouseDownEvent {
+        button,
+        position: comp,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    };
+    s.cx.simulate_event(ev(MouseButton::Left));
+    s.cx.simulate_event(MouseUpEvent {
+        button: MouseButton::Left,
+        position: comp,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+    });
+    s.cx.run_until_parked();
+    let v = s.view();
+    assert!(v.read_with(&s.cx, |v, _| v.insert_drag()).is_none());
+    assert!(s.fake.calls().is_empty(), "{:?}", s.fake.calls());
+    // A send knob likewise.
+    let knob = s
+        .element("slider", "Send knob 1 of Audio 1")
+        .bounds
+        .center();
+    s.cx.simulate_event(MouseDownEvent {
+        position: knob,
+        ..ev(MouseButton::Left)
+    });
+    s.cx.simulate_event(MouseUpEvent {
+        button: MouseButton::Left,
+        position: knob,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+    });
+    s.cx.run_until_parked();
+    let doc = s.window.read_with(&s.cx, |v, _| v.doc()).unwrap();
+    let pressed = s.app.read_with(&s.cx, |a, _| {
+        a.store
+            .document(doc)
+            .and_then(|d| d.mixer())
+            .and_then(|m| m.pressed(MixerPlacement::View))
+    });
+    assert_eq!(pressed, None, "no press left open");
+    assert!(s.fake.gestures().is_empty(), "{:?}", s.fake.gestures());
+    assert!(s.fake.calls().is_empty(), "{:?}", s.fake.calls());
+}
+
+#[gpui::test]
+fn a_drag_whose_mouse_up_was_lost_never_drops_on_a_later_click(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    let comp = s.element("button", "Comp").bounds.center();
+    s.down(comp, 1);
+    s.move_to(point(comp.x, comp.y + px(22.)), true);
+    let v = s.view();
+    assert_eq!(
+        v.read_with(&s.cx, |v, _| v.insert_drag().and_then(|d| d.over)),
+        Some(1)
+    );
+    // The up never came (something swallowed it); the next click, on a
+    // strip's mute, must not drop the insert at its stale place.
+    s.click("button", "Mute Audio 2");
+    assert!(v.read_with(&s.cx, |v, _| v.insert_drag()).is_none());
+    assert!(
+        s.calls_like("move_insert").is_empty(),
+        "{:?}",
+        s.fake.calls()
+    );
+}
