@@ -14,8 +14,9 @@
 //! the extension and asks the replace question itself when the typed name
 //! lacked it), or for several clip tracks a folder (#9b): the core then
 //! names the files off the UI thread and, when any is there, the replace
-//! question (`1 file already exists in <folder>. Replace it?`, `Replace`,
-//! `Cancel`) is asked before anything is written. The sheet goes when the
+//! question (`1 file already exists in <folder>. Replace it?`; `Cancel`
+//! is the default and Esc's, `Replace` must be clicked) is asked before
+//! anything is written; Replace writes exactly the export it counted. The sheet goes when the
 //! job starts; a refusal or a failed job brings it back with the message
 //! ([`present`]), never an alert. Never under the control channel.
 
@@ -24,15 +25,14 @@ use std::panic::AssertUnwindSafe;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, AnyWindowHandle, App, AppContext, Entity, InteractiveElement, IntoElement,
-    ParentElement, PromptLevel, StatefulInteractiveElement, Styled, Window, anchored, deferred,
-    div, px, rgb,
+    ParentElement, StatefulInteractiveElement, Styled, Window, anchored, deferred, div, px, rgb,
 };
 use vizdaw_app::DocId;
 use vizdaw_app::interchange::{
     CANCEL, CHECKING, EACH_TRACK_ONE_FILE, EVERYTHING_TRANSFERS, EXPORT, ExportDestination,
-    ExportKind, MIDI_EXPORT_FAILED, MidiExportChoices, REPLACE_ANSWERS, RESOLUTION,
-    RESOLUTION_LABEL, RESOLUTIONS, TIME_SELECTION_ONLY, TRACKS, TYPE, TYPE_0, TYPE_1, TYPE_LABEL,
-    WHAT_WONT_TRANSFER, WRITE_MPE, export_track_label,
+    ExportKind, MIDI_EXPORT_FAILED, MidiExportChoices, RESOLUTION, RESOLUTION_LABEL, RESOLUTIONS,
+    TIME_SELECTION_ONLY, TRACKS, TYPE, TYPE_0, TYPE_1, TYPE_LABEL, WHAT_WONT_TRANSFER, WRITE_MPE,
+    export_track_label,
 };
 use vizdaw_app::{panels, report_text};
 use vizdaw_ffi::ReportRow;
@@ -185,13 +185,11 @@ fn run_names(doc: DocId, asking: AnyWindowHandle, cx: &mut App) {
 /// The replace question (title only): Replace exports, replacing them;
 /// Cancel (or the window closing first) writes nothing.
 fn ask_replace(doc: DocId, asking: AnyWindowHandle, message: &str, cx: &mut App) {
-    let answer = crate::alerts::ask(
-        asking,
-        Ask::with_labels(PromptLevel::Warning, message, None, &REPLACE_ANSWERS),
-        cx,
-    );
+    let ask = Ask::replace(message, None);
+    let answer = crate::alerts::ask(asking, ask.clone(), cx);
     cx.spawn(async move |cx| {
-        let replace = matches!(answer.await, Ok(0));
+        // By the button's role: Cancel is the default.
+        let replace = answer.await.is_ok_and(|i| ask.replaces(i));
         cx.update(|cx| {
             AppState::global(cx).update(cx, |s, cx| {
                 if let Some(d) = s.store.document_mut(doc) {

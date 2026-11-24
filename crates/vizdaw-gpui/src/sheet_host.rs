@@ -54,6 +54,9 @@ pub enum ButtonRole {
     Default,
     /// Esc presses it (Swift `.cancelAction`, `role: .cancel`).
     Cancel,
+    /// Return and Esc both press it, drawn as the default: a replace
+    /// question's Cancel (controller ruling, slice 7c).
+    DefaultCancel,
     /// Drawn as destructive (Swift `role: .destructive`).
     Destructive,
     Plain,
@@ -95,9 +98,9 @@ impl SheetButton {
 
 /// The button Return presses: the enabled default one.
 pub fn default_index(buttons: &[SheetButton]) -> Option<usize> {
-    buttons
-        .iter()
-        .position(|b| b.role == ButtonRole::Default && b.enabled)
+    buttons.iter().position(|b| {
+        matches!(b.role, ButtonRole::Default | ButtonRole::DefaultCancel) && b.enabled
+    })
 }
 
 /// The button Esc presses: the enabled cancel one, or a lone button (an
@@ -105,7 +108,7 @@ pub fn default_index(buttons: &[SheetButton]) -> Option<usize> {
 pub fn cancel_index(buttons: &[SheetButton]) -> Option<usize> {
     buttons
         .iter()
-        .position(|b| b.role == ButtonRole::Cancel && b.enabled)
+        .position(|b| matches!(b.role, ButtonRole::Cancel | ButtonRole::DefaultCancel) && b.enabled)
         .or_else(|| (buttons.len() == 1 && buttons[0].enabled).then_some(0))
 }
 
@@ -421,7 +424,7 @@ fn buttons_row(
 
 pub(crate) fn button_face(i: usize, b: &SheetButton) -> Stateful<Div> {
     let background = match b.role {
-        ButtonRole::Default if b.enabled => DEFAULT_BUTTON,
+        ButtonRole::Default | ButtonRole::DefaultCancel if b.enabled => DEFAULT_BUTTON,
         ButtonRole::Destructive if b.enabled => DESTRUCTIVE_BUTTON,
         _ => colors::BUTTON,
     };
@@ -511,6 +514,33 @@ impl Ask {
         Ask::from_prompt(level, message, detail, &buttons)
     }
 
+    /// A replace question (`message`, `detail`): Cancel first, the
+    /// default (Return) and Esc's; Replace destructive, so it must be
+    /// clicked. Read the answer with [`Ask::replaces`].
+    pub fn replace(message: &str, detail: Option<&str>) -> Ask {
+        let [cancel, replace] = vizdaw_app::panels::REPLACE_ANSWERS;
+        Ask {
+            level: PromptLevel::Warning,
+            message: message.to_owned(),
+            detail: detail.map(str::to_owned),
+            buttons: vec![
+                SheetButton::new(cancel, ButtonRole::DefaultCancel),
+                SheetButton::new(replace, ButtonRole::Destructive),
+            ],
+        }
+    }
+
+    /// The role of button `i` (an answer), if there is one.
+    pub fn role_of(&self, i: usize) -> Option<ButtonRole> {
+        self.buttons.get(i).map(|b| b.role)
+    }
+
+    /// Whether answer `i` is a replace question's Replace (by its role,
+    /// never by its place).
+    pub fn replaces(&self, i: usize) -> bool {
+        self.role_of(i) == Some(ButtonRole::Destructive)
+    }
+
     /// A disabled button cannot be shown by the platform's prompt: the
     /// ask shows as a sheet.
     pub fn needs_sheet(&self) -> bool {
@@ -518,12 +548,17 @@ impl Ask {
     }
 
     /// The buttons as GPUI's prompt takes them (the cancel one is Esc's on
-    /// macOS; the first is Return's).
-    pub fn prompt_buttons(&self) -> Vec<PromptButton> {
+    /// macOS; the first is Return's). A default Cancel comes first: for
+    /// macOS's own prompt (`native`) as a plain button, so it keeps
+    /// Return (NSAlert gives Esc to a button titled Cancel); for the
+    /// sheet card as the cancel one, which [`Ask::from_prompt`] reads back
+    /// as the default Cancel.
+    pub fn prompt_buttons(&self, native: bool) -> Vec<PromptButton> {
         self.buttons
             .iter()
             .map(|b| match b.role {
                 ButtonRole::Cancel => PromptButton::cancel(b.label.clone()),
+                ButtonRole::DefaultCancel if !native => PromptButton::cancel(b.label.clone()),
                 _ => PromptButton::new(b.label.clone()),
             })
             .collect()
@@ -545,7 +580,11 @@ impl Ask {
                 .iter()
                 .enumerate()
                 .map(|(i, b)| {
-                    let role = if b.is_cancel() {
+                    // A Cancel first is the default too (a replace
+                    // question, [`Ask::prompt_buttons`]).
+                    let role = if b.is_cancel() && i == 0 && buttons.len() > 1 {
+                        ButtonRole::DefaultCancel
+                    } else if b.is_cancel() {
                         ButtonRole::Cancel
                     } else if i == 0 {
                         ButtonRole::Default
@@ -900,6 +939,17 @@ impl Render for SheetDialog {
 /// first button, Esc the Cancel one.
 pub fn use_sheet_prompts(cx: &mut App) {
     cx.set_prompt_builder(prompt_card);
+    cx.set_global(SheetPrompts);
+}
+
+/// GPUI's prompts are drawn as the sheet card ([`use_sheet_prompts`]).
+struct SheetPrompts;
+
+impl gpui::Global for SheetPrompts {}
+
+/// Whether GPUI's prompts go to macOS's own prompt (not the sheet card).
+pub(crate) fn native_prompts(cx: &App) -> bool {
+    cfg!(target_os = "macos") && !cx.has_global::<SheetPrompts>()
 }
 
 fn prompt_card(

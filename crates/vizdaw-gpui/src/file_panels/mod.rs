@@ -26,10 +26,8 @@ use std::rc::Rc;
 
 use futures::channel::oneshot;
 
-use gpui::{AnyWindowHandle, App, Global, Keystroke, PathPromptOptions, PromptLevel, Task};
-use vizdaw_app::panels::{
-    FileType, PanelKind, PanelSpec, REPLACE_ANSWERS, replace_question, save_target,
-};
+use gpui::{AnyWindowHandle, App, Global, Keystroke, PathPromptOptions, Task};
+use vizdaw_app::panels::{FileType, PanelKind, PanelSpec, replace_question, save_target};
 
 /// What the caller fills in for one showing of a panel.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -368,19 +366,11 @@ pub fn choose_save(
             return Ok(Some(target.path));
         }
         let (title, detail) = replace_question(&spec, &target.path);
-        let answer = cx.update(|cx| {
-            crate::alerts::ask(
-                window,
-                crate::sheet_host::Ask::with_labels(
-                    PromptLevel::Warning,
-                    &title,
-                    Some(&detail),
-                    &REPLACE_ANSWERS,
-                ),
-                cx,
-            )
-        });
-        Ok(matches!(answer.await, Ok(0)).then_some(target.path))
+        // Cancel is the default (Return and Esc); Replace must be clicked.
+        let ask = crate::sheet_host::Ask::replace(&title, Some(&detail));
+        let answer = cx.update(|cx| crate::alerts::ask(window, ask.clone(), cx));
+        let replace = answer.await.is_ok_and(|i| ask.replaces(i));
+        Ok(replace.then_some(target.path))
     })
 }
 

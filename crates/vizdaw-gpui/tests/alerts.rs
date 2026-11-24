@@ -648,7 +648,7 @@ fn the_crash_questions_cancel_is_escs() {
         loading: vec![],
         crashed: true,
     };
-    let b = alerts::question_ask(&q).prompt_buttons();
+    let b = alerts::question_ask(&q).prompt_buttons(true);
     let cancels: Vec<bool> = b.iter().map(|b| b.is_cancel()).collect();
     assert_eq!(cancels, [false, false, true]);
     assert_eq!(b[2].label().as_ref(), "Cancel");
@@ -658,7 +658,7 @@ fn the_crash_questions_cancel_is_escs() {
     };
     assert!(
         alerts::question_ask(&q)
-            .prompt_buttons()
+            .prompt_buttons(true)
             .iter()
             .all(|b| !b.is_cancel())
     );

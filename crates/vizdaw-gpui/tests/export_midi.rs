@@ -461,3 +461,137 @@ fn under_the_channel_no_sheet_shows(cx: &mut TestAppContext) {
     assert!(s.panels.rows().is_empty());
     assert!(s.fake.smf_checks().is_empty());
 }
+
+// ---------------------------------------------------------------------
+// Review fixes (round 1)
+
+/// Every replace question has Cancel as its default (Return) and its Esc
+/// button; Replace is the destructive one, and must be clicked.
+#[test]
+fn the_replace_question_defaults_to_cancel() {
+    use vizdaw_gpui::sheet_host::{Ask, ButtonRole, cancel_index, default_index};
+    let ask = Ask::replace("q", None);
+    let labels: Vec<&str> = ask.buttons.iter().map(|b| b.label.as_str()).collect();
+    assert_eq!(labels, ["Cancel", "Replace"]);
+    assert_eq!(default_index(&ask.buttons), Some(0));
+    assert_eq!(cancel_index(&ask.buttons), Some(0));
+    assert_eq!(ask.role_of(1), Some(ButtonRole::Destructive));
+    assert!(!ask.replaces(0) && ask.replaces(1) && !ask.replaces(2));
+    // Drawn by GPUI's prompt (the sheet card), the same keys.
+    let card = Ask::from_prompt(
+        gpui::PromptLevel::Warning,
+        "q",
+        None,
+        &ask.prompt_buttons(false),
+    );
+    assert_eq!(default_index(&card.buttons), Some(0));
+    assert_eq!(cancel_index(&card.buttons), Some(0));
+    // Its answers are read against the replace question's own buttons.
+    let card_labels: Vec<&str> = card.buttons.iter().map(|b| b.label.as_str()).collect();
+    assert_eq!(card_labels, labels);
+}
+
+/// Return on the folder export's question (drawn as the sheet card) is
+/// Cancel: nothing is written; Esc likewise.
+#[gpui::test]
+fn return_on_the_folder_question_writes_nothing(cx: &mut TestAppContext) {
+    let f = busy();
+    f.set_clip_names(ClipNamesRow {
+        names: vec!["01 Groove.midi2".into(), "02 Chords.midi2".into()],
+        taken: vec!["01 Groove.midi2".into()],
+    });
+    let mut s = setup(cx, f, false);
+    s.cx.update(|_, cx| vizdaw_gpui::sheet_host::use_sheet_prompts(cx));
+    s.menu("file.export_midi_clip");
+    for key in ["enter", "escape"] {
+        s.click("button", "Export\u{2026}");
+        s.panels.answer("/nowhere-vizdaw-test/out");
+        s.cx.run_until_parked();
+        let up = s
+            .window
+            .update(&mut s.cx, |_, window, _| window.has_active_prompt())
+            .unwrap();
+        assert!(up, "the question");
+        s.cx.simulate_keystrokes(key);
+        s.cx.run_until_parked();
+        let up = s
+            .window
+            .update(&mut s.cx, |_, window, _| window.has_active_prompt())
+            .unwrap();
+        assert!(!up, "{key} answered it");
+        assert!(s.clip_exports().is_empty(), "{key} wrote nothing");
+        assert_eq!(s.sheet().as_deref(), Some("Export MIDI Clip File"));
+    }
+}
+
+/// Return on the save panel's own replace question (the typed name
+/// lacked the extension, and that file exists) is Cancel: nothing is
+/// exported, no `replace: true` is sent.
+#[gpui::test]
+fn return_on_the_save_panels_question_writes_nothing(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Song.mid"), b"x").unwrap();
+    let typed = dir.path().join("Song");
+    let mut s = setup(cx, busy(), false);
+    s.cx.update(|_, cx| vizdaw_gpui::sheet_host::use_sheet_prompts(cx));
+    s.menu("file.export_midi");
+    s.click("button", "Export\u{2026}");
+    s.panels.answer(&typed.to_string_lossy());
+    s.cx.run_until_parked();
+    let up = s
+        .window
+        .update(&mut s.cx, |_, window, _| window.has_active_prompt())
+        .unwrap();
+    assert!(up, "the app's replace question");
+    s.cx.simulate_keystrokes("enter");
+    s.cx.run_until_parked();
+    assert!(s.smf_exports().is_empty());
+    assert_eq!(s.sheet().as_deref(), Some("Export MIDI File"));
+}
+
+/// The same question answered on the platform prompt: Replace exports,
+/// replacing; Cancel nothing.
+#[gpui::test]
+fn the_save_panels_question_replaces_only_on_replace(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Song.mid"), b"x").unwrap();
+    let typed = dir.path().join("Song");
+    let mut s = setup(cx, busy(), false);
+    s.menu("file.export_midi");
+    s.click("button", "Export\u{2026}");
+    s.panels.answer(&typed.to_string_lossy());
+    s.cx.run_until_parked();
+    s.cx.simulate_prompt_answer("Cancel");
+    s.cx.run_until_parked();
+    assert!(s.smf_exports().is_empty());
+    s.click("button", "Export\u{2026}");
+    s.panels.answer(&typed.to_string_lossy());
+    s.cx.run_until_parked();
+    s.cx.simulate_prompt_answer("Replace");
+    s.cx.run_until_parked();
+    let r = s.smf_exports().pop().expect("an export");
+    assert!(r.replace && r.path == dir.path().join("Song.mid").to_string_lossy());
+}
+
+/// Review fix: cancelled as the folder panel answers, nothing is written
+/// and nothing asked (the names race itself is pinned in the model's
+/// `a_names_answer_after_cancel_writes_nothing`).
+#[gpui::test]
+fn cancelled_as_the_folder_panel_answers_writes_nothing(cx: &mut TestAppContext) {
+    let mut s = setup(cx, busy(), false);
+    s.menu("file.export_midi_clip");
+    s.click("button", "Export\u{2026}");
+    // The panel answers, and the sheet is cancelled before anything runs.
+    s.panels.answer("/nowhere-vizdaw-test/out");
+    let doc = s.doc();
+    s.cx.update(|_, cx| {
+        AppState::global(cx).update(cx, |a, cx| {
+            a.store.with_document(doc, |d, _| d.hide_midi_export());
+            cx.notify();
+        })
+    });
+    s.cx.run_until_parked();
+    assert!(s.clip_exports().is_empty());
+    assert!(!s.cx.has_pending_prompt());
+    assert_eq!(s.sheet(), None);
+}

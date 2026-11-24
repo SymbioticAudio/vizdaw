@@ -386,7 +386,8 @@ fn the_replace_question_names_the_file() {
                 .to_owned()
         )
     );
-    assert_eq!(REPLACE_ANSWERS, ["Replace", "Cancel"]);
+    // Cancel first: the default (Return) and Esc; Replace must be clicked.
+    assert_eq!(REPLACE_ANSWERS, ["Cancel", "Replace"]);
 }
 
 #[test]

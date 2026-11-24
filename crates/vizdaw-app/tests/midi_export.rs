@@ -491,6 +491,14 @@ fn the_sheets_texts() {
     let q = ReplaceQuestion {
         folder: "/a/b/Clips".into(),
         taken: vec!["x".into(), "y".into(), "z".into()],
+        request: ClipExportRequestRow {
+            seq: 3,
+            lanes: vec![30, 31],
+            path: "/a/b/Clips".into(),
+            replace: false,
+            start: None,
+            end: None,
+        },
     };
     assert_eq!(q.message(), "3 files already exist in Clips. Replace them?");
 }
@@ -520,4 +528,69 @@ fn wont_transfer_groups_in_swifts_order() {
     let lines: Vec<String> = g[1].1.iter().map(|i| report_text::line(i)).collect();
     assert_eq!(lines, ["Plug-ins (3)", "Sends"]);
     assert!(report_text::groups(&report("x")).is_empty());
+}
+
+/// Review fix: a names answer that lands after the sheet was cancelled
+/// starts nothing and asks nothing.
+#[test]
+fn a_names_answer_after_cancel_writes_nothing() {
+    for taken in [vec![], vec!["01 Groove.midi2".to_owned()]] {
+        let f = Arc::new(busy());
+        let (mut s, id) = store_with(&f);
+        let d = s.document_mut(id).unwrap();
+        d.show_midi_export(ExportKind::Clip);
+        f.set_clip_names(ClipNamesRow {
+            names: vec!["01 Groove.midi2".into(), "02 Chords.midi2".into()],
+            taken,
+        });
+        d.export_midi_to_folder("/tmp/out");
+        let ask = d.take_clip_names().unwrap();
+        let answer = ask.run(d.session().as_ref());
+        d.hide_midi_export();
+        d.land_clip_names(answer);
+        assert!(clip_exports(&f).is_empty());
+        assert!(d.midi_export().replace_question().is_none());
+        assert!(!d.midi_export().shown());
+        // A Replace answered after the sheet went writes nothing either.
+        d.answer_midi_export_replace(true);
+        assert!(clip_exports(&f).is_empty());
+    }
+}
+
+/// Review fix: Replace writes exactly the request the question counted,
+/// even when the tracks changed since; so does a folder with none taken.
+#[test]
+fn replace_writes_the_request_it_asked_about() {
+    let f = Arc::new(busy());
+    let (mut s, id) = store_with(&f);
+    let d = s.document_mut(id).unwrap();
+    d.show_midi_export(ExportKind::Clip);
+    f.set_clip_names(ClipNamesRow {
+        names: vec!["01 Groove.midi2".into(), "02 Chords.midi2".into()],
+        taken: vec!["02 Chords.midi2".into()],
+    });
+    d.export_midi_to_folder("/tmp/out");
+    d.run_clip_names();
+    assert!(d.midi_export().replace_question().is_some());
+    d.edit_midi_export(|c| {
+        c.lanes.remove(&31);
+    });
+    d.answer_midi_export_replace(true);
+    let e = clip_exports(&f).pop().expect("an export");
+    assert!(e.replace && e.lanes == [30, 31] && e.path == "/tmp/out");
+    // None taken: the asked request starts, not one rebuilt after an edit.
+    d.show_midi_export(ExportKind::Clip);
+    f.set_clip_names(ClipNamesRow {
+        names: vec!["01 Groove.midi2".into(), "02 Chords.midi2".into()],
+        taken: vec![],
+    });
+    d.export_midi_to_folder("/tmp/out2");
+    let ask = d.take_clip_names().unwrap();
+    let answer = ask.run(d.session().as_ref());
+    d.edit_midi_export(|c| {
+        c.lanes.remove(&30);
+    });
+    d.land_clip_names(answer);
+    let e = clip_exports(&f).pop().expect("an export");
+    assert!(!e.replace && e.lanes == [30, 31] && e.path == "/tmp/out2");
 }

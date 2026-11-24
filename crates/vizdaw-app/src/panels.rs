@@ -492,5 +492,7 @@ pub fn replace_question(spec: &PanelSpec, path: &Path) -> (String, String) {
     (title, detail)
 }
 
-/// The replace question's buttons, the default first.
-pub const REPLACE_ANSWERS: [&str; 2] = ["Replace", "Cancel"];
+/// Every replace question's buttons (the save panels' and the MIDI clip
+/// folder's): Cancel first, the default (Return) and Esc's; Replace, the
+/// destructive one, must be clicked (controller ruling, slice 7c).
+pub const REPLACE_ANSWERS: [&str; 2] = ["Cancel", "Replace"];

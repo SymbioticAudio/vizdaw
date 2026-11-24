@@ -375,8 +375,6 @@ pub const EVERYTHING_TRANSFERS: &str = "Everything transfers.";
 pub const CHECKING: &str = "Checking what won't transfer";
 /// The default button (it asks where first).
 pub const EXPORT: &str = "Export\u{2026}";
-/// The replace question's buttons (Replace destructive, Cancel cancels).
-pub const REPLACE_ANSWERS: [&str; 2] = ["Replace", "Cancel"];
 /// The title of a failed export job (its message shows in the sheet).
 pub const MIDI_EXPORT_FAILED: &str = "MIDI Export Failed";
 
@@ -445,6 +443,8 @@ pub struct ReplaceQuestion {
     pub folder: String,
     /// The core's names of the files already there.
     pub taken: Vec<String>,
+    /// The export the names were asked for: Replace starts exactly this.
+    pub request: ClipExportRequestRow,
 }
 
 impl ReplaceQuestion {
@@ -517,6 +517,8 @@ pub struct ClipNamesAsk {
 pub struct ClipNamesAnswer {
     pub generation: u64,
     pub folder: String,
+    /// The export the names were asked for.
+    pub request: ClipExportRequestRow,
     pub answer: Result<ClipNamesRow, VizError>,
 }
 
@@ -526,9 +528,16 @@ impl ClipNamesAsk {
         ClipNamesAnswer {
             generation: self.generation,
             folder: self.folder,
-            answer: s.export_midi_clip_names(self.request),
+            answer: s.export_midi_clip_names(self.request.clone()),
+            request: self.request,
         }
     }
+}
+
+/// An export to start.
+enum ExportJob {
+    Smf(SmfExportRequestRow),
+    Clip(ClipExportRequestRow),
 }
 
 /// Where the sheet's Export… asks to write.
@@ -640,9 +649,14 @@ impl DocumentModel {
         }
     }
 
-    /// The sheet's Cancel.
+    /// The sheet's Cancel: a names question still in flight is dropped
+    /// (its late answer starts nothing and asks nothing).
     pub fn hide_midi_export(&mut self) {
-        self.midi_export.shown = false;
+        let e = &mut self.midi_export;
+        e.shown = false;
+        e.names_generation += 1;
+        e.pending_names = None;
+        e.replace_question = None;
     }
 
     /// A time selection exists to export.
@@ -789,16 +803,20 @@ impl DocumentModel {
     /// error. An answer older than the newest question (or the sheet
     /// reset since) is dropped.
     pub fn land_clip_names(&mut self, a: ClipNamesAnswer) {
-        if a.generation != self.midi_export.names_generation {
+        if a.generation != self.midi_export.names_generation || !self.midi_export.shown {
             return;
         }
         match a.answer {
             Err(err) => self.midi_export.error = Some(error_message(&err)),
-            Ok(names) if names.taken.is_empty() => self.start_midi_export(&a.folder, false),
+            // The export the names were asked for, as asked.
+            Ok(names) if names.taken.is_empty() => {
+                self.start_export_job(ExportJob::Clip(a.request))
+            }
             Ok(names) => {
                 self.midi_export.replace_question = Some(ReplaceQuestion {
                     folder: a.folder,
                     taken: names.taken,
+                    request: a.request,
                 });
             }
         }
@@ -812,14 +830,18 @@ impl DocumentModel {
         }
     }
 
-    /// The replace question's answer: Replace exports, replacing them;
-    /// Cancel writes nothing and the sheet stays.
+    /// The replace question's answer: Replace exports exactly the
+    /// request the question counted, replacing them; Cancel writes nothing
+    /// and the sheet stays. Nothing once the sheet went.
     pub fn answer_midi_export_replace(&mut self, replace: bool) {
         let Some(q) = self.midi_export.replace_question.take() else {
             return;
         };
-        if replace {
-            self.start_midi_export(&q.folder, true);
+        if replace && self.midi_export.shown {
+            self.start_export_job(ExportJob::Clip(ClipExportRequestRow {
+                replace: true,
+                ..q.request
+            }));
         }
     }
 
@@ -833,17 +855,25 @@ impl DocumentModel {
             self.midi_export.error = Some(NO_SEQUENCE.into());
             return;
         };
+        let job = match self.midi_export.kind {
+            ExportKind::Smf => ExportJob::Smf(self.smf_request(seq, path, replace)),
+            ExportKind::Clip => ExportJob::Clip(self.clip_request(seq, path, replace)),
+        };
+        self.start_export_job(job);
+    }
+
+    /// Starts `job` as an `ExportMidi` job (see
+    /// [`DocumentModel::start_midi_export`]).
+    fn start_export_job(&mut self, job: ExportJob) {
         self.midi_export.error = None;
         // Hidden before the job starts: a failure at its first poll shows
         // the sheet again, and it must stay up.
         self.midi_export.shown = false;
-        let started = match self.midi_export.kind {
-            ExportKind::Smf => {
-                let req = self.smf_request(seq, path, replace);
+        let started = match job {
+            ExportJob::Smf(req) => {
                 self.try_start_job(JobKindRow::ExportMidi, |s| s.export_midi(req))
             }
-            ExportKind::Clip => {
-                let req = self.clip_request(seq, path, replace);
+            ExportJob::Clip(req) => {
                 self.try_start_job(JobKindRow::ExportMidi, |s| s.export_midi_clip(req))
             }
         };

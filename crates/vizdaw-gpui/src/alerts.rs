@@ -514,7 +514,7 @@ fn ask_in(w: AnyWindowHandle, ask: &Ask, cx: &mut App) -> Option<oneshot::Receiv
             .ok()?;
         return shown.then_some(answer);
     }
-    let buttons = ask.prompt_buttons();
+    let buttons = ask.prompt_buttons(crate::sheet_host::native_prompts(cx));
     w.update(cx, |_, window, cx| {
         window.prompt(ask.level, &ask.message, ask.detail.as_deref(), &buttons, cx)
     })
