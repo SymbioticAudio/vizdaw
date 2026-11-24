@@ -55,6 +55,9 @@ jobs:
         with:
           path: target/vst3sdk/out
           key: vst3sdk-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-vst3-samples.sh', 'scripts/licence-texts/vst3sdk/SOURCE') }}
+      - name: Ninja (macOS)
+        if: runner.os == 'macOS'
+        run: command -v ninja || brew install ninja
       - name: Build the VST3 SDK samples
         run: scripts/build-vst3-samples.sh
       - name: Test

@@ -112,8 +112,10 @@ fn linux_arch_dir() -> String {
     format!("{arch}-linux")
 }
 
-/// The binary of the VST3 bundle at `bundle`: `Contents/MacOS/<name>` on
-/// macOS (`<name>` from `CFBundleExecutable`, else the bundle's name), and
+/// The binary of the VST3 (or CLAP) bundle at `bundle`: on macOS the
+/// executable CoreFoundation resolves (`CFBundleCopyExecutableURL`, which
+/// reads any plist format), else `Contents/MacOS/<name>` with `<name>`
+/// from `CFBundleExecutable` or the bundle's name; and
 /// `Contents/<arch>-linux/<name>.so` on Linux. A `.vst3` that is a file is
 /// its own binary.
 pub fn binary_path(bundle: &Path) -> Result<PathBuf, HostError> {
@@ -126,10 +128,10 @@ pub fn binary_path(bundle: &Path) -> Result<PathBuf, HostError> {
         .unwrap_or_default();
     let contents = bundle.join("Contents");
     #[cfg(target_os = "macos")]
-    let path = {
+    let path = super::ffi::bundle_executable(bundle).unwrap_or_else(|| {
         let name = plist_value(bundle, "CFBundleExecutable").unwrap_or(stem);
         contents.join("MacOS").join(name)
-    };
+    });
     #[cfg(not(target_os = "macos"))]
     let path = contents.join(linux_arch_dir()).join(format!("{stem}.so"));
     if path.is_file() {

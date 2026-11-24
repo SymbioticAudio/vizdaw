@@ -68,6 +68,13 @@ mod cf {
             is_directory: u8,
         ) -> *const c_void;
         fn CFBundleCreate(allocator: *const c_void, url: *const c_void) -> *mut c_void;
+        fn CFBundleCopyExecutableURL(bundle: *mut c_void) -> *const c_void;
+        fn CFURLGetFileSystemRepresentation(
+            url: *const c_void,
+            resolve_against_base: u8,
+            buffer: *mut u8,
+            max_len: isize,
+        ) -> u8;
         fn CFRelease(cf: *const c_void);
     }
 
@@ -100,6 +107,35 @@ mod cf {
         }
     }
 
+    impl Bundle {
+        /// The bundle's executable as macOS resolves it (its Info.plist
+        /// in any format, escapes decoded), or `None`.
+        pub(super) fn executable(&self) -> Option<std::path::PathBuf> {
+            use std::os::unix::ffi::OsStrExt;
+            if self.0.is_null() {
+                return None;
+            }
+            // SAFETY: a valid bundle; the URL (a Copy call) is ours.
+            let url = unsafe { CFBundleCopyExecutableURL(self.0) };
+            if url.is_null() {
+                return None;
+            }
+            let mut buf = vec![0u8; 4096];
+            // SAFETY: `buf` holds `buf.len()` bytes; the URL is valid.
+            let ok = unsafe {
+                CFURLGetFileSystemRepresentation(url, 1, buf.as_mut_ptr(), buf.len() as isize)
+            };
+            // SAFETY: we own the URL (a Copy call).
+            unsafe { CFRelease(url) };
+            if ok == 0 {
+                return None;
+            }
+            let len = buf.iter().position(|b| *b == 0)?;
+            let bytes = buf.get(..len)?;
+            Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+        }
+    }
+
     impl Drop for Bundle {
         fn drop(&mut self) {
             if !self.0.is_null() {
@@ -108,6 +144,14 @@ mod cf {
             }
         }
     }
+}
+
+/// The executable of the macOS bundle at `path` as CoreFoundation
+/// resolves it (`CFBundleCopyExecutableURL`), or `None` when it does not
+/// see a bundle or an executable there.
+#[cfg(target_os = "macos")]
+pub(crate) fn bundle_executable(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    cf::Bundle::create(path).executable()
 }
 
 /// A loaded VST3 module: its library (entered), and its factory. Dropping

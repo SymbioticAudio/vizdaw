@@ -7,7 +7,7 @@ use core_host::{HostError, PluginKind, vst3};
 use core_model::mixer::PluginFormat;
 use std::path::{Path, PathBuf};
 use test_plugins::{
-    VST3_CONTROLLER_ID, VST3_CRASHER_ID, VST3_GAIN_ID, VST3_HANGER_ID, VST3_NAN_ID,
+    VST3_BANK_ID, VST3_CONTROLLER_ID, VST3_CRASHER_ID, VST3_GAIN_ID, VST3_HANGER_ID, VST3_NAN_ID,
     VST3_PROCESS_CRASHER_ID, VST3_SYNTH_ID,
 };
 
@@ -45,6 +45,7 @@ fn lists_every_plugin_class_of_the_test_bundle() {
                 PluginKind::Effect
             ),
             (VST3_NAN_ID, "Test NaN", PluginKind::Effect),
+            (VST3_BANK_ID, "Test Bank", PluginKind::Effect),
         ]
     );
     for (p, _) in &list {
@@ -125,6 +126,66 @@ fn a_mac_bundle_runs_contents_macos_named_by_its_plist() {
         vst3::binary_path(&b).unwrap(),
         b.join("Contents/MacOS/Real Name")
     );
+}
+
+/// Converts `bundle`'s Info.plist to the binary format (as many shipped
+/// bundles have it).
+#[cfg(target_os = "macos")]
+fn binary_plist(bundle: &Path) {
+    let plist = bundle.join("Contents/Info.plist");
+    let ok = std::process::Command::new("plutil")
+        .args(["-convert", "binary1"])
+        .arg(&plist)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "plutil failed");
+    assert!(std::fs::read(&plist).unwrap().starts_with(b"bplist"));
+}
+
+/// Final review I2: the executable comes from the bundle as macOS reads
+/// it (a binary plist, an escaped name), not from a text search.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_mac_bundle_executable_is_read_from_binary_and_escaped_plists() {
+    let d = temp();
+    let b = fake_bundle(d.path(), "Binary.vst3", "Contents/MacOS/Real Name");
+    std::fs::write(
+        b.join("Contents/Info.plist"),
+        "<plist><dict><key>CFBundleExecutable</key><string>Real Name</string></dict></plist>",
+    )
+    .unwrap();
+    binary_plist(&b);
+    assert_eq!(
+        vst3::binary_path(&b).unwrap(),
+        b.join("Contents/MacOS/Real Name")
+    );
+    let b = fake_bundle(d.path(), "Escaped.vst3", "Contents/MacOS/A & B");
+    std::fs::write(
+        b.join("Contents/Info.plist"),
+        "<plist><dict><key>CFBundleExecutable</key><string>A &amp; B</string></dict></plist>",
+    )
+    .unwrap();
+    assert_eq!(
+        vst3::binary_path(&b).unwrap(),
+        b.join("Contents/MacOS/A & B")
+    );
+}
+
+/// The real test bundles, renamed (their executable keeps its name) and
+/// with binary plists, still load: VST3 and CLAP share the lookup.
+#[cfg(target_os = "macos")]
+#[test]
+fn renamed_bundles_with_binary_plists_still_load() {
+    let d = temp();
+    let v = d.path().join("Renamed.vst3");
+    test_plugins::copy_vst3_bundle(&v);
+    binary_plist(&v);
+    assert!(!vst3::list_bundle(&v).unwrap().is_empty());
+    let c = d.path().join("Renamed.clap");
+    test_plugins::copy_bundle(&c);
+    binary_plist(&c);
+    assert!(!core_host::clap::list_bundle(&c).unwrap().is_empty());
 }
 
 #[cfg(target_os = "linux")]

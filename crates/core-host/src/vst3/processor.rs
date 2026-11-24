@@ -28,7 +28,7 @@
 
 use super::ffi::MIDI_CONTROLLERS;
 use super::ffi::sdk;
-use super::process_ffi::RtData;
+use super::process_ffi::{HOST_QUEUES, RtData};
 use crate::info::{PluginInfo, PortRole};
 use crate::instance::AudioProcessor;
 use crate::process::{MAX_EVENTS, MAX_PARAM_EVENTS, ParamEvent, ProcessCtx};
@@ -424,9 +424,13 @@ impl Vst3Processor {
             }
             self.first_sent = true;
         }
-        // Edits in order; one with no queue left waits for the next block,
-        // and so do the ones after it.
-        while let Some((id, v)) = self.held.take().or_else(|| self.edits.pop()) {
+        // Edits in order, in the queues not kept for the host's values;
+        // one with no queue left waits for the next block, and so do the
+        // ones after it.
+        while params.has_room_beyond(HOST_QUEUES) {
+            let Some((id, v)) = self.held.take().or_else(|| self.edits.pop()) else {
+                break;
+            };
             if !params.add(id, 0, v, false) {
                 self.held = Some((id, v));
                 break;
@@ -443,7 +447,12 @@ impl Vst3Processor {
             else {
                 continue;
             };
-            params.add(id, at(p.frame), v, true);
+            // Always fits: the list keeps a queue for each host value
+            // (`HOST_QUEUES`), and they come in frame order, so a full
+            // queue takes the latest in place of its last point. The host
+            // counts these values as delivered after the block.
+            let added = params.add(id, at(p.frame), v, true);
+            debug_assert!(added, "a host value had no room");
         }
         let events = self.data.events_in();
         events.clear();

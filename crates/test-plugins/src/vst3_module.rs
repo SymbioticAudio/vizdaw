@@ -15,6 +15,7 @@
 //! | [`VST3_HANGER_ID`] | Test Hanger | `Fx` | never returns from `createInstance` |
 //! | [`VST3_PROCESS_CRASHER_ID`] | Test Process Crasher | `Fx` | Test Gain that crashes (SIGSEGV) in `process` |
 //! | [`VST3_NAN_ID`] | Test NaN | `Fx` | Test Gain whose first output sample of every block is NaN |
+//! | [`VST3_BANK_ID`] | Test Bank | `Fx` | single component: Test Gain's buses and parameters plus [`VST3_BANK_SIZE`] more (IDs from [`VST3_BANK_BASE`], plain = normalised), all in its component state |
 //! | [`VST3_CONTROLLER_ID`] | Test Controller | (controller class) | Test Gain's controller; not a plug-in |
 //!
 //! Like a plug-in built with the SDK, the factory is only handed out after
@@ -99,6 +100,12 @@ pub const VST3_HANGER_ID: &str = "56495A44565354337E570000ABCD0004";
 pub const VST3_PROCESS_CRASHER_ID: &str = "56495A44565354337E570000ABCD0005";
 /// Class ID of "Test NaN" (Test Gain that writes NaN audio).
 pub const VST3_NAN_ID: &str = "56495A44565354337E570000ABCD0006";
+/// Class ID of "Test Bank" (many parameters).
+pub const VST3_BANK_ID: &str = "56495A44565354337E570000ABCD0007";
+/// The first `ParamID` of Test Bank's extra parameters ("Bank 0"…).
+pub const VST3_BANK_BASE: u32 = 1000;
+/// How many extra parameters Test Bank has.
+pub const VST3_BANK_SIZE: usize = 256;
 /// Class ID of the controller class (not a plug-in, never listed).
 pub const VST3_CONTROLLER_ID: &str = "56495A44565354337E570000ABCD00FF";
 
@@ -108,6 +115,7 @@ const CRASHER: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_0003);
 const HANGER: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_0004);
 const PROCESS_CRASHER: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_0005);
 const NAN: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_0006);
+const BANK: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_0007);
 const CONTROLLER: TUID = uid(0x5649_5A44, 0x5653_5433, 0x7E57_0000, 0xABCD_00FF);
 
 const AUDIO_MODULE: &str = "Audio Module Class";
@@ -262,7 +270,7 @@ struct ClassDef {
     sub_categories: &'static str,
 }
 
-const CLASSES: [ClassDef; 7] = [
+const CLASSES: [ClassDef; 8] = [
     ClassDef {
         cid: GAIN,
         category: AUDIO_MODULE,
@@ -305,7 +313,26 @@ const CLASSES: [ClassDef; 7] = [
         name: "Test NaN",
         sub_categories: "Fx",
     },
+    ClassDef {
+        cid: BANK,
+        category: AUDIO_MODULE,
+        name: "Test Bank",
+        sub_categories: "Fx",
+    },
 ];
+
+/// The index of Test Bank's extra parameter `id`, if it is one.
+fn bank_index(id: ParamID) -> Option<usize> {
+    id.checked_sub(VST3_BANK_BASE)
+        .and_then(|k| usize::try_from(k).ok())
+        .filter(|k| *k < VST3_BANK_SIZE)
+}
+
+/// Atomics for Test Bank's extra values (none for the other classes).
+fn bank_cells(bank: bool) -> Box<[AtomicU64]> {
+    let n = if bank { VST3_BANK_SIZE } else { 0 };
+    (0..n).map(|_| AtomicU64::new(0)).collect()
+}
 
 const VENDOR: &str = "VizDAW";
 const VERSION: &str = "1.0.0";
@@ -727,6 +754,8 @@ fn bus_info(
 /// that made it (every call should come on that thread).
 struct Ctl {
     values: [AtomicU64; VST3_PARAMS.len()],
+    /// Test Bank's extra values (empty for the other classes).
+    bank: Box<[AtomicU64]>,
     /// A controller-only value (no parameter, not in the component's
     /// state): only the controller's own state carries it.
     memo: AtomicU64,
@@ -735,9 +764,10 @@ struct Ctl {
 }
 
 impl Ctl {
-    fn new() -> Ctl {
+    fn new(bank: bool) -> Ctl {
         Ctl {
             values: VST3_PARAMS.map(|p| AtomicU64::new(p.default.to_bits())),
+            bank: bank_cells(bank),
             memo: AtomicU64::new(NEXT_MEMO.load(Ordering::SeqCst)),
             handler: Mutex::new(None),
             creator: std::thread::current().id(),
@@ -751,14 +781,57 @@ impl Ctl {
         }
     }
 
+    /// The cell of parameter `id`, if this controller has it.
+    fn cell(&self, id: ParamID) -> Option<&AtomicU64> {
+        match bank_index(id) {
+            Some(k) => self.bank.get(k),
+            None => param(id).and_then(|(i, _)| self.values.get(i)),
+        }
+    }
+
+    fn count(&self) -> int32 {
+        (VST3_PARAMS.len() + self.bank.len()) as int32
+    }
+
+    /// Fills `info` for parameter `index` (the bank's after the others).
+    fn info(&self, index: int32, info: &mut ParameterInfo) -> tresult {
+        let Ok(i) = usize::try_from(index) else {
+            return kInvalidArgument;
+        };
+        if let Some(p) = VST3_PARAMS.get(i) {
+            info.id = p.id;
+            copy_wide(p.title, &mut info.title);
+            copy_wide(p.title, &mut info.shortTitle);
+            copy_wide(p.units, &mut info.units);
+            info.stepCount = p.steps;
+            info.defaultNormalizedValue = p.default;
+            info.unitId = 0;
+            info.flags = p.flags;
+            return kResultOk;
+        }
+        let k = i - VST3_PARAMS.len();
+        if k >= self.bank.len() {
+            return kInvalidArgument;
+        }
+        info.id = VST3_BANK_BASE + k as u32;
+        let title = format!("Bank {k}");
+        copy_wide(&title, &mut info.title);
+        copy_wide(&title, &mut info.shortTitle);
+        copy_wide("", &mut info.units);
+        info.stepCount = 0;
+        info.defaultNormalizedValue = 0.0;
+        info.unitId = 0;
+        info.flags = ParameterFlags_::kCanAutomate;
+        kResultOk
+    }
+
     fn get(&self, id: ParamID) -> f64 {
-        param(id)
-            .and_then(|(i, _)| self.values.get(i))
+        self.cell(id)
             .map_or(0.0, |v| f64::from_bits(v.load(Ordering::SeqCst)))
     }
 
     fn set(&self, id: ParamID, n: f64) -> tresult {
-        match param(id).and_then(|(i, _)| self.values.get(i)) {
+        match self.cell(id) {
             Some(v) => {
                 v.store(n.clamp(0.0, 1.0).to_bits(), Ordering::SeqCst);
                 kResultOk
@@ -800,9 +873,19 @@ impl Ctl {
         if r != kResultOk || n != 8 {
             return kResultFalse;
         }
+        let gain = f64::from_le_bytes(b);
+        // Test Bank's values follow the gain.
+        for cell in self.bank.iter() {
+            // SAFETY: `b` has room for 8 bytes.
+            let r = unsafe { s.read(b.as_mut_ptr() as *mut c_void, 8, &mut n) };
+            if r != kResultOk || n != 8 {
+                return kResultFalse;
+            }
+            cell.store(f64::from_le_bytes(b).to_bits(), Ordering::SeqCst);
+        }
         bump(ix::STATE_SYNCS);
         stamp(ix::LAST_STATE_SYNC);
-        self.set(VST3_PARAM_GAIN, f64::from_le_bytes(b))
+        self.set(VST3_PARAM_GAIN, gain)
     }
 
     /// The controller's own state: [`CONTROLLER_STATE_TAG`] and the memo
@@ -877,25 +960,16 @@ macro_rules! edit_controller {
 
             unsafe fn getParameterCount(&self) -> int32 {
                 self.ctl.check();
-                VST3_PARAMS.len() as int32
+                self.ctl.count()
             }
 
             unsafe fn getParameterInfo(&self, index: int32, info: *mut ParameterInfo) -> tresult {
                 self.ctl.check();
-                let p = usize::try_from(index).ok().and_then(|i| VST3_PARAMS.get(i));
                 // SAFETY: the host passes a struct to fill.
-                let (Some(p), Some(info)) = (p, unsafe { info.as_mut() }) else {
-                    return kInvalidArgument;
-                };
-                info.id = p.id;
-                copy_wide(p.title, &mut info.title);
-                copy_wide(p.title, &mut info.shortTitle);
-                copy_wide(p.units, &mut info.units);
-                info.stepCount = p.steps;
-                info.defaultNormalizedValue = p.default;
-                info.unitId = 0;
-                info.flags = p.flags;
-                kResultOk
+                match unsafe { info.as_mut() } {
+                    Some(info) => self.ctl.info(index, info),
+                    None => kInvalidArgument,
+                }
             }
 
             unsafe fn getParamStringByValue(
@@ -1001,10 +1075,13 @@ struct Proc {
     crash: bool,
     /// Writes NaN as each output channel's first sample (Test NaN).
     nan: bool,
+    /// Test Bank's extra values, as the processor was given them (empty
+    /// for the other classes); in its state after the gain.
+    bank: Box<[AtomicU64]>,
 }
 
 impl Proc {
-    fn new(synth: bool, crash: bool, nan: bool) -> Proc {
+    fn new(synth: bool, crash: bool, nan: bool, bank: bool) -> Proc {
         Proc {
             gain: AtomicU64::new(VST3_COMPONENT_GAIN.to_bits()),
             active: AtomicBool::new(false),
@@ -1013,6 +1090,7 @@ impl Proc {
             synth,
             crash,
             nan,
+            bank: bank_cells(bank),
         }
     }
 
@@ -1044,6 +1122,14 @@ impl Proc {
         let r = unsafe { s.write(b.as_mut_ptr() as *mut c_void, 8, &mut n) };
         if r != kResultOk || n != 8 {
             return kResultFalse;
+        }
+        for cell in self.bank.iter() {
+            let mut b = f64::from_bits(cell.load(Ordering::SeqCst)).to_le_bytes();
+            // SAFETY: `b` holds 8 bytes.
+            let r = unsafe { s.write(b.as_mut_ptr() as *mut c_void, 8, &mut n) };
+            if r != kResultOk || n != 8 {
+                return kResultFalse;
+            }
         }
         if mode() == MODE_STATE_SEEKS_PAST_END {
             let mut at = 0;
@@ -1084,6 +1170,15 @@ impl Proc {
         if r != kResultOk || n != 8 || !(0.0..=1.0).contains(&gain) {
             return kResultFalse;
         }
+        let mut bank = vec![0.0f64; self.bank.len()];
+        for v in bank.iter_mut() {
+            // SAFETY: `b` has room for 8 bytes.
+            let r = unsafe { s.read(b.as_mut_ptr() as *mut c_void, 8, &mut n) };
+            if r != kResultOk || n != 8 {
+                return kResultFalse;
+            }
+            *v = f64::from_le_bytes(b);
+        }
         if mode() == MODE_STATE_SEEKS_PAST_END {
             let mut rest = [0u8; 12];
             let mut at = 0;
@@ -1104,6 +1199,9 @@ impl Proc {
             }
         }
         self.gain.store(gain.to_bits(), Ordering::SeqCst);
+        for (cell, v) in self.bank.iter().zip(bank) {
+            cell.store(v.to_bits(), Ordering::SeqCst);
+        }
         kResultOk
     }
 
@@ -1173,6 +1271,9 @@ impl Proc {
                     }
                     if id == VST3_PARAM_GAIN {
                         self.gain.store(v.to_bits(), Ordering::SeqCst);
+                    }
+                    if let Some(c) = bank_index(id).and_then(|k| self.bank.get(k)) {
+                        c.store(v.to_bits(), Ordering::SeqCst);
                     }
                     if id == VST3_PARAM_MODE {
                         mode_in = Some(v);
@@ -1662,10 +1763,12 @@ impl IConnectionPointTrait for Controller {
     }
 }
 
-/// Test Synth: a single component (its own controller).
+/// Test Synth and Test Bank: a single component (its own controller).
 struct Synth {
     ctl: Ctl,
     proc: Proc,
+    /// [`SYNTH_BUSES`], or [`GAIN_BUSES`] for Test Bank.
+    buses: &'static [Bus],
 }
 
 impl Drop for Synth {
@@ -1723,7 +1826,7 @@ impl IComponentTrait for Synth {
     }
 
     unsafe fn getBusCount(&self, media: MediaType, dir: BusDirection) -> int32 {
-        bus_count(&SYNTH_BUSES, media, dir)
+        bus_count(self.buses, media, dir)
     }
 
     unsafe fn getBusInfo(
@@ -1733,7 +1836,7 @@ impl IComponentTrait for Synth {
         index: int32,
         bus: *mut BusInfo,
     ) -> tresult {
-        bus_info(&SYNTH_BUSES, media, dir, index, bus)
+        bus_info(self.buses, media, dir, index, bus)
     }
 
     unsafe fn activateBus(
@@ -1743,7 +1846,7 @@ impl IComponentTrait for Synth {
         index: int32,
         state: TBool,
     ) -> tresult {
-        if index >= 0 && index < bus_count(&SYNTH_BUSES, media, dir) {
+        if index >= 0 && index < bus_count(self.buses, media, dir) {
             bus_activated(media, dir, index, state);
             kResultOk
         } else {
@@ -1833,18 +1936,26 @@ impl IPluginFactoryTrait for Factory {
             ComWrapper::new(Component {
                 host: Mutex::new(None),
                 peer: Mutex::new(None),
-                proc: Proc::new(false, cid == PROCESS_CRASHER, cid == NAN),
+                proc: Proc::new(false, cid == PROCESS_CRASHER, cid == NAN, false),
             })
             .to_com_ptr::<FUnknown>()
         } else if cid == SYNTH {
             ComWrapper::new(Synth {
-                ctl: Ctl::new(),
-                proc: Proc::new(true, false, false),
+                ctl: Ctl::new(false),
+                proc: Proc::new(true, false, false, false),
+                buses: &SYNTH_BUSES,
+            })
+            .to_com_ptr::<FUnknown>()
+        } else if cid == BANK {
+            ComWrapper::new(Synth {
+                ctl: Ctl::new(true),
+                proc: Proc::new(false, false, false, true),
+                buses: &GAIN_BUSES,
             })
             .to_com_ptr::<FUnknown>()
         } else if cid == CONTROLLER {
             ComWrapper::new(Controller {
-                ctl: Ctl::new(),
+                ctl: Ctl::new(false),
                 peer: Mutex::new(None),
             })
             .to_com_ptr::<FUnknown>()

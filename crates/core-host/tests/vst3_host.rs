@@ -841,3 +841,61 @@ fn sdk_panner_moves_a_mono_input_between_the_sides() {
     assert!(l0 > r0, "left: {l0} {r0}");
     assert!(r1 > l1, "right: {l1} {r1}");
 }
+
+/// Final review I1: 200 host values to distinct parameters, more than the
+/// 128 parameter queues a block once had, all reach the component in one
+/// block; a capture before that block keeps them (undelivered) and one
+/// after it finds them in the component's state.
+#[test]
+fn two_hundred_host_values_in_one_block_all_survive_a_capture() {
+    use test_plugins::{VST3_BANK_BASE, VST3_BANK_ID};
+    let p = private();
+    let (mut hist, song, slot) = with_insert(VST3_BANK_ID, "Test Bank");
+    let mut host = host_for(&p.path, &[VST3_BANK_ID]);
+    host.sync(hist.doc());
+    let r = host.wait_ready(WAIT);
+    assert_eq!(r.loaded, vec![slot], "{:?}", r.failed);
+    let (mut engine, mut be) = engine(&host);
+    engine.load(hist.doc(), song).unwrap();
+    peak(&mut be, 512);
+    let value = |k: u32| f64::from(k + 1) / 256.0;
+    let params: Vec<(ParamId, f64)> = (0..200u32)
+        .map(|k| (pid(VST3_BANK_BASE + k), value(k)))
+        .collect();
+    run(
+        &mut hist,
+        MixerCmd::SetPluginParams {
+            slot,
+            params: params.clone(),
+        },
+    );
+    host.sync(hist.doc());
+    let reload = |hist: &History| {
+        let d = tempfile::tempdir().unwrap();
+        let package = d.path().join("Bank.vizdaw");
+        core_model::file::save(hist.doc(), &package).unwrap();
+        let doc = core_model::file::load(&package).unwrap();
+        let mut fresh = host_for(&p.path, &[VST3_BANK_ID]);
+        fresh.sync(&doc);
+        fresh.wait_ready(WAIT);
+        let inst = fresh.instance(slot).unwrap();
+        params
+            .iter()
+            .filter(|(id, v)| inst.param_value(*id) != Some(*v))
+            .count()
+    };
+    // Before a block: undelivered, kept in the overlay.
+    let mut before = hist.clone();
+    host.capture(&mut before, slot).unwrap();
+    assert_eq!(reload(&before), 0, "values lost before a block");
+    // One block carries all of them; the capture folds them into the
+    // component's state.
+    peak(&mut be, 256);
+    host.capture(&mut hist, slot).unwrap();
+    assert!(
+        hist.doc().plugin_slot(slot).unwrap().params.is_empty(),
+        "folded into the state"
+    );
+    assert_eq!(reload(&hist), 0, "values lost after a block");
+    drop(engine);
+}

@@ -25,11 +25,16 @@ use vst3::{Class, ComPtr, ComWrapper};
 /// Most points one parameter's queue holds in a block; a later point that
 /// does not fit replaces the last one (the latest value wins).
 pub(crate) const QUEUE_POINTS: usize = 32;
-/// Most parameters with changes in one block, each way, beyond the
-/// values a first block carries (the input list gets a queue for each of
-/// those too); host changes of more are dropped, controller edits wait
-/// for the next block.
+/// Most parameters with changes in one block, each way: the output list
+/// has this many; the input list has this many for controller edits and
+/// mapped MIDI controllers, plus [`HOST_QUEUES`] kept for the host's
+/// values, plus one for each value a first block carries. Controller
+/// edits past their share wait for the next block.
 pub(crate) const QUEUES: usize = 128;
+/// Input queues kept for the host's values: as many as a block can carry
+/// (`MAX_PARAM_EVENTS`), so none is ever dropped (the host counts every
+/// value it handed over as delivered).
+pub(crate) const HOST_QUEUES: usize = crate::process::MAX_PARAM_EVENTS;
 /// Most events the plug-in may add to the output event list in a block.
 pub(crate) const OUT_EVENTS: usize = 128;
 
@@ -168,6 +173,11 @@ impl ParamChanges {
                 .collect(),
             used: Cell::new(0),
         }
+    }
+
+    /// Whether more than `keep` queues are still free. // RT
+    pub(crate) fn has_room_beyond(&self, keep: usize) -> bool {
+        self.used.get().saturating_add(keep) < self.queues.len()
     }
 
     /// Forgets every change. // RT
@@ -393,7 +403,8 @@ unsafe impl Send for RtData {}
 
 impl RtData {
     /// Allocates the lists (the input changes with room for `first`
-    /// parameters beyond [`QUEUES`], so a first block's values all fit),
+    /// parameters beyond [`QUEUES`] and [`HOST_QUEUES`], so a first
+    /// block's values and every host value all fit),
     /// the context and buses with `in_counts` and `out_counts` channels
     /// (main thread).
     pub(crate) fn new(
@@ -406,7 +417,9 @@ impl RtData {
             processor,
             ins: Buses::new(in_counts),
             outs: Buses::new(out_counts),
-            params_in: ComWrapper::new(ParamChanges::new(QUEUES.saturating_add(first))),
+            params_in: ComWrapper::new(ParamChanges::new(
+                QUEUES.saturating_add(HOST_QUEUES).saturating_add(first),
+            )),
             params_out: ComWrapper::new(ParamChanges::new(QUEUES)),
             events_in: ComWrapper::new(EventList::new(crate::process::MAX_EVENTS)),
             events_out: ComWrapper::new(EventList::new(OUT_EVENTS)),

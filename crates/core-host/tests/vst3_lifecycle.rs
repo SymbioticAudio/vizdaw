@@ -20,7 +20,7 @@ fn private() -> (tempfile::TempDir, std::path::PathBuf, Vst3Probe) {
 #[test]
 fn listing_enters_once_and_exits_once() {
     let (_d, copy, probe) = private();
-    assert_eq!(vst3::list_bundle(&copy).unwrap().len(), 6);
+    assert_eq!(vst3::list_bundle(&copy).unwrap().len(), 7);
     let c = probe.counters();
     assert_eq!((c.entries, c.exits), (1, 1), "{c:?}");
     assert_eq!(c.factory_releases, 1, "{c:?}");
@@ -78,7 +78,7 @@ fn parallel_loads_of_one_image_all_find_a_factory() {
         for _ in 0..8 {
             s.spawn(|| {
                 for _ in 0..20 {
-                    assert_eq!(vst3::list_bundle(&copy).unwrap().len(), 6);
+                    assert_eq!(vst3::list_bundle(&copy).unwrap().len(), 7);
                 }
             });
         }
