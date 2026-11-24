@@ -17,7 +17,6 @@
 //! Never under the control channel.
 
 use std::panic::AssertUnwindSafe;
-use std::path::Path;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -33,7 +32,7 @@ use vizdaw_app::{DocId, DocumentModel, panels};
 use vizdaw_ffi::{RegionGainRow, ReportRow};
 
 use super::audio_format::{progress_bar, row, text};
-use super::export_midi::wont_transfer;
+use super::export_midi::{taken, wont_transfer};
 use super::for_daw::{error_row, export_buttons, present_sheet, waiting_row};
 use crate::app_state::AppState;
 use crate::file_panels::PanelPlace;
@@ -123,12 +122,6 @@ fn run_check(doc: DocId, cx: &mut App) {
         cx.update(|cx| with_doc(doc, cx, |d| d.land_dawproject_check(landed)));
     })
     .detach();
-}
-
-/// Whether something is at `path` (lstat: a dangling link counts as
-/// taken).
-fn taken(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok()
 }
 
 /// Export…: the save panel with the core's name, then the export (or its

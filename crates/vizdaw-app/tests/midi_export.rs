@@ -594,3 +594,32 @@ fn replace_writes_the_request_it_asked_about() {
     let e = clip_exports(&f).pop().expect("an export");
     assert!(!e.replace && e.lanes == [30, 31] && e.path == "/tmp/out2");
 }
+
+/// Only the sheet's own job reopens it: another `ExportMidi` job failing
+/// (one started over the channel, say) is an alert, and the sheet stays
+/// closed.
+#[test]
+fn another_midi_export_failing_does_not_reopen_the_sheet() {
+    let f = Arc::new(busy());
+    f.script_job(JobScript::done().steps(&[0.5]));
+    f.script_job(JobScript::failed("disk full").steps(&[0.5]));
+    let (mut s, id) = store_with(&f);
+    let d = s.document_mut(id).unwrap();
+    d.show_midi_export(ExportKind::Smf);
+    d.start_midi_export("/tmp/x.mid", true);
+    assert!(!d.midi_export().shown());
+    let other = vizdaw_app::jobs::FileJob::ExportMidi(vizdaw_ffi::SmfExportRequestRow {
+        seq: 3,
+        path: "/tmp/y.mid".into(),
+        replace: false,
+        type0: false,
+        ppq: 960,
+        lanes: vec![30],
+        mpe: false,
+    });
+    d.start_job(other.kind(), "MIDI Export Failed", |s| other.start(s));
+    d.poll_jobs();
+    assert!(!d.midi_export().shown(), "not its job");
+    assert!(d.midi_export().error().is_none());
+    assert!(d.alert.is_some(), "the other job's failure is an alert");
+}

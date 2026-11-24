@@ -21,6 +21,7 @@
 //! ([`present`]), never an alert. Never under the control channel.
 
 use std::panic::AssertUnwindSafe;
+use std::path::Path;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -202,11 +203,18 @@ fn ask_replace(doc: DocId, asking: AnyWindowHandle, message: &str, cx: &mut App)
     .detach();
 }
 
-/// Starts `doc`'s export at `path`, replacing as the panel confirmed.
-fn start(doc: DocId, path: String, cx: &mut App) {
+/// Whether something is at `path` (lstat: a dangling link counts as
+/// taken).
+pub(super) fn taken(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
+}
+
+/// Starts `doc`'s export at `path`; `replace` only when something was
+/// there as the panel answered (it confirmed replacing it).
+fn start(doc: DocId, path: String, replace: bool, cx: &mut App) {
     AppState::global(cx).update(cx, |s, cx| {
         if let Some(d) = s.store.document_mut(doc) {
-            d.start_midi_export(&path, true);
+            d.start_midi_export(&path, replace);
         }
         cx.notify();
     });
@@ -234,8 +242,12 @@ fn begin(doc: DocId, label: &'static str, window: &Window, cx: &mut App) {
                 let answer = chosen.await;
                 cx.update(|cx| match answer {
                     Ok(Some(_)) if !sheet_is(asking, label, cx) => {}
-                    // The panel (or the app's own question) confirmed a replace.
-                    Ok(Some(path)) => start(doc, path.to_string_lossy().into_owned(), cx),
+                    // The panel (or the app's own question) confirmed any
+                    // replace: it is one only if something is there now.
+                    Ok(Some(path)) => {
+                        let replace = taken(&path);
+                        start(doc, path.to_string_lossy().into_owned(), replace, cx)
+                    }
                     Ok(None) => {}
                     Err(e) => AppState::global(cx).update(cx, |s, cx| {
                         s.store

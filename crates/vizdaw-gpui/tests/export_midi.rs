@@ -326,7 +326,7 @@ fn export_asks_for_the_songs_mid_and_exports(cx: &mut TestAppContext) {
     s.cx.run_until_parked();
     let r = s.smf_exports().pop().expect("an export");
     assert_eq!(r.path, "/nowhere-vizdaw-test/Song.mid");
-    assert!(r.replace, "the panel confirmed");
+    assert!(!r.replace, "nothing was there: nothing to replace");
     assert_eq!(r.lanes, [30, 31]);
     assert_eq!(s.sheet(), None);
     assert!(!s.cx.has_pending_prompt());
@@ -386,7 +386,7 @@ fn one_clip_track_asks_for_its_midi2(cx: &mut TestAppContext) {
     s.panels.answer("/nowhere-vizdaw-test/Chords.midi2");
     s.cx.run_until_parked();
     let r = s.clip_exports().pop().expect("an export");
-    assert!(r.path == "/nowhere-vizdaw-test/Chords.midi2" && r.replace && r.lanes == [31]);
+    assert!(r.path == "/nowhere-vizdaw-test/Chords.midi2" && !r.replace && r.lanes == [31]);
     assert_eq!(s.sheet(), None);
 }
 
@@ -571,6 +571,21 @@ fn the_save_panels_question_replaces_only_on_replace(cx: &mut TestAppContext) {
     s.cx.run_until_parked();
     let r = s.smf_exports().pop().expect("an export");
     assert!(r.replace && r.path == dir.path().join("Song.mid").to_string_lossy());
+}
+
+/// A file the panel confirmed replacing is sent with `replace: true`.
+#[gpui::test]
+fn a_confirmed_existing_file_is_sent_as_a_replace(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("Song.mid");
+    std::fs::write(&file, b"x").unwrap();
+    let mut s = setup(cx, busy(), false);
+    s.menu("file.export_midi");
+    s.click("button", "Export\u{2026}");
+    s.panels.answer(&file.to_string_lossy());
+    s.cx.run_until_parked();
+    let r = s.smf_exports().pop().expect("an export");
+    assert!(r.replace && r.path == file.to_string_lossy());
 }
 
 /// Review fix: cancelled as the folder panel answers, nothing is written

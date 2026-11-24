@@ -91,6 +91,7 @@ either platform's panels.
 | macOS | Click into the document window (or another one) while a panel is up: the panel stays in front and the app doesn't look frozen | open |
 | macOS | Start playback, then open a panel: the playhead keeps moving behind it | open |
 | macOS | Close the panel's window (or its document) while the panel is up: the panel goes and keys and menus come back | open |
+| macOS | Native replace prompt (MIDI clip folder export; any save-panel replace question): Return cancels, Esc cancels, and with Full Keyboard Access on, Space does not replace — Replace must be clicked. If Esc or Space misbehave, raise it (owner ruling on the native button roles) | open |
 
 ### Interchange sheets: MIDI, For Another DAW, DAWproject and merge (GPUI slice 7c)
 

@@ -598,6 +598,8 @@ pub struct MidiExport {
     /// Why the last dry run, start or job was refused.
     error: Option<String>,
     replace_question: Option<ReplaceQuestion>,
+    /// The sheet's own export job; only its failure reopens the sheet.
+    job: Option<u64>,
     /// The newest dry run asked for, and it until the UI takes it.
     check_generation: u64,
     pending_check: Option<ExportCheck>,
@@ -905,17 +907,23 @@ impl DocumentModel {
         // Hidden before the job starts: a failure at its first poll shows
         // the sheet again, and it must stay up.
         self.midi_export.shown = false;
+        self.midi_export.job = None;
         let started = match job {
-            ExportJob::Smf(req) => {
-                self.try_start_job(JobKindRow::ExportMidi, |s| s.export_midi(req))
-            }
-            ExportJob::Clip(req) => {
-                self.try_start_job(JobKindRow::ExportMidi, |s| s.export_midi_clip(req))
-            }
+            ExportJob::Smf(req) => self.session.export_midi(req),
+            ExportJob::Clip(req) => self.session.export_midi_clip(req),
         };
-        if let Err(err) = started {
-            self.midi_export.error = Some(error_message(&err));
-            self.midi_export.shown = true;
+        match started {
+            Ok(id) => {
+                // Known before the first poll: a failure there is the
+                // sheet's own.
+                self.midi_export.job = Some(id);
+                self.list_job(id, JobKindRow::ExportMidi);
+                self.poll_jobs();
+            }
+            Err(err) => {
+                self.midi_export.error = Some(error_message(&err));
+                self.midi_export.shown = true;
+            }
         }
     }
 
@@ -923,7 +931,10 @@ impl DocumentModel {
     /// again with the message (Swift `jobFailed`). False for anything
     /// else (it is an alert, or a quiet cancel).
     pub(crate) fn midi_export_job_failed(&mut self, job: &JobRow, message: &str) -> bool {
-        if job.kind != JobKindRow::ExportMidi || job.state == JobStateRow::Cancelled {
+        if job.kind != JobKindRow::ExportMidi
+            || Some(job.id) != self.midi_export.job
+            || job.state == JobStateRow::Cancelled
+        {
             return false;
         }
         self.midi_export.error = Some(message.to_owned());
