@@ -512,6 +512,8 @@ impl DocumentModel {
         // A job started while polling (none yet) would be in `self.jobs`.
         still.append(&mut self.jobs);
         self.jobs = still;
+        // The Bounce sheet closes once its job ended.
+        self.bounce_poll();
     }
 
     /// After a job applied: the document, its tracks and the media rows

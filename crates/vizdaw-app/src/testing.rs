@@ -310,6 +310,8 @@ struct Files {
     recheck: bool,
     project_info: Option<ProjectInfoRow>,
     bounce_check: Option<BounceCheckRow>,
+    /// Every `bounce_check(req)`, in order.
+    bounce_checks: Vec<BounceRequestRow>,
     /// The dry-run reports by call name.
     reports: HashMap<String, ReportRow>,
     for_daw_check: Option<ForDawCheckRow>,
@@ -1028,6 +1030,11 @@ impl FakeSession {
     /// What `bounce_check` answers (default: no frames, no files).
     pub fn set_bounce_check(&self, row: BounceCheckRow) {
         self.st().files.bounce_check = Some(row);
+    }
+
+    /// Every request `bounce_check` was asked about, in order.
+    pub fn bounce_checks(&self) -> Vec<BounceRequestRow> {
+        self.st().files.bounce_checks.clone()
     }
 
     /// What dry run `call` (`export_midi_check`, `export_midi_clip_check`,
@@ -2136,8 +2143,9 @@ impl DocSession for FakeSession {
             JobRequest::Bounce(req),
         )
     }
-    fn bounce_check(&self, _req: BounceRequestRow) -> Result<BounceCheckRow, VizError> {
+    fn bounce_check(&self, req: BounceRequestRow) -> Result<BounceCheckRow, VizError> {
         let mut s = self.st();
+        s.files.bounce_checks.push(req);
         Self::read(&mut s, "bounce_check")?;
         Ok(s.files.bounce_check.clone().unwrap_or(BounceCheckRow {
             external_lanes: 0,

@@ -5,6 +5,7 @@ pub mod alerts;
 pub mod arrangement;
 pub mod audition;
 pub mod banners;
+pub mod bounce;
 pub mod bounce_commands;
 pub mod commands;
 pub mod document;

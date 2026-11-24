@@ -18,6 +18,7 @@
 //!   file (Swift `beginImport`; a file that cannot be read is the alert
 //!   "Import Failed"; the sheet itself is slice 7c's).
 //! - Relink Media…: the Relink sheet ([`crate::sheets::relink`]).
+//! - Bounce…: the Bounce sheet ([`crate::sheets::bounce`]).
 //! - Open Co-Producer Copy…: panel #2 in the project's copies folder, then
 //!   the store's `open_copy` (a new untitled project).
 //! - The items whose sheets come later do nothing yet
@@ -40,10 +41,8 @@ use crate::sheet_host::{Sheet, SheetDialog};
 use crate::shell::DocumentWindow;
 
 /// The File items whose sheet or flow lands later; their menu item does
-/// nothing yet: Bounce… (Task 6), the Export items and the report (slice
-/// 7c).
+/// nothing yet: the Export items and the report (slice 7c).
 pub const LATER: &[&str] = &[
-    "file.bounce",
     "file.export_dawproject",
     "file.export_aaf",
     "file.export_midi",
@@ -85,6 +84,7 @@ pub(crate) fn run_in_window(
     let doc = view.doc();
     match action.id.as_ref() {
         "file.project_settings" => crate::sheets::project_settings::show(view, window, cx),
+        "file.bounce" => crate::sheets::bounce::show(view, window, cx),
         "media.relink" => AppState::global(cx).update(cx, |s, cx| {
             // The presenter shows the sheet once the window is free.
             s.store.with_document(doc, |d, _| d.show_relink());

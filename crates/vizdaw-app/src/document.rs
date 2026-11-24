@@ -93,6 +93,8 @@ pub struct DocumentModel {
     recovery: recovery::RecoveryOffer,
     /// The Relink sheet's offer.
     pub(crate) relink: crate::relink::RelinkOffer,
+    /// The Bounce sheet's state (slice 7b Task 6).
+    pub(crate) bounce: crate::bounce::Bounce,
     /// The report of the last import or export this document's UI ran
     /// (Swift `InterchangeModel.report`).
     pub(crate) last_report: Option<vizdaw_ffi::ReportRow>,
@@ -211,6 +213,7 @@ impl DocumentModel {
             midi_read: None,
             recovery: recovery::RecoveryOffer::default(),
             relink: crate::relink::RelinkOffer::default(),
+            bounce: crate::bounce::Bounce::default(),
             last_report: None,
             merge_held: false,
             media_rows: Mutex::new(None),
