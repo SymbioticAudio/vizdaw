@@ -29,6 +29,7 @@ use vizdaw_ffi::revs::LaneRev;
 use vizdaw_ffi::selection::{SelectionRow, TickRange};
 use vizdaw_ffi::session::CopiesSizeRow;
 use vizdaw_ffi::session::click::ClickModeRow;
+use vizdaw_ffi::snapshot::ParamRow;
 use vizdaw_ffi::snapshot::{
     DocSnapshot, LaneRow, PluginFormatTag, PluginRefRow, SeqRow, SlotRow, SlotStatus,
     TransportState,
@@ -44,6 +45,7 @@ use vizdaw_ffi::{
     OpenOptions, ProjectFormatRow, ProjectInfoRow, RecoveryInfo, ReportRow, SmfExportRequestRow,
     SnapshotRow, SongInfoRow,
 };
+use vizdaw_ffi::{BuiltinSound, EditorResize, EditorSize};
 use vizdaw_ffi::{ClickRow, InputInfoRow, OverviewRows, OverviewStateRow};
 
 struct State {
@@ -130,6 +132,33 @@ struct State {
     files: Files,
     /// Recording, step entry, the click and the input (slice 8a).
     rec: Rec,
+    /// Plug-in windows and the Built-in Synth's sounds (host H2).
+    windows: Windows,
+}
+
+/// The fake's plug-in window side (host H2): parameters, editors, saved
+/// windows, the plug-in tick's news and the Built-in Synth's sounds.
+#[derive(Default)]
+struct Windows {
+    /// Each slot's parameters (none: an empty list, not running).
+    params: HashMap<u64, Vec<ParamRow>>,
+    /// The slots with an editor, and the size it opens at.
+    editors: HashMap<u64, EditorSize>,
+    /// Every `open_editor(slot, parent, scale)` that opened.
+    opened: Vec<(u64, u64, f64)>,
+    /// Every `close_editor(slot)` that closed.
+    closed: Vec<u64>,
+    /// Every `resize_editor(slot, width, height)` that answered.
+    resized: Vec<(u64, u32, u32)>,
+    /// What a resizable editor takes (`None`: what it was asked).
+    resize_answer: Option<(u32, u32)>,
+    /// The windows saved as open.
+    open: std::collections::BTreeSet<u64>,
+    /// What the next `idle()` says changed (once).
+    idle_params_changed: Vec<u64>,
+    idle_editor_resize: Vec<EditorResize>,
+    /// Every `set_builtin_sound(dest, sound)` the session took.
+    sounds: Vec<(u64, BuiltinSound)>,
 }
 
 /// The fake's recording side: a pass while `pass` is some, its fates,
@@ -499,6 +528,7 @@ impl FakeSession {
                 ..Files::default()
             },
             rec: Rec::default(),
+            windows: Windows::default(),
         }))
     }
 
@@ -1032,6 +1062,68 @@ impl FakeSession {
     }
 }
 
+/// Plug-in windows (host H2): parameters, editors and their calls.
+impl FakeSession {
+    /// Slot `slot`'s parameters.
+    pub fn set_params(&self, slot: u64, params: Vec<ParamRow>) {
+        self.st().windows.params.insert(slot, params);
+    }
+
+    /// Slot `slot` has no parameters (it is not running).
+    pub fn clear_params(&self, slot: u64) {
+        self.st().windows.params.remove(&slot);
+    }
+
+    /// Slot `slot`'s editor and its open size (`None`: it has none).
+    pub fn set_editor(&self, slot: u64, size: Option<EditorSize>) {
+        let mut s = self.st();
+        match size {
+            Some(e) => s.windows.editors.insert(slot, e),
+            None => s.windows.editors.remove(&slot),
+        };
+    }
+
+    /// The size a resizable editor takes when asked (`None`: the asked).
+    pub fn set_resize_answer(&self, size: Option<(u32, u32)>) {
+        self.st().windows.resize_answer = size;
+    }
+
+    /// Every editor opened: slot, parent, scale.
+    pub fn opened_editors(&self) -> Vec<(u64, u64, f64)> {
+        self.st().windows.opened.clone()
+    }
+
+    /// Every editor closed.
+    pub fn closed_editors(&self) -> Vec<u64> {
+        self.st().windows.closed.clone()
+    }
+
+    /// Every resize an editor answered: slot, width, height.
+    pub fn resized_editors(&self) -> Vec<(u64, u32, u32)> {
+        self.st().windows.resized.clone()
+    }
+
+    /// The windows saved as open, in slot order.
+    pub fn windows_open(&self) -> Vec<u64> {
+        self.st().windows.open.iter().copied().collect()
+    }
+
+    /// The next `idle()` says these slots' parameters changed.
+    pub fn set_idle_params_changed(&self, slots: Vec<u64>) {
+        self.st().windows.idle_params_changed = slots;
+    }
+
+    /// The next `idle()` reports these editor resize requests.
+    pub fn set_idle_editor_resize(&self, resizes: Vec<EditorResize>) {
+        self.st().windows.idle_editor_resize = resizes;
+    }
+
+    /// Every `set_builtin_sound(dest, sound)` the session took.
+    pub fn builtin_sounds(&self) -> Vec<(u64, BuiltinSound)> {
+        self.st().windows.sounds.clone()
+    }
+}
+
 /// Files and jobs (slice 7a): scripted jobs and the file reads.
 impl FakeSession {
     /// The next job started runs `script` (queued: several start in turn;
@@ -1545,6 +1637,83 @@ fn empty_report() -> ReportRow {
 }
 
 impl DocSession for FakeSession {
+    fn params(&self, slot: u64) -> Result<Vec<ParamRow>, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "params")?;
+        Ok(s.windows.params.get(&slot).cloned().unwrap_or_default())
+    }
+    fn open_editor(&self, slot: u64, parent: u64, scale: f64) -> Result<EditorSize, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "open_editor")?;
+        let size = s
+            .windows
+            .editors
+            .get(&slot)
+            .copied()
+            .ok_or_else(|| VizError::Engine {
+                message: "editor unavailable: the plugin has no editor".into(),
+            })?;
+        s.windows.opened.push((slot, parent, scale));
+        Ok(size)
+    }
+    fn resize_editor(&self, slot: u64, width: u32, height: u32) -> Result<EditorSize, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "resize_editor")?;
+        let answer = s.windows.resize_answer.unwrap_or((width, height));
+        let Some(e) = s.windows.editors.get_mut(&slot) else {
+            return Err(VizError::Engine {
+                message: "editor unavailable: the plugin has no editor".into(),
+            });
+        };
+        if e.resizable {
+            (e.width, e.height) = answer;
+        }
+        let e = *e;
+        s.windows.resized.push((slot, width, height));
+        Ok(e)
+    }
+    fn close_editor(&self, slot: u64) -> Result<(), VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "close_editor")?;
+        s.windows.closed.push(slot);
+        // As the core: a resize it asked for and idle has not reported
+        // yet goes with it.
+        s.windows.idle_editor_resize.retain(|e| e.slot != slot);
+        Ok(())
+    }
+    fn set_window_open(&self, slot: u64, open: bool) -> Result<(), VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "set_window_open")?;
+        if open {
+            s.windows.open.insert(slot);
+        } else {
+            s.windows.open.remove(&slot);
+        }
+        Ok(())
+    }
+    fn open_windows(&self) -> Result<Vec<u64>, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "open_windows")?;
+        Ok(s.windows.open.iter().copied().collect())
+    }
+    fn set_builtin_sound(&self, dest: u64, sound: BuiltinSound) -> Result<(), VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "set_builtin_sound")?;
+        let Some(d) = s.dests.iter_mut().find(|d| d.id == dest) else {
+            return Err(VizError::Model {
+                message: format!("unknown destination {dest}"),
+            });
+        };
+        if d.plugin.is_some() || d.external {
+            return Err(VizError::Model {
+                message: "Only a Built-in Synth has these sounds.".into(),
+            });
+        }
+        d.builtin_sound = Some(sound);
+        s.windows.sounds.push((dest, sound));
+        Self::command_result(&mut s);
+        Ok(())
+    }
     fn path(&self) -> Result<Option<String>, VizError> {
         Ok(self.st().saved_path.clone())
     }
@@ -1668,6 +1837,8 @@ impl DocSession for FakeSession {
             snapshot: n,
             slots_changed: std::mem::take(&mut s.idle_slots_changed),
             media_changed: std::mem::take(&mut s.idle_media_changed),
+            params_changed: std::mem::take(&mut s.windows.idle_params_changed),
+            editor_resize: std::mem::take(&mut s.windows.idle_editor_resize),
         })
     }
     fn lanes(&self, seq: u64) -> Result<Vec<LaneRow>, VizError> {

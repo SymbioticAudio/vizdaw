@@ -15,6 +15,7 @@ use vizdaw_ffi::record::{RecordSpecRow, RecordStateRow, RecoveredFileRow};
 use vizdaw_ffi::selection::{SelectionRow, TickRange};
 use vizdaw_ffi::session::CopiesSizeRow;
 use vizdaw_ffi::session::Session;
+use vizdaw_ffi::snapshot::ParamRow;
 use vizdaw_ffi::snapshot::{DocSnapshot, LaneRow, PluginRefRow, TransportState};
 use vizdaw_ffi::step::{StepInputRow, StepResultRow, StepStateRow};
 use vizdaw_ffi::tracks::TrackKindRow;
@@ -26,6 +27,7 @@ use vizdaw_ffi::{
     MidiFileInfoRow, MidiImportRequestRow, OpenOptions, ProjectFormatRow, ProjectInfoRow,
     RecoveryInfo, ReportRow, SmfExportRequestRow, SnapshotRow, SongInfoRow,
 };
+use vizdaw_ffi::{BuiltinSound, EditorResize, EditorSize};
 use vizdaw_ffi::{ClickRow, InputInfoRow, OverviewRows};
 
 /// What a plugin timer tick brought (the core's `IdleUpdate`, the parts
@@ -39,6 +41,12 @@ pub struct IdleNews {
     pub slots_changed: bool,
     /// The media rows changed (a job finished, media went offline).
     pub media_changed: bool,
+    /// Slots whose parameter list or values changed outside a gesture:
+    /// their windows read them again.
+    pub params_changed: Vec<u64>,
+    /// Open editors that asked for a new size (points), the latest per
+    /// slot: their windows follow.
+    pub editor_resize: Vec<EditorResize>,
 }
 
 /// What the app logic needs from a core session. The real `Session`
@@ -354,6 +362,33 @@ pub trait DocSession: Send + Sync {
     fn cancel_save_after_pass(&self) -> Result<(), VizError>;
     /// Why Save As would be refused before its panel opens, if it would.
     fn save_as_refusal(&self) -> Result<Option<String>, VizError>;
+
+    // Plug-in windows (host H2).
+
+    /// Slot `slot`'s parameters with their values (empty while it is not
+    /// running).
+    fn params(&self, slot: u64) -> Result<Vec<ParamRow>, VizError>;
+    /// Opens slot `slot`'s editor in the view at address `parent` (an
+    /// `NSView *` or an X11 window id, kept alive until `close_editor`
+    /// succeeds) at window scale `scale`; its size in points. `Busy`
+    /// "editor opening" (an editor still on its way) or a busy host: the
+    /// window calls again on its tick. "editor unavailable: …" when it has
+    /// none.
+    fn open_editor(&self, slot: u64, parent: u64, scale: f64) -> Result<EditorSize, VizError>;
+    /// Asks slot `slot`'s editor for a new size (points); what it took.
+    fn resize_editor(&self, slot: u64, width: u32, height: u32) -> Result<EditorSize, VizError>;
+    /// Hides slot `slot`'s editor, ends its gestures and drops a resize it
+    /// asked for. `Busy`: the parent view stays alive and the call is
+    /// retried.
+    fn close_editor(&self, slot: u64) -> Result<(), VizError>;
+    /// Records slot `slot`'s window as open or closed (saved with the
+    /// project).
+    fn set_window_open(&self, slot: u64, open: bool) -> Result<(), VizError>;
+    /// The windows saved open whose slot still exists.
+    fn open_windows(&self) -> Result<Vec<u64>, VizError>;
+    /// Sets Built-in Synth `dest`'s sound, one undo step "Set Built-in
+    /// Synth Sound".
+    fn set_builtin_sound(&self, dest: u64, sound: BuiltinSound) -> Result<(), VizError>;
 }
 
 impl DocSession for Session {
@@ -401,6 +436,8 @@ impl DocSession for Session {
             snapshot: u.snapshot,
             slots_changed: u.slots_changed,
             media_changed: u.media_changed,
+            params_changed: u.params_changed,
+            editor_resize: u.editor_resize,
         })
     }
     fn lanes(&self, seq: u64) -> Result<Vec<LaneRow>, VizError> {
@@ -796,6 +833,27 @@ impl DocSession for Session {
     }
     fn save_as_refusal(&self) -> Result<Option<String>, VizError> {
         Session::save_as_refusal(self)
+    }
+    fn params(&self, slot: u64) -> Result<Vec<ParamRow>, VizError> {
+        Session::params(self, slot)
+    }
+    fn open_editor(&self, slot: u64, parent: u64, scale: f64) -> Result<EditorSize, VizError> {
+        Session::open_editor(self, slot, parent, scale)
+    }
+    fn resize_editor(&self, slot: u64, width: u32, height: u32) -> Result<EditorSize, VizError> {
+        Session::resize_editor(self, slot, width, height)
+    }
+    fn close_editor(&self, slot: u64) -> Result<(), VizError> {
+        Session::close_editor(self, slot)
+    }
+    fn set_window_open(&self, slot: u64, open: bool) -> Result<(), VizError> {
+        Session::set_window_open(self, slot, open)
+    }
+    fn open_windows(&self) -> Result<Vec<u64>, VizError> {
+        Session::open_windows(self)
+    }
+    fn set_builtin_sound(&self, dest: u64, sound: BuiltinSound) -> Result<(), VizError> {
+        Session::set_builtin_sound(self, dest, sound)
     }
 }
 
