@@ -73,3 +73,20 @@ These apply to a build from `next`, not the beta test build (dd36914d).
 | 463 | A clean song shows the edited dot while it records | open |
 | 464 | Quit with two songs, Discard Changes: the waiting save still happens | open |
 | B-001 | Verify the DAWproject VCA fix in the next build from `next` | open |
+
+### File panels, prompts and alerts (GPUI slice 7b)
+
+Linux items need a Linux desktop with xdg-desktop-portal; Claude can't see
+either platform's panels.
+
+| Platform | What | Status |
+|---|---|---|
+| Linux | File › Open is one file chooser; choosing `project.json` inside a `.vizdaw` folder opens that project; MIDI, DAWproject and AAF files open too | open |
+| Linux | Open panels show the right filter (label and patterns) and accept label; a folder chooser (Search Folder…, stems Bounce) picks folders only | open |
+| Linux | Save panels (Save As, Bounce, MIDI export, interchange report): the suggested name, the folder, the extension added when typed without one | open |
+| Linux | Saving over an existing file asks the app's own replace question; Replace saves, Cancel leaves the file as it was | open |
+| Linux | The sheet-card prompts (save changes, replace, return prompt): Return presses the default button, Esc the cancel one | open |
+| Linux | With no window open, an alert shows in a small dialog window of its own, and OK closes it | open |
+| macOS | Each panel opened from a window is attached to it as a sheet; one opened with no window open floats above every window | open |
+| macOS | Click into the document window (or another one) while a panel is up: the panel stays in front and the app doesn't look frozen | open |
+| macOS | Start playback, then open a panel: the playhead keeps moving behind it | open |

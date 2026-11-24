@@ -539,3 +539,56 @@ fn locate_relinks_the_row_it_is_on(cx: &mut TestAppContext) {
         }]
     );
 }
+
+/// Final review: a question queued for a window that then closed is
+/// dropped (its asker reads Cancel), so the app is not left "prompting"
+/// for good and a genuine app switch rechecks again.
+#[gpui::test]
+fn a_question_for_a_closed_window_does_not_stop_the_recheck(cx: &mut TestAppContext) {
+    use gpui::PromptLevel;
+    use vizdaw_app::panels::REPLACE_ANSWERS;
+    use vizdaw_gpui::sheet_host::Ask;
+    let f = demo_fake();
+    f.set_media(vec![media(1, "a", None)]);
+    let mut s = setup_with(cx, f, false);
+    let doc = s.doc();
+    let app = s.app.clone();
+    let mixer =
+        s.cx.update(|_, cx| DocumentWindow::open_mixer(&app, doc, cx).unwrap());
+    s.cx.run_until_parked();
+    let replace = || {
+        Ask::with_labels(
+            PromptLevel::Warning,
+            "\u{201c}Bounce.wav\u{201d} already exists. Do you want to replace it?",
+            Some("A file with the same name already exists."),
+            &REPLACE_ANSWERS,
+        )
+    };
+    // The first shows; the second waits for the window.
+    let (first, second) = s.cx.update(|_, cx| {
+        (
+            vizdaw_gpui::alerts::ask(mixer.into(), replace(), cx),
+            vizdaw_gpui::alerts::ask(mixer.into(), replace(), cx),
+        )
+    });
+    s.cx.run_until_parked();
+    mixer
+        .update(&mut s.cx, |_, window, _| window.remove_window())
+        .unwrap();
+    s.cx.run_until_parked();
+    drop(first);
+    let mut second = second;
+    assert!(
+        second.try_recv().is_err(),
+        "the waiting question is dropped (read as Cancel)"
+    );
+    s.window
+        .update(&mut s.cx, |_, window, _| window.activate_window())
+        .unwrap();
+    s.cx.run_until_parked();
+    s.cx.deactivate_window();
+    s.cx.executor().advance_clock(Duration::from_secs(5));
+    s.cx.run_until_parked();
+    activate(&mut s);
+    assert_eq!(rechecks(&s), 1, "a real app switch rechecks");
+}

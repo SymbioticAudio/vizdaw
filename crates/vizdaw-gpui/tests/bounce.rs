@@ -439,3 +439,71 @@ fn the_other_rate_field_turns_the_keys_off_and_sets_the_rate(cx: &mut TestAppCon
     s.cx.run_until_parked();
     assert_eq!(s.bounces().pop().unwrap().rate, 21_050);
 }
+
+/// Final review: while a panel is up the sheet under it takes no keys:
+/// Esc does not press Cancel, Return does not press Bounce.
+#[gpui::test]
+fn with_a_panel_up_the_sheet_presses_nothing(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    s.open();
+    s.bounce();
+    assert_eq!(s.panels.rows(), ["8"]);
+    s.cx.simulate_keystrokes("escape");
+    s.cx.run_until_parked();
+    assert_eq!(s.sheet().as_deref(), Some("Bounce"), "Esc pressed nothing");
+    s.cx.simulate_keystrokes("enter");
+    s.cx.run_until_parked();
+    assert_eq!(s.panels.rows(), ["8"]);
+    s.panels.cancel();
+    s.cx.run_until_parked();
+    assert_eq!(s.sheet().as_deref(), Some("Bounce"));
+    assert!(s.bounces().is_empty());
+}
+
+/// Final review: a panel answered after its sheet's window closed starts
+/// nothing (the document stays open in another window).
+#[gpui::test]
+fn a_bounce_answered_after_its_window_closed_starts_nothing(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    let doc = s.doc();
+    let app = s.app.clone();
+    let mixer =
+        s.cx.update(|_, cx| DocumentWindow::open_mixer(&app, doc, cx).unwrap());
+    s.cx.run_until_parked();
+    let mut mcx = VisualTestContext::from_window(mixer.into(), &s.cx);
+    mcx.dispatch_action(FileCommand {
+        id: "file.bounce".into(),
+    });
+    mcx.run_until_parked();
+    let label = mixer.read_with(&mcx, |v, _| v.sheet_label()).unwrap();
+    assert_eq!(label.as_deref(), Some("Bounce"));
+    let n = mixer
+        .read_with(&mcx, |v, _| v.registry().borrow().tree())
+        .unwrap()["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|n| n["role"] == "button" && n["label"] == "Bounce")
+        .cloned()
+        .expect("the sheet's Bounce button");
+    let f = &n["frame"];
+    let at = gpui::point(
+        gpui::px((f["x"].as_f64().unwrap() + f["width"].as_f64().unwrap() / 2.) as f32),
+        gpui::px((f["y"].as_f64().unwrap() + f["height"].as_f64().unwrap() / 2.) as f32),
+    );
+    mcx.simulate_click(at, Modifiers::none());
+    mcx.run_until_parked();
+    assert_eq!(s.panels.rows(), ["8"]);
+    mixer
+        .update(&mut mcx, |_, window, _| window.remove_window())
+        .unwrap();
+    mcx.run_until_parked();
+    s.panels.answer("/nowhere-vizdaw-test/Mix.wav");
+    s.cx.run_until_parked();
+    assert!(
+        s.app
+            .read_with(&s.cx, |a, _| a.store.document(doc).is_some()),
+        "the document is still open"
+    );
+    assert!(s.bounces().is_empty(), "nothing started");
+}

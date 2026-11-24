@@ -404,14 +404,16 @@ impl PanelBackend for NativePanels {
         &self,
         spec: &PanelSpec,
         place: &PanelPlace,
-        _window: Option<AnyWindowHandle>,
+        window: Option<AnyWindowHandle>,
         done: oneshot::Sender<Chosen>,
-        _cx: &mut App,
+        cx: &mut App,
     ) {
-        // Modeless with a completion handler: a `runModal` here would run
-        // inside GPUI's main-queue drain and stop every GPUI task, timer
-        // and frame until the panel closed.
-        macos::present(&mac_panel(spec, place), done);
+        // With a completion handler (a sheet on the asking window, else
+        // raised and modeless): a `runModal` here would run inside GPUI's
+        // main-queue drain and stop every GPUI task, timer and frame until
+        // the panel closed.
+        let parent = window.and_then(|w| macos::ns_window(w, cx));
+        macos::present(&mac_panel(spec, place), parent, done);
     }
 
     #[cfg(target_os = "linux")]

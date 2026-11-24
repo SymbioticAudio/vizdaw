@@ -68,10 +68,14 @@ impl Presenter {
 }
 
 /// One of our prompts is up, or an app question waits for its window (a
-/// window losing the keyboard to it is not the app leaving).
+/// window losing the keyboard to it is not the app leaving). Only open
+/// windows count: a question for a window that closed never shows.
 pub(crate) fn prompting(cx: &App) -> bool {
-    cx.try_global::<Presenter>()
-        .is_some_and(|p| !p.busy.is_empty() || !p.asks.is_empty())
+    let Some(p) = cx.try_global::<Presenter>() else {
+        return false;
+    };
+    let open = cx.windows();
+    p.busy.keys().any(|w| open.contains(w)) || p.asks.iter().any(|(w, _, _)| open.contains(w))
 }
 
 /// What each window shows of ours now.
@@ -175,9 +179,12 @@ pub fn ask(window: AnyWindowHandle, ask: Ask, cx: &mut App) -> oneshot::Receiver
 
 fn present_asks(cx: &mut App) {
     let asks = std::mem::take(&mut presenter(cx).asks);
+    let open = cx.windows();
     let mut left = vec![];
     for (window, ask, tx) in asks {
-        if tx.is_canceled() {
+        // Its asker went, or its window closed: dropped (the asker reads
+        // Cancel).
+        if tx.is_canceled() || !open.contains(&window) {
             continue;
         }
         // One at a time per window, in order.

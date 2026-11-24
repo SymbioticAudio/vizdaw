@@ -275,6 +275,8 @@ fn a_second_panel_while_one_is_up_is_refused_quietly(cx: &mut TestAppContext) {
 #[derive(Default)]
 struct FakePanels {
     shown: RefCell<Vec<(&'static str, oneshot::Sender<Chosen>)>>,
+    /// The parent window each panel was shown for.
+    parents: RefCell<Vec<Option<AnyWindowHandle>>>,
 }
 
 impl PanelBackend for FakePanels {
@@ -282,10 +284,11 @@ impl PanelBackend for FakePanels {
         &self,
         spec: &PanelSpec,
         _place: &PanelPlace,
-        _window: Option<AnyWindowHandle>,
+        window: Option<AnyWindowHandle>,
         done: oneshot::Sender<Chosen>,
         _cx: &mut App,
     ) {
+        self.parents.borrow_mut().push(window);
         self.shown.borrow_mut().push((spec.row, done));
     }
 }
@@ -379,4 +382,30 @@ fn dropping_the_callers_task_still_clears_the_panel_up_flag(cx: &mut TestAppCont
 fn blocks(s: &mut Setup, key: &'static str) -> bool {
     let key = gpui::Keystroke::parse(key).unwrap();
     s.cx.update(|_, cx| blocks_key(&key, cx))
+}
+
+/// Final review: the backend gets the window that asked, so the macOS
+/// panel shows as that window's sheet (a click into the window cannot
+/// bring it in front of the panel); no window, no parent.
+#[gpui::test]
+fn the_backend_gets_the_asking_window_as_the_panels_parent(cx: &mut TestAppContext) {
+    let mut s = setup(cx);
+    let fake = fake_panels(&mut s);
+    let window = s.cx.update(|window, _| window.window_handle());
+    s.cx.dispatch_action(vizdaw_gpui::OpenDocument);
+    s.cx.run_until_parked();
+    assert_eq!(fake.rows(), vec!["1"]);
+    assert_eq!(*fake.parents.borrow(), vec![Some(window)]);
+    fake.answer(0, Ok(None));
+    s.cx.run_until_parked();
+    s.cx.update(|_, cx| {
+        drop(choose(
+            &panels::IMPORT_MIDI,
+            PanelPlace::default(),
+            None,
+            cx,
+        ))
+    });
+    s.cx.run_until_parked();
+    assert_eq!(fake.parents.borrow()[1], None);
 }

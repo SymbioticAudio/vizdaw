@@ -26,7 +26,7 @@ use crate::app_state::AppState;
 use crate::file_menu::choose_at;
 use crate::file_panels::PanelPlace;
 use crate::registry::RegistryScope;
-use crate::sheet_host::{ButtonRole, Sheet, SheetButton, button_face};
+use crate::sheet_host::{ButtonRole, Sheet, SheetButton, button_face, sheet_is};
 use crate::shell::DocumentWindow;
 use crate::transport_bar::colors;
 
@@ -66,8 +66,13 @@ fn locate(doc: DocId, row: &MediaRow, window: &Window, cx: &mut App) {
         name: row.name.clone(),
         ..PanelPlace::default()
     };
+    let asking = window.window_handle();
     choose_at(&panels::RELINK, place, window, cx, move |paths, cx| {
         let Some(path) = paths.first() else { return };
+        // Its sheet went while the panel was up: nothing starts.
+        if !sheet_is(asking, TITLE, cx) {
+            return;
+        }
         let path = path.to_string_lossy().into_owned();
         AppState::global(cx).update(cx, |s, cx| {
             s.store.with_document(doc, |d, _| d.relink(media, &path));
@@ -78,6 +83,7 @@ fn locate(doc: DocId, row: &MediaRow, window: &Window, cx: &mut App) {
 
 /// Search Folder…: panel #6, then the search job.
 fn search(doc: DocId, window: &Window, cx: &mut App) {
+    let asking = window.window_handle();
     choose_at(
         &panels::SEARCH_FOLDER,
         PanelPlace::default(),
@@ -85,6 +91,9 @@ fn search(doc: DocId, window: &Window, cx: &mut App) {
         cx,
         move |paths, cx| {
             let Some(folder) = paths.first() else { return };
+            if !sheet_is(asking, TITLE, cx) {
+                return;
+            }
             let folder = folder.to_string_lossy().into_owned();
             AppState::global(cx).update(cx, |s, cx| {
                 s.store.with_document(doc, |d, _| d.search_folder(&folder));

@@ -162,10 +162,13 @@ pub(crate) fn choose_at(
     cx: &mut App,
     then: impl FnOnce(Vec<PathBuf>, &mut App) + 'static,
 ) {
-    let chosen = file_panels::choose(spec, place, Some(window.window_handle()), cx);
+    let asking = window.window_handle();
+    let chosen = file_panels::choose(spec, place, Some(asking), cx);
     cx.spawn(async move |cx| {
         let answer = chosen.await;
         cx.update(|cx| match answer {
+            // The window that asked closed meanwhile: nothing starts.
+            Ok(Some(_)) if !cx.windows().contains(&asking) => {}
             Ok(Some(paths)) => then(paths, cx),
             Ok(None) => {}
             Err(e) => crate::panel_failed(e, cx),

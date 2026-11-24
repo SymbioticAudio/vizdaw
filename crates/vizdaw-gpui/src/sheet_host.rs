@@ -21,10 +21,10 @@
 use futures::channel::oneshot;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, AppContext, Context, Div, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyDownEvent, Keystroke, ParentElement, PromptButton,
-    PromptHandle, PromptLevel, PromptResponse, Render, RenderablePromptHandle, SharedString,
-    Stateful, StatefulInteractiveElement, Styled, Window, div, px, rgb, rgba,
+    AnyElement, AnyWindowHandle, App, AppContext, Context, Div, EventEmitter, FocusHandle,
+    Focusable, InteractiveElement, IntoElement, KeyDownEvent, Keystroke, ParentElement,
+    PromptButton, PromptHandle, PromptLevel, PromptResponse, Render, RenderablePromptHandle,
+    SharedString, Stateful, StatefulInteractiveElement, Styled, Window, div, px, rgb, rgba,
 };
 
 use crate::registry::RegistryScope;
@@ -957,6 +957,16 @@ impl Render for PromptCard {
     }
 }
 
+/// Whether `window` is still open and still shows the sheet `label`: a
+/// panel answered from a sheet starts its work only then (the window, or
+/// its sheet, may have gone while the panel was up).
+pub(crate) fn sheet_is(window: AnyWindowHandle, label: &str, cx: &App) -> bool {
+    window
+        .downcast::<DocumentWindow>()
+        .and_then(|w| w.read(cx).ok())
+        .is_some_and(|v| v.sheet_label().as_deref() == Some(label))
+}
+
 /// Keeps every key of a window with a sheet up inside the sheet
 /// ([`DocumentWindow::sheet_key`]). Interceptors run before any binding
 /// matches.
@@ -965,6 +975,15 @@ pub fn install(cx: &mut App) {
         let Some(Some(root)) = window.root::<DocumentWindow>() else {
             return;
         };
+        // A file panel is up: GPUI runs every interceptor, so the keys the
+        // panel's stopped (and its own Esc) still arrive here. The sheet
+        // under it presses nothing; its keys stay in it.
+        if crate::file_panels::is_up(cx) {
+            if root.read(cx).sheet_label().is_some() {
+                cx.stop_propagation();
+            }
+            return;
+        }
         if root.update(cx, |v, cx| v.sheet_key(&e.keystroke, window, cx)) {
             cx.stop_propagation();
         }

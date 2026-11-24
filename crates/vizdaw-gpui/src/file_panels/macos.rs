@@ -1,28 +1,61 @@
 //! macOS: an `NSOpenPanel` or `NSSavePanel` with Swift's settings, shown
-//! modeless with a completion handler. Not `runModal`: GPUI runs its
-//! tasks from main-queue blocks, and a nested modal loop entered inside
-//! one never drains the main queue, so every GPUI task, timer, frame and
-//! control reply would stop while the panel is up.
+//! with a completion handler: as a sheet on the window that asked, else
+//! (no window) modeless at the modal-panel level, so no click into a
+//! document window can bring it in front of the panel (keys and menus are
+//! off while a panel is up: a hidden panel would look like a frozen app).
+//! Not `runModal`: GPUI runs its tasks from main-queue blocks, and a
+//! nested modal loop entered inside one never drains the main queue, so
+//! every GPUI task, timer, frame and control reply would stop while the
+//! panel is up.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
 
 use block2::RcBlock;
 use futures::channel::oneshot;
+use gpui::{AnyWindowHandle, App};
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
-use objc2_app_kit::{NSModalResponse, NSModalResponseOK, NSOpenPanel, NSSavePanel};
+use objc2_app_kit::{
+    NSModalPanelWindowLevel, NSModalResponse, NSModalResponseOK, NSOpenPanel, NSSavePanel, NSView,
+    NSWindow,
+};
 use objc2_foundation::{NSArray, NSString, NSURL};
 use objc2_uniform_type_identifiers::UTType;
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use super::{Chosen, MacPanel, MacType};
 
 /// Off the main thread no panel can be shown.
 const NOT_MAIN: &str = "A file panel can only be shown from the main thread.";
 
-/// Shows `panel` and returns at once; the answer goes to `done` when it
-/// closes (the chosen paths, `None` when cancelled).
-pub(super) fn present(panel: &MacPanel, done: oneshot::Sender<Chosen>) {
+/// The AppKit window of GPUI window `window` (`None` once it closed, or
+/// while it is being updated).
+pub(super) fn ns_window(window: AnyWindowHandle, cx: &mut App) -> Option<Retained<NSWindow>> {
+    window
+        .update(cx, |_, window, _| {
+            let RawWindowHandle::AppKit(h) =
+                HasWindowHandle::window_handle(&*window).ok()?.as_raw()
+            else {
+                return None;
+            };
+            // SAFETY: GPUI's AppKit handle is its window's live content
+            // view, on the main thread (we are inside the window's update).
+            let view: &NSView = unsafe { h.ns_view.cast::<NSView>().as_ref() };
+            view.window()
+        })
+        .ok()
+        .flatten()
+}
+
+/// Shows `panel` (as a sheet on `parent` when given) and returns at once;
+/// the answer goes to `done` when it closes (the chosen paths, `None` when
+/// cancelled).
+pub(super) fn present(
+    panel: &MacPanel,
+    parent: Option<Retained<NSWindow>>,
+    done: oneshot::Sender<Chosen>,
+) {
     let Some(mtm) = MainThreadMarker::new() else {
         done.send(Err(NOT_MAIN.to_owned())).ok();
         return;
@@ -62,7 +95,7 @@ pub(super) fn present(panel: &MacPanel, done: oneshot::Sender<Chosen>) {
                     .then(|| shown.URL().and_then(|u| path(&u)).into_iter().collect()),
             );
         });
-        p.beginWithCompletionHandler(&handler);
+        begin(&p, parent.as_deref(), &handler);
         return;
     }
     let p = NSOpenPanel::openPanel(mtm);
@@ -88,7 +121,24 @@ pub(super) fn present(panel: &MacPanel, done: oneshot::Sender<Chosen>) {
                 .then(|| shown.URLs().iter().filter_map(|u| path(&u)).collect()),
         );
     });
-    p.beginWithCompletionHandler(&handler);
+    begin(&p, parent.as_deref(), &handler);
+}
+
+/// A sheet on `parent`; with none, modeless but raised to the modal-panel
+/// level and ordered front (a document window cannot cover it).
+fn begin(
+    panel: &NSSavePanel,
+    parent: Option<&NSWindow>,
+    handler: &block2::DynBlock<dyn Fn(NSModalResponse)>,
+) {
+    match parent {
+        Some(w) => panel.beginSheetModalForWindow_completionHandler(w, handler),
+        None => {
+            panel.beginWithCompletionHandler(handler);
+            panel.setLevel(NSModalPanelWindowLevel);
+            panel.orderFrontRegardless();
+        }
+    }
 }
 
 fn ut_type(t: &MacType) -> Option<Retained<UTType>> {
@@ -115,7 +165,7 @@ mod tests {
             &vizdaw_app::panels::OPEN_PROJECT,
             &super::super::PanelPlace::default(),
         );
-        present(&panel, tx);
+        present(&panel, None, tx);
         assert_eq!(rx.try_recv(), Ok(Some(Err(NOT_MAIN.to_owned()))));
     }
 }

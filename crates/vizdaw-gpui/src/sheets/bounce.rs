@@ -39,7 +39,7 @@ use crate::app_state::AppState;
 use crate::file_menu::choose_at;
 use crate::file_panels::PanelPlace;
 use crate::registry::RegistryScope;
-use crate::sheet_host::{ButtonRole, Sheet, SheetButton};
+use crate::sheet_host::{ButtonRole, Sheet, SheetButton, sheet_is};
 use crate::shell::DocumentWindow;
 use crate::text_input::TextInput;
 use crate::transport_bar::colors;
@@ -180,6 +180,9 @@ fn begin(doc: DocId, c: &BounceChoices, window: &Window, cx: &mut App) {
         start(doc, None, false, cx);
         return;
     }
+    // The panel answers after its sheet may have gone (its window closed,
+    // or the sheet was dismissed): then nothing starts.
+    let asking = window.window_handle();
     if c.source == Source::Stems {
         choose_at(
             &panels::BOUNCE_FOLDER,
@@ -188,6 +191,9 @@ fn begin(doc: DocId, c: &BounceChoices, window: &Window, cx: &mut App) {
             cx,
             move |paths, cx| {
                 let Some(folder) = paths.first() else { return };
+                if !sheet_is(asking, TITLE, cx) {
+                    return;
+                }
                 start(doc, Some(folder.to_string_lossy().into_owned()), false, cx);
             },
         );
@@ -197,11 +203,11 @@ fn begin(doc: DocId, c: &BounceChoices, window: &Window, cx: &mut App) {
         ext: extension(c.container).to_owned(),
         ..PanelPlace::default()
     };
-    let chosen =
-        crate::file_panels::choose_save(&panels::BOUNCE_FILE, place, window.window_handle(), cx);
+    let chosen = crate::file_panels::choose_save(&panels::BOUNCE_FILE, place, asking, cx);
     cx.spawn(async move |cx| {
         let answer = chosen.await;
         cx.update(|cx| match answer {
+            Ok(Some(_)) if !sheet_is(asking, TITLE, cx) => {}
             // The panel (or the app's own question) confirmed a replace.
             Ok(Some(path)) => start(doc, Some(path.to_string_lossy().into_owned()), true, cx),
             Ok(None) => {}
