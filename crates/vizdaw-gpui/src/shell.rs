@@ -38,6 +38,7 @@ use vizdaw_ffi::snapshot::LaneRow;
 
 use crate::app_state::{AppState, WindowKind};
 use crate::arrangement::{self, Arrangement, ArrangementState, ToolbarState};
+use crate::channel_strip_pane;
 use crate::controls::MixerRef;
 use crate::detail_pane::{self, DetailPaneState};
 use crate::frame_stats::{self, FrameStats};
@@ -112,6 +113,9 @@ pub struct DocumentWindow {
     /// pane's Mixer view, each while it shows.
     mix_view: Option<Placed>,
     pane_mixer: Option<Placed>,
+    /// The left pane's Channel Strip, while it shows and a track is
+    /// focused.
+    strip_mixer: Option<Placed>,
     /// The Mixer window's placement.
     window_mixer: Option<Placed>,
     /// The frames' timing (`VIZDAW_FRAME_STATS`; `None` without it).
@@ -356,6 +360,7 @@ impl DocumentWindow {
             fit_log: Rc::default(),
             mix_view: None,
             pane_mixer: None,
+            strip_mixer: None,
             window_mixer: None,
             frames: frame_stats::enabled().then(Rc::default),
             fast_poll: false,
@@ -414,13 +419,14 @@ impl DocumentWindow {
     }
 
     /// The mixer placement `p` (the Mix view's centre, the bottom pane's
-    /// Mixer view), while it shows.
+    /// Mixer view, the left pane's Channel Strip, the Mixer window), while
+    /// it shows.
     pub fn mixer_view(&self, p: MixerPlacement) -> Option<Entity<MixerView>> {
         match p {
             MixerPlacement::View => self.mix_view.as_ref(),
             MixerPlacement::Pane => self.pane_mixer.as_ref(),
             MixerPlacement::Window => self.window_mixer.as_ref(),
-            MixerPlacement::Strip => None,
+            MixerPlacement::Strip => self.strip_mixer.as_ref(),
         }
         .map(|p| p.view.clone())
     }
@@ -437,7 +443,8 @@ impl DocumentWindow {
         let slot = match p {
             MixerPlacement::View => &mut self.mix_view,
             MixerPlacement::Window => &mut self.window_mixer,
-            _ => &mut self.pane_mixer,
+            MixerPlacement::Pane => &mut self.pane_mixer,
+            MixerPlacement::Strip => &mut self.strip_mixer,
         };
         if !wanted {
             *slot = None;
@@ -844,9 +851,14 @@ impl DocumentWindow {
     pub fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.end_rename(true, window, cx);
         // A strip's rename in the mixer too.
-        for placed in [&self.mix_view, &self.pane_mixer, &self.window_mixer]
-            .into_iter()
-            .flatten()
+        for placed in [
+            &self.mix_view,
+            &self.pane_mixer,
+            &self.strip_mixer,
+            &self.window_mixer,
+        ]
+        .into_iter()
+        .flatten()
         {
             placed.view.update(cx, |v, cx| v.end_rename(true, cx));
         }
@@ -1336,13 +1348,28 @@ impl DocumentWindow {
                         )),
                 )
         };
+        // The left pane's Channel Strip is a placement while a track is
+        // focused (nothing focused: its note, and no mixer is made).
+        let strip_mixer = self.place_mixer(
+            MixerPlacement::Strip,
+            frames.of(PaneSide::Left).is_some()
+                && host.setup.left.view == PaneView::Strip
+                && !host.nothing_focused,
+            window,
+            cx,
+        );
         let mut sides = vec![];
         for side in [PaneSide::Left, PaneSide::Right] {
             let Some(rect) = frames.of(side) else {
                 continue;
             };
             let mut scope = root.container();
-            let content = panes::content(host.setup.pane(side).view, host, &mut scope.container());
+            let view = host.setup.pane(side).view;
+            let content = if side == PaneSide::Left && view == PaneView::Strip {
+                channel_strip_pane::render(strip_mixer.as_ref(), &mut scope.container(), window, cx)
+            } else {
+                panes::content(view, host, &mut scope.container())
+            };
             sides.push(panes::frame(
                 side,
                 Some(rect),
@@ -1479,11 +1506,16 @@ impl DocumentWindow {
     /// strips the placements drew last count.
     fn frame_started(&self, cx: &App) {
         let Some(f) = &self.frames else { return };
-        let strips = [&self.mix_view, &self.pane_mixer, &self.window_mixer]
-            .into_iter()
-            .flatten()
-            .map(|p| p.view.read(cx).drawn().len())
-            .sum();
+        let strips = [
+            &self.mix_view,
+            &self.pane_mixer,
+            &self.strip_mixer,
+            &self.window_mixer,
+        ]
+        .into_iter()
+        .flatten()
+        .map(|p| p.view.read(cx).drawn().len())
+        .sum();
         let mut f = f.borrow_mut();
         f.strips = strips;
         f.render_started(Instant::now());

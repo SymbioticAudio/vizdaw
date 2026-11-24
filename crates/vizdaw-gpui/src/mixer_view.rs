@@ -28,7 +28,8 @@
 //! not fit); only the strips in view are drawn and recorded.
 //!
 //! One [`MixerView`] per placement (the Mix view's centre, the bottom
-//! pane, the Mixer window): it says it appeared when made and that it
+//! pane, the Mixer window, and the left pane's Channel Strip, which
+//! shows only the focused track's strip, centred, with no bar): it says it appeared when made and that it
 //! went when dropped (the last placement's going releases every open
 //! touch), and the window losing the keyboard cancels its drag.
 //!
@@ -44,6 +45,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, AppContext, Bounds, ClickEvent, Context, DispatchPhase, Entity, Focusable,
     FontWeight, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
@@ -61,13 +63,14 @@ use vizdaw_app::mixer::{
     MidiStripMath, MixerColumn, MixerModel, MixerPlacement, SendLabels, SlotLabels, SlotMenuItem,
     SlotPlace, SlotState, StripPalette, VcaStripLabels,
 };
+use vizdaw_app::view::StripFocus;
 use vizdaw_ffi::automation::AutomationModeRow;
 use vizdaw_ffi::edit::MonitorModeRow;
-use vizdaw_ffi::mixer::{StripKindRow, StripRow, SwatchRow};
-use vizdaw_ffi::snapshot::SlotRow;
+use vizdaw_ffi::mixer::{DestRow, StripKindRow, StripRow, SwatchRow};
+use vizdaw_ffi::snapshot::{LaneRow, SlotRow};
 
 use crate::controls::{
-    self, ControlBinding, KnobSize, MixerRef, NumberBinding, NumberBox, Toggle, fader,
+    self, ControlBinding, Entry, Grip, KnobSize, MixerRef, NumberBinding, NumberBox, Toggle, fader,
 };
 use crate::frame_stats;
 use crate::registry::RegistryScope;
@@ -102,13 +105,19 @@ const LINE: f32 = 20.;
 pub const POLL_EVERY: Duration = METER_PERIOD;
 
 /// A column of the mixer: an audio strip, a VCA, or an external MIDI
-/// destination's strip.
+/// destination's strip; in the left pane, a MIDI track with no
+/// destination (its track).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ColumnKey {
     Strip(u64),
     Vca(u64),
     Dest(u64),
+    Track(u64),
 }
+
+/// The destination the disabled controls of a MIDI track with no
+/// destination name (they never act on it).
+const NO_DEST: u64 = u64::MAX;
 
 /// A column's typed box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -826,10 +835,13 @@ pub(crate) struct VcaParts {
 }
 
 /// What an external MIDI destination's strip shows (Swift
-/// `MidiStripCells`).
+/// `MidiStripCells`); in the left pane a MIDI track's, which may have no
+/// destination ("No Destination": only R works).
 pub(crate) struct MidiParts {
     pub(crate) index: usize,
-    pub(crate) id: u64,
+    /// The destination; `None` for a track with none.
+    pub(crate) id: Option<u64>,
+    pub(crate) key: ColumnKey,
     pub(crate) name: String,
     pub(crate) kind_label: String,
     pub(crate) cap: Rgba,
@@ -846,6 +858,8 @@ pub(crate) struct MidiParts {
     pub(crate) lane: Option<u64>,
     /// The note activity, 0…1.
     pub(crate) activity: f64,
+    /// A focused track plays it (in the mixer's placements).
+    pub(crate) selected: bool,
 }
 
 /// One column in view (made and drawn once a frame each, so not boxed).
@@ -872,6 +886,9 @@ struct Gathered {
     columns: usize,
     divider_before: Option<usize>,
     scroll: (f64, f64),
+    /// How far right the columns are drawn (the left pane centres its
+    /// strip).
+    shift: f64,
     /// The most it scrolls (x, y).
     room: (f64, f64),
     strips: Vec<ColumnParts>,
@@ -879,6 +896,41 @@ struct Gathered {
     keys: HashSet<ColumnKey>,
     renaming: Option<(u64, MixerPlacement)>,
     renaming_vca: Option<(u64, MixerPlacement)>,
+}
+
+/// A column a placement shows: one of the mixer's, or (the left pane) a
+/// MIDI track's strip, with or without its external destination.
+#[derive(Clone, Copy)]
+enum Column<'a> {
+    Mixer(MixerColumn<'a>),
+    Track {
+        lane: &'a LaneRow,
+        dest: Option<&'a DestRow>,
+    },
+}
+
+/// The left pane's column (Swift `LeftStripPane`): the strip the focused
+/// track plays through, or its MIDI strip; none for the inspector or
+/// nothing focused (the pane shows its note).
+fn focused_column<'a>(m: &'a MixerModel, d: &'a DocumentModel) -> Vec<Column<'a>> {
+    match d.left_strip(&m.snapshot().strips, m.destinations()) {
+        StripFocus::Strip(id) => m
+            .strip(id)
+            .map(|s| Column::Mixer(MixerColumn::Audio(s)))
+            .into_iter()
+            .collect(),
+        StripFocus::Midi { dest, lane } => d
+            .lanes()
+            .iter()
+            .find(|l| l.id == lane)
+            .map(|lane| Column::Track {
+                lane,
+                dest: dest.and_then(|x| m.destinations().iter().find(|r| r.id == x)),
+            })
+            .into_iter()
+            .collect(),
+        StripFocus::Inspector | StripFocus::Nothing => vec![],
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -890,17 +942,23 @@ fn gather(
     scroll: (f64, f64),
     now: Instant,
 ) -> Gathered {
+    let p = mixer.placement;
     // The columns (strips, MIDI strips before the first bus, VCAs), then
-    // master after the divider.
-    let mut all: Vec<MixerColumn<'_>> = m.columns();
-    let divider_before = m.master().map(|_| all.len());
-    all.extend(m.master().map(MixerColumn::Audio));
+    // master after the divider; the left pane's one strip (no divider).
+    let (all, divider_before) = if p == MixerPlacement::Strip {
+        (focused_column(m, d), None)
+    } else {
+        let mut all: Vec<Column<'_>> = m.columns().into_iter().map(Column::Mixer).collect();
+        let divider_before = m.master().map(|_| all.len());
+        all.extend(m.master().map(|s| Column::Mixer(MixerColumn::Audio(s))));
+        (all, divider_before)
+    };
     let rows: Vec<BTreeMap<StripRowKind, f64>> = all
         .iter()
         .map(|c| match c {
-            MixerColumn::Audio(s) => rows_of(s, m.can_arm(d, s)),
-            MixerColumn::Vca(_) => vca_rows(),
-            MixerColumn::Midi(_) => midi_rows(),
+            Column::Mixer(MixerColumn::Audio(s)) => rows_of(s, m.can_arm(d, s)),
+            Column::Mixer(MixerColumn::Vca(_)) => vca_rows(),
+            Column::Mixer(MixerColumn::Midi(_)) | Column::Track { .. } => midi_rows(),
         })
         .collect();
     let has_vcas = !m.vcas().is_empty();
@@ -911,9 +969,14 @@ fn gather(
     );
     let room = ((content.0 - view.0).max(0.), (content.1 - view.1).max(0.));
     let scroll = (scroll.0.clamp(0., room.0), scroll.1.clamp(0., room.1));
+    // The left pane's strip is centred across a pane wider than it.
+    let shift = if p == MixerPlacement::Strip {
+        ((view.0 - content.0) / 2.).max(0.)
+    } else {
+        0.
+    };
     let selected = d.selected_strips();
     use vizdaw_ffi::events::AutomationTargetRow as Target;
-    let p = mixer.placement;
     let pressed = m
         .pressed(p)
         .and_then(|t| match t {
@@ -924,10 +987,12 @@ fn gather(
             _ => None,
         })
         .or_else(|| m.midi_pressed(p).map(|(dest, _)| ColumnKey::Dest(dest)));
-    let key_of = |c: &MixerColumn<'_>| match c {
-        MixerColumn::Audio(s) => ColumnKey::Strip(s.id),
-        MixerColumn::Vca(v) => ColumnKey::Vca(v.id),
-        MixerColumn::Midi(x) => ColumnKey::Dest(x.id),
+    let key_of = |c: &Column<'_>| match c {
+        Column::Mixer(MixerColumn::Audio(s)) => ColumnKey::Strip(s.id),
+        Column::Mixer(MixerColumn::Vca(v)) => ColumnKey::Vca(v.id),
+        Column::Mixer(MixerColumn::Midi(x)) => ColumnKey::Dest(x.id),
+        Column::Track { dest: Some(x), .. } => ColumnKey::Dest(x.id),
+        Column::Track { lane, dest: None } => ColumnKey::Track(lane.id),
     };
     let mut strips = vec![];
     for (index, c) in all.iter().enumerate() {
@@ -939,11 +1004,26 @@ fn gather(
             continue;
         }
         let part = match c {
-            MixerColumn::Audio(s) => {
+            Column::Mixer(MixerColumn::Audio(s)) => {
                 audio_parts(m, d, mixer, s, index, selected, has_vcas, now).map(ColumnParts::Audio)
             }
-            MixerColumn::Vca(v) => vca_parts(m, mixer, v.id, index).map(ColumnParts::Vca),
-            MixerColumn::Midi(x) => midi_parts(m, d, mixer, x.id, index).map(ColumnParts::Midi),
+            Column::Mixer(MixerColumn::Vca(v)) => {
+                vca_parts(m, mixer, v.id, index).map(ColumnParts::Vca)
+            }
+            Column::Mixer(MixerColumn::Midi(x)) => midi_parts(
+                m,
+                mixer,
+                Some(x),
+                m.midi_lane(d, x.id, p),
+                m.is_midi_selected(d, x.id),
+                index,
+            )
+            .map(ColumnParts::Midi),
+            // The left pane's own MIDI strip is not marked: it shows by
+            // focus.
+            Column::Track { lane, dest } => {
+                midi_parts(m, mixer, *dest, Some(lane), false, index).map(ColumnParts::Midi)
+            }
         };
         strips.extend(part);
     }
@@ -952,6 +1032,7 @@ fn gather(
         columns: all.len(),
         divider_before,
         scroll,
+        shift,
         room,
         strips,
         keys: all.iter().map(key_of).collect(),
@@ -1103,49 +1184,125 @@ fn vca_parts(m: &MixerModel, mixer: &MixerRef, vca: u64, index: usize) -> Option
     })
 }
 
-/// External MIDI destination `dest` (column `index`), as its strip shows
-/// (Swift `MidiStripCells` in a mixer placement: no destination menu).
+/// MIDI strip `x` (column `index`), as it shows (Swift
+/// `MidiStripCells`): an external destination's, R arming `lane`; with no
+/// destination (a MIDI track's in the left pane) "No Destination", its
+/// pan, fader, volume and M off and R still arming the track.
 fn midi_parts(
     m: &MixerModel,
-    d: &DocumentModel,
     mixer: &MixerRef,
-    dest: u64,
+    x: Option<&DestRow>,
+    lane: Option<&LaneRow>,
+    selected: bool,
     index: usize,
 ) -> Option<MidiParts> {
     let t = tokens();
-    let x = m.destinations().iter().find(|x| x.id == dest)?;
-    let mix = m.midi_mix(dest)?;
-    let lane = m.midi_lane(d, dest);
+    let (name, mix) = match x {
+        Some(x) => (x.name.clone(), Some(m.midi_mix(x.id)?)),
+        None => (MidiStripMath::NO_DESTINATION.to_owned(), None),
+    };
+    let dest = x.map(|x| x.id);
+    let off = |b: ControlBinding| ControlBinding {
+        enabled: false,
+        ..b
+    };
+    let off_box = |b: NumberBinding| NumberBinding {
+        enabled: false,
+        ..b
+    };
+    let (pan, pan_box, fader, volume) = match dest {
+        Some(dest) => (
+            ControlBinding::midi(mixer, m, dest, MidiControl::Pan)?,
+            NumberBinding::midi_pan(mixer, m, dest)?,
+            ControlBinding::midi(mixer, m, dest, MidiControl::Volume)?,
+            NumberBinding::midi_volume(mixer, m, dest)?,
+        ),
+        None => {
+            let grip = |control| ControlBinding {
+                mixer: mixer.clone(),
+                target: Grip::Midi {
+                    dest: NO_DEST,
+                    control,
+                },
+                label: String::new(),
+                value: String::new(),
+                position: 0.,
+                enabled: false,
+                touched: false,
+            };
+            let entry = |entry| NumberBinding {
+                mixer: mixer.clone(),
+                entry,
+                label: String::new(),
+                value: String::new(),
+                enabled: false,
+            };
+            (
+                off(ControlBinding {
+                    label: MidiStripLabels::pan_knob(&name),
+                    value: MidiStripMath::pan_label(None),
+                    position: MidiStripMath::pan_position(None),
+                    ..grip(MidiControl::Pan)
+                }),
+                off_box(NumberBinding {
+                    label: MidiStripLabels::pan_box(&name),
+                    value: MidiStripMath::pan_label(None),
+                    ..entry(Entry::MidiPan { dest: NO_DEST })
+                }),
+                off(ControlBinding {
+                    label: MidiStripLabels::fader(&name),
+                    value: MidiStripMath::volume_label(None),
+                    position: MidiStripMath::position(None),
+                    ..grip(MidiControl::Volume)
+                }),
+                off_box(NumberBinding {
+                    label: MidiStripLabels::volume_box(&name),
+                    value: MidiStripMath::volume_label(None),
+                    ..entry(Entry::MidiVolume { dest: NO_DEST })
+                }),
+            )
+        }
+    };
+    let key = match (dest, lane) {
+        (Some(dest), _) => ColumnKey::Dest(dest),
+        (None, Some(l)) => ColumnKey::Track(l.id),
+        (None, None) => return None,
+    };
     Some(MidiParts {
         index,
         id: dest,
-        name: x.name.clone(),
-        kind_label: MidiStripMath::kind_label(x.channel, x.mpe.as_ref()),
+        key,
+        kind_label: MidiStripMath::kind_label(
+            x.and_then(|x| x.channel),
+            x.and_then(|x| x.mpe.as_ref()),
+        ),
         cap: t.cap(vizdaw_ffi::mixer::StripColourRow::Instrument),
-        pan: ControlBinding::midi(mixer, m, dest, MidiControl::Pan)?,
-        pan_box: NumberBinding::midi_pan(mixer, m, dest)?,
-        pan_set: mix.pan.is_some(),
-        fader: ControlBinding::midi(mixer, m, dest, MidiControl::Volume)?,
-        volume: NumberBinding::midi_volume(mixer, m, dest)?,
-        volume_set: mix.volume.is_some(),
+        pan,
+        pan_box,
+        pan_set: mix.as_ref().is_some_and(|x| x.pan.is_some()),
+        fader,
+        volume,
+        volume_set: mix.as_ref().is_some_and(|x| x.volume.is_some()),
         mute: Toggle {
             letter: "M",
-            on: mix.mute,
+            on: mix.as_ref().is_some_and(|x| x.mute),
             colour: t.state_mute,
-            label: MidiStripLabels::mute(&x.name),
-            enabled: true,
+            label: MidiStripLabels::mute(&name),
+            enabled: dest.is_some(),
             touched: false,
         },
         arm: Toggle {
             letter: "R",
             on: lane.is_some_and(|l| l.arm),
             colour: t.state_record,
-            label: MidiStripLabels::arm(lane.map_or(x.name.as_str(), |l| l.name.as_str())),
+            label: MidiStripLabels::arm(lane.map_or(name.as_str(), |l| l.name.as_str())),
             enabled: lane.is_some(),
             touched: false,
         },
         lane: lane.map(|l| l.id),
-        activity: m.midi_activity(dest),
+        activity: dest.map_or(0., |dest| m.midi_activity(dest)),
+        selected,
+        name,
     })
 }
 
@@ -1178,8 +1335,8 @@ fn dot(state: SlotState) -> Rgba {
     }
 }
 
-/// The placement `view` draws: the bar, then the strips. `scope` is the
-/// mixer's own container.
+/// The placement `view` draws: the bar (not in the left pane), then the
+/// strips. `scope` is the mixer's own container.
 pub fn render(
     view: &Entity<MixerView>,
     scope: &mut RegistryScope,
@@ -1227,7 +1384,9 @@ pub fn render(
         return unavailable(refused, scope);
     };
     let weak = view.downgrade();
-    let bar = bar(&load, &mixer, &mut scope.container());
+    // The left pane's strip has no bar.
+    let bar = (mixer.placement != MixerPlacement::Strip)
+        .then(|| bar(&load, &mixer, &mut scope.container()));
     let area_scope = scope.container();
     let clip = area_scope.clip();
     let t = tokens();
@@ -1294,8 +1453,10 @@ pub fn render(
         .size_full()
         .bg(rgb(t.surface_panel))
         .text_color(rgb(t.text_primary))
-        .child(bar)
-        .child(div().h(px(1.)).flex_none().bg(rgb(t.surface_separator)))
+        .when_some(bar, |d, bar| {
+            d.child(bar)
+                .child(div().h(px(1.)).flex_none().bg(rgb(t.surface_separator)))
+        })
         .child(strips_area)
         .into_any_element()
 }
@@ -1351,7 +1512,7 @@ fn strips_in(
             .strips
             .iter()
             .filter_map(|c| match c {
-                ColumnParts::Midi(x) => Some((x.id, x.activity)),
+                ColumnParts::Midi(x) => x.id.map(|id| (id, x.activity)),
                 _ => None,
             })
             .collect();
@@ -1395,7 +1556,7 @@ fn strips_in(
         let place = Place {
             grid: &g.grid,
             divider_before: g.divider_before,
-            scroll: g.scroll,
+            scroll: (g.scroll.0 - g.shift, g.scroll.1),
         };
         strips.push(match c {
             ColumnParts::Audio(s) => strip(view, s, &place, &mut strip_scope, window, cx),
@@ -1411,7 +1572,9 @@ fn strips_in(
     let divider = g.divider_before.map(|d| {
         div()
             .absolute()
-            .left(px((PADDING + StripGrid::divider_x(d) - g.scroll.0) as f32))
+            .left(px(
+                (PADDING + StripGrid::divider_x(d) + g.shift - g.scroll.0) as f32,
+            ))
             .top(px((PADDING - g.scroll.1) as f32))
             .w(px(1.))
             .h(px(g.grid.total as f32))

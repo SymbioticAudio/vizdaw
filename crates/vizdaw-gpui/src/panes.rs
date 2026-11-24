@@ -727,7 +727,11 @@ pub(crate) fn content(view: PaneView, state: &HostState, scope: &mut RegistrySco
     if view == PaneView::Mixer {
         return mixer(div().into_any_element(), scope);
     }
-    let text = note(view, state.nothing_focused);
+    note_view(&note(view, state.nothing_focused), scope)
+}
+
+/// A pane's note, centred (Swift `PaneNote`).
+pub(crate) fn note_view(text: &str, scope: &mut RegistryScope) -> AnyElement {
     div()
         .flex()
         .flex_col()
@@ -741,8 +745,8 @@ pub(crate) fn content(view: PaneView, state: &HostState, scope: &mut RegistrySco
                 .relative()
                 .text_xs()
                 .text_color(rgb(colors::DIM))
-                .child(text.clone())
-                .child(scope.control("text", &text, true)),
+                .child(text.to_owned())
+                .child(scope.control("text", text, true)),
         )
         .into_any_element()
 }

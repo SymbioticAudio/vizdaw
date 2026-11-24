@@ -580,8 +580,14 @@ fn r_arms_the_first_armed_track_that_plays_the_destination() {
     f.set_lanes(3, vec![audio, a, b]);
     let (f, mut d) = make_with(f);
     d.select(Some(3));
-    assert_eq!(d.mixer().unwrap().midi_lane(&d, 7).map(|l| l.id), Some(31));
-    assert_eq!(d.mixer().unwrap().midi_lane(&d, 8).map(|l| l.id), None);
+    assert_eq!(
+        d.mixer().unwrap().midi_lane(&d, 7, P::View).map(|l| l.id),
+        Some(31)
+    );
+    assert_eq!(
+        d.mixer().unwrap().midi_lane(&d, 8, P::View).map(|l| l.id),
+        None
+    );
     mx(&mut d, |m, d| m.toggle_midi_arm(d, 31));
     assert_eq!(
         f.edits().last(),
@@ -595,6 +601,56 @@ fn r_arms_the_first_armed_track_that_plays_the_destination() {
             }
         })
     );
+}
+
+#[test]
+fn the_left_pane_arms_the_focused_track_when_it_plays_the_destination() {
+    // Swift `playingLane(in: .strip)`: the focused track (the selection,
+    // else the armed tracks), only when it plays `dest`.
+    let f = fake();
+    let mut a = lane_row(30, "A", false);
+    a.midi_dest = Some(7);
+    let mut b = lane_row(31, "B", false);
+    b.midi_dest = Some(7);
+    b.arm = true;
+    let mut audio = lane_row(32, "Audio", false);
+    audio.midi_dest = Some(7);
+    audio.kind = TrackKindRow::Audio;
+    f.set_lanes(3, vec![audio, a, b]);
+    let (_f, mut d) = make_with(f);
+    d.select(Some(3));
+    let lane = |d: &DocumentModel, dest, p| d.mixer().unwrap().midi_lane(d, dest, p).map(|l| l.id);
+    // Nothing selected: the armed track is the focus.
+    assert_eq!(lane(&d, 7, P::Strip), Some(31));
+    d.select_track(30, false);
+    assert_eq!(lane(&d, 7, P::Strip), Some(30), "the selected track");
+    assert_eq!(lane(&d, 7, P::View), Some(31), "the mixer: the first armed");
+    assert_eq!(lane(&d, 8, P::Strip), None, "it does not play 8");
+    d.select_track(32, false);
+    assert_eq!(lane(&d, 7, P::Strip), None, "an audio track plays no MIDI");
+}
+
+#[test]
+fn a_midi_strip_is_selected_while_a_focused_track_plays_it() {
+    // Swift `isMidiSelected`: the selection's tracks, else the armed ones.
+    let f = fake();
+    f.set_destinations(vec![
+        ext_dest(7, "Juno", MidiMixRow::default()),
+        ext_dest(8, "Moog", MidiMixRow::default()),
+    ]);
+    let mut a = lane_row(30, "A", false);
+    a.midi_dest = Some(7);
+    let mut b = lane_row(31, "B", false);
+    b.midi_dest = Some(8);
+    f.set_lanes(3, vec![a, b]);
+    let (_f, mut d) = make_with(f);
+    d.select(Some(3));
+    let on = |d: &DocumentModel, dest| d.mixer().unwrap().is_midi_selected(d, dest);
+    assert!(!on(&d, 7) && !on(&d, 8), "nothing focused");
+    d.select_track(31, false);
+    assert!(!on(&d, 7) && on(&d, 8));
+    d.select_track(30, true);
+    assert!(on(&d, 7) && on(&d, 8), "both selected");
 }
 
 // `destination.set_midi_mix`.

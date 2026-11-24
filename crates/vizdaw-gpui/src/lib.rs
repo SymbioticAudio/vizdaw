@@ -2,6 +2,7 @@
 
 pub mod app_state;
 pub mod arrangement;
+mod channel_strip_pane;
 pub mod control;
 pub mod controls;
 pub mod detail_pane;

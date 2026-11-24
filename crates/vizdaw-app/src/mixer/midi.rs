@@ -409,17 +409,31 @@ impl MixerModel {
 
     // The track R arms.
 
-    /// The track a MIDI strip's R arms in the mixer's placements: of the
-    /// shown sequence's MIDI and instrument tracks that play `dest`, the
-    /// first armed one, else the first. (The left pane's strip follows the
-    /// focused track: its slice.)
-    pub fn midi_lane<'d>(&self, doc: &'d DocumentModel, dest: u64) -> Option<&'d LaneRow> {
-        let mut through = doc
-            .lanes()
-            .iter()
-            .filter(|l| l.kind != TrackKindRow::Audio && l.midi_dest == Some(dest));
+    /// The track a MIDI strip's R arms in placement `p` (Swift
+    /// `midiLane(for:in:)`): in the left pane, the focused track when it
+    /// plays `dest`; in every other placement, of the shown sequence's
+    /// MIDI and instrument tracks that play `dest`, the first armed one,
+    /// else the first.
+    pub fn midi_lane<'d>(
+        &self,
+        doc: &'d DocumentModel,
+        dest: u64,
+        p: MixerPlacement,
+    ) -> Option<&'d LaneRow> {
+        let plays = |l: &LaneRow| l.kind != TrackKindRow::Audio && l.midi_dest == Some(dest);
+        if p == MixerPlacement::Strip {
+            return doc.focus_lanes().first().copied().filter(|l| plays(l));
+        }
+        let mut through = doc.lanes().iter().filter(|l| plays(l));
         let first = through.clone().next();
         through.find(|l| l.arm).or(first)
+    }
+
+    /// Whether `dest`'s strip shows as selected in the mixer (Swift
+    /// `isMidiSelected`): a focused track (the selection, else the armed
+    /// tracks) plays it.
+    pub fn is_midi_selected(&self, doc: &DocumentModel, dest: u64) -> bool {
+        doc.focus_lanes().iter().any(|l| l.midi_dest == Some(dest))
     }
 
     /// The MIDI strip's R: toggles `lane`'s arm (one undo step), as the

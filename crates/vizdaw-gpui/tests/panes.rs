@@ -285,13 +285,11 @@ fn panes_follow_the_layout(cx: &mut TestAppContext) {
     );
     assert!(s.find("text", STRIP_NOTE).is_some());
 
-    // A selected track: the strip comes later.
+    // A selected track: its strip (Chords, a MIDI track with no
+    // destination: "No Destination").
     s.update_model(|d| d.select_track(31, false));
     assert!(s.find("text", STRIP_NOTE).is_none());
-    assert!(
-        s.find("text", "Channel Strip comes in a later version.")
-            .is_some()
-    );
+    assert!(s.find("slider", "Fader of No Destination").is_some());
 
     // The right pane: at the right edge, the bottom pane beside it.
     s.run_menu("ui.toggle_right");
