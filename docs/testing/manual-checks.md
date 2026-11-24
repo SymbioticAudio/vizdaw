@@ -87,9 +87,9 @@ either platform's panels.
 | Linux | Saving over an existing file asks the app's own replace question; Replace saves, Cancel leaves the file as it was | open |
 | Linux | The sheet-card prompts (save changes, replace, return prompt): Return presses the default button, Esc the cancel one | open |
 | Linux | With no window open, an alert shows in a small dialog window of its own, and OK closes it | open |
-| macOS | Each panel opened from a window is attached to it as a sheet; one opened with no window open floats above every window | open |
+| macOS | Each panel opened from a window is attached to it as a sheet; one opened with no window open floats above every window | partly passed 2026-11-24 (Save As: the window dims behind a panel centred on it; Esc closed it — owner; the no-window case still open) |
 | macOS | Click into the document window (or another one) while a panel is up: the panel stays in front and the app doesn't look frozen | open |
-| macOS | Start playback, then open a panel: the playhead keeps moving behind it | open |
+| macOS | Start playback, then open a panel: the playhead keeps moving behind it | passed 2026-11-24 (controller: Save As over the demo, bar 2 → 13 while the panel was up) |
 | macOS | Close the panel's window (or its document) while the panel is up: the panel goes and keys and menus come back | open |
 | macOS | Native replace prompt (MIDI clip folder export; any save-panel replace question): Return cancels, Esc cancels, and with Full Keyboard Access on, Space does not replace — Replace must be clicked. If Esc or Space misbehave, raise it (owner ruling on the native button roles) | open |
 
