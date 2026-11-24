@@ -64,3 +64,40 @@
 **Files:** `crates/vizdaw-gpui/src/{banners.rs,shell.rs}`, `crates/vizctl/tests/e2e_gpui.rs`.
 **Produces:** banners (job progress + Cancel, Convert, device rate, disk, problems) above the editors with registry labels; GPUI ports `gpui_audio_import_plays_and_reports_media`, `gpui_bounces_the_demo_and_checks_the_file`, `gpui_midi_files_round_trip_over_the_channel`, `gpui_exports_for_another_daw_over_the_channel`, `gpui_dawproject_round_trip_over_the_channel`, `gpui_aaf_round_trip_over_the_channel`, `gpui_dawproject_merge_over_the_channel`.
 - [ ] Tests; implement; controller runs e2e on the Mac and Linux, checks banners on screen and ticks the checklist; commit `gpui: project banners; e2e: files over the channel`.
+
+## Outcome (2026-11-23)
+
+All six tasks done (commits on `next` from the plan commit to the final fixes). Evidence: `cargo test -p vizdaw-app -p vizdaw-gpui` 1108 passed; clippy and fmt clean; GPUI e2e 27/27 on the Mac and 27/27 on Linux (XWayland), with the Linux audio-import gap asserted as a refusal; final whole-branch review: ready after one fix wave. Banners are drawn but only menu-started jobs show them, so their on-screen check moves to 7b.
+
+### Rulings
+
+- Task 1: Ruling: constructors and free functions behind a CoreCalls table (LiveCore/FakeCore) held by the store; DocumentStore::new(empty, demo, open) kept for its 24 callers — swappable in tests — a store built the old way refuses the new constructors
+- Task 1: Ruling: relink_media/search_media added beyond the inventory list (relink is in the 7a goal) — none
+- Task 2: Ruling: default project format remembered in prefs (key defaultProjectFormat, "48000/24"); Disk too slow dismissal cleared by a transport read with no underrun; IdleNews.media_changed refreshes the Convert banner — Swift parity — none
+- Task 2: review: the only Important was the missing real-session MIDI-export JobRow.kind test — Ruling: my Task 2 brief scoped it to kinds Task 2 touches (import, convert); carried to Task 3 (which builds the MIDI export requests) — cost: none
+- Task 3: Ruling: a wrong-typed arg is refused with invalid_params (not treated as absent); a channel bounce path missing its extension is refused (Swift) — with_extension helper kept for 7b panels; paths with .. go to the core unchanged (Swift) — parity — none
+- Task 4: Ruling (implementer deviation, accepted): a MIDI import into a channel-made project refused before its job starts closes that project (Swift leaves it open) — matches DAWproject/AAF and the made-project constraint — an empty untitled window doesn't linger
+- Task 4: Ruling: until 7b's prompts, GUI open_path answers recovery questions "Open Normally"/"Open Last Saved" (opens behave as before) — carry to 7b
+- Task 4: Ruling: "one MIDI import at a time" is the drop queue (Swift Interchange drop queue) — out of slice 7 (drop-to-import OUT, inventory 7.5); opens always make a fresh project, the core's Busy guards the rest — none
+- Task 5: Ruling (implementer): Busy on session.job retried until the deadline (Swift answers "the job is unknown") — Busy is transient — a stuck Busy waits up to 10 minutes instead of failing fast
+- Task 5: Ruling: channel notes kept in a GPUI global listed in state.get windows alerts (not the store's alert) — a later command can't misreport them — none
+- Task 5: Ruling: after expiry a made project keeps its document with no window (Swift) — parity — a hidden document until the app quits
+- Task 6: Linux e2e 25/27 — gpui_audio_import_plays_and_reports_media and gpui_exports_for_another_daw_over_the_channel fail: core refuses "48000 Hz to 44100 Hz: resampling needs the system importer" (Linux engine has no resampler; Mac uses the system importer). Ruling: a Linux gap with an answer (H4: Linux audio import adds a resampler) — record in the parity checklist; the tests branch on Linux to assert today's refusal with a comment so they go red when H4 lands — final fix wave
+- Final: Ruling: all task rulings stand (reviewer agrees); Busy retried to the deadline accepted (transient) — cost: a stuck Busy waits up to 10 minutes
+
+### Carried to 7b / 7c
+
+- Task 4: Ruling: until 7b's prompts, GUI open_path answers recovery questions "Open Normally"/"Open Last Saved" (opens behave as before) — carry to 7b
+- Task 4: carry to 7c: queued ReturnPrompt.matched/match_name can name a closed document — prune on close before Merge uses it
+- Task 6: carry to 7c: a held merge must disable Convert and the rate change
+- Final: carry to 7b: a GUI-opened MIDI import failing with no other window is silent (app-level modal alert); a GUI open of a VizDAW-made .dawproject waits on the return prompt (prompt UI); recovery prompts; on-screen banner check; File menu ids
+
+### Deferred minors
+
+- Task 1: minor (deferred): FakeSession read-vs-mutation convention undocumented; import order in testing.rs; song_info doc comment
+- Task 2: minor (deferred): parse_format with no "/" falls back to 48000/24 (Swift keeps the rate); rate-mismatch refresh needs project_info Some (Swift ?? false); old UserDefaults value not migrated (Swift retired)
+- Task 3: minor (deferred): local_offset is UTC off unix (Windows not a 27.1 target) and untested for the zone; check_names used only by interchange requests; Path::extension vs pathExtension on dot-files; relink_request reads media via FFI each call; symlink test lacks #[cfg(unix)]; channel_map 1e400 gives the usage sentence
+- Task 4: minor (deferred): import_for_open Err may carry an older alert's text (tests only); fail-at-once pushes to closed but start refusal doesn't; read tickets unique per store only (test name over-claims); is_copy drops ".." components (Swift keeps them); refused-read test doesn't drive the store
+- Task 5: minor (deferred): a key-run DOC_IDS job could be orphaned (no such key binding today); hidden made documents after expiry or client leaving (backlog); duplicated expiry text; status cleared before validation; ran_value duplicates ran_json; tests missing for client leaving, PendingCall expiry, Busy to deadline, no window while the job runs
+- Task 6: minor (deferred): no fit/pane-area assertion when a banner appears; loose 3-line clamp height check; progress value "0.25" string (own choice); tree order differs from visual order (path stability); placeholder icon glyphs; singular "1 media file" banner text untested
+- Final: minor (deferred): hidden made projects after expiry/client leaving (open the window or keep watching); Convert banner shown while a channel convert runs (core Busy refuses)
