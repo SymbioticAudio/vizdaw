@@ -2338,6 +2338,149 @@ fn gpui_audio_import_plays_and_reports_media() {
     app.quit();
 }
 
+/// Ported from `regions_normalize_relink_and_trash` — its import, save and
+/// relink part: Save As carries the media and the overview cache; an
+/// undone import keeps its file for the redo history until another edit
+/// drops it, when Save moves the orphan to the trash folder; a moved file
+/// is relinked over the channel (no path names the Relink dialog, an
+/// unknown item is refused) and copied back under a free name. The
+/// fixtures are VizDAW CAF files, which import on Linux too (other formats
+/// wait for host track H4).
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_relinks_imported_media() {
+    let tmp = temp_home();
+    let trash = tmp.path().join("Trash");
+    let trash_env = trash.to_string_lossy().into_owned();
+    let mut app = App::start_with(tmp.path(), false, &[("VIZDAW_TRASH_DIR", &trash_env)]);
+    let home = app.launched.home.clone();
+    // 2 s of stereo at 0.25 (−12.04 dBFS), and a short extra file.
+    let tone = home.join("tone.caf");
+    audio_file(&tone, 96_000);
+    let extra = home.join("extra.caf");
+    audio_file(&extra, 4_800);
+
+    // The demo, with the tone in a new track at bar 1.
+    let demo = app.call("command.run", json!({"id": "file.create_demo"}));
+    let w = demo["window"].clone();
+    let doc = app.call("state.get", json!({"target": "document", "window": w}));
+    let seq = doc["selected_seq"].as_u64().unwrap();
+    let r = app.call(
+        "command.run",
+        json!({"id": "media.import", "params": {"path": tone, "seq": seq, "tick": 0}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Import Audio", "{r}");
+    let m = app.call("state.get", json!({"target": "media", "window": w}));
+    let item = m["items"][0].clone();
+    assert_eq!(
+        (item["name"].clone(), item["used_percent"].clone()),
+        (json!("tone"), json!(100.0)),
+        "{m}"
+    );
+    let media = item["id"].as_u64().unwrap();
+
+    // Skipped: selecting the region by its element and `region.normalize`
+    // (its dialog, refusals and the region's gain label) wait for the
+    // Region slice.
+
+    // Save As carries the media and the overview cache (the worker writes
+    // the overview after the import, so it may land a moment later).
+    let pkg = home.join("Regions.vizdaw");
+    app.call(
+        "command.run",
+        json!({"id": "file.save_as", "params": {"path": pkg}, "window": w}),
+    );
+    assert!(pkg.join("Media/tone.caf").is_file());
+    let caches = || {
+        std::fs::read_dir(pkg.join("Media/.overviews"))
+            .map(|d| {
+                d.flatten()
+                    .filter(|e| e.path().extension().is_some_and(|x| x == "vzov"))
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    while caches() == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(caches(), 1, "the overview came along");
+
+    // An import, undone: redo can bring it back, so Save keeps its file.
+    let r = app.call(
+        "command.run",
+        json!({"id": "media.import", "params": {"path": extra}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Import Audio", "{r}");
+    assert!(pkg.join("Media/extra.caf").is_file());
+    app.call("command.run", json!({"id": "edit.undo", "window": w}));
+    app.call("command.run", json!({"id": "file.save", "window": w}));
+    assert!(
+        pkg.join("Media/extra.caf").is_file(),
+        "the redo history needs it"
+    );
+    // Another edit drops the redo history; Save moves the orphan to the
+    // trash folder. (An autosave written meanwhile would rightly keep it,
+    // so none is left lying around.) Swift's edit was `media.rename`,
+    // which waits for the Media Pool slice: a new track is an edit too.
+    app.call("command.run", json!({"id": "track.new_audio", "window": w}));
+    let _ = std::fs::remove_dir_all(pkg.join("Autosave"));
+    app.call("command.run", json!({"id": "file.save", "window": w}));
+    assert!(
+        !pkg.join("Media/extra.caf").exists(),
+        "nothing references it"
+    );
+    assert!(trash.join("extra.caf").is_file(), "moved, never unlinked");
+
+    // Relink: the tone moves out; without a path the dialog is named; the
+    // relink copies it back under a free name (`tone.caf` is still the
+    // undo history's).
+    let moved = home.join("moved/tone.caf");
+    std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+    std::fs::rename(pkg.join("Media/tone.caf"), &moved).unwrap();
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "media.relink", "params": {"media": media}, "window": w}),
+    );
+    assert_eq!(e.dialog.as_deref(), Some("Relink"), "{e}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "media.relink", "params": {"media": 999_999, "path": moved}, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::InvalidParams, "{e}");
+    let r = app.call(
+        "command.run",
+        json!({"id": "media.relink", "params": {"media": media, "path": moved}, "window": w}),
+    );
+    assert_eq!(r["undo"], "Relink Media", "{r}");
+    let m = app.call("state.get", json!({"target": "media", "window": w}));
+    let item = &m["items"][0];
+    // Swift's name was "Tone" (its `media.rename`).
+    assert_eq!(
+        (
+            item["name"].clone(),
+            item["path"].clone(),
+            item["offline"].clone()
+        ),
+        (json!("tone"), json!("Media/tone 2.caf"), json!(false)),
+        "{m}"
+    );
+    // Under the channel the Relink sheet never showed.
+    let tree = app.call("ui.tree", json!({"window": w}));
+    assert!(
+        !tree["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["role"] == "sheet"),
+        "no sheet under the channel"
+    );
+
+    // Skipped: the media pool window (`window.media_pool`) waits for the
+    // Media Pool slice.
+    app.quit();
+}
+
 /// Ported from `bounces_the_demo_and_checks_the_file`:
 /// README steps 180–184 through the channel (plan 5f-2; spec §12.3 "bounce
 /// and check the file"): a bounce of four bars to a 16-bit WAV, refused

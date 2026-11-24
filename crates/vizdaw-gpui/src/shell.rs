@@ -294,7 +294,9 @@ impl DocumentWindow {
                     let (doc, token) = (this.doc, this.token);
                     this.app
                         .update(cx, |s, _| s.store.focus_document(doc, token));
+                    crate::sheets::relink::window_activated(cx);
                 } else {
+                    crate::sheets::relink::window_deactivated(cx);
                     // The window lost the keyboard: a field edit cancels, a
                     // hold ends where it got to, a held key lands.
                     this.cancel_field(window, cx);

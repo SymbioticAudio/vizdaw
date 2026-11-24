@@ -103,6 +103,8 @@ pub fn present(cx: &mut App) {
     // channel too.
     present_asks(cx);
     if crate::control::channel_on(cx) {
+        // Nothing shows; the Relink offer still forgets items back online.
+        crate::sheets::relink::present(cx, |_, _| false);
         return;
     }
     let app = AppState::global(cx);
@@ -148,6 +150,8 @@ pub fn present(cx: &mut App) {
     present_question(cx);
     present_return(cx);
     present_recovery(cx);
+    // Last: the sheet would hold back what waits for its window.
+    crate::sheets::relink::present(cx, |w, cx| !busy(Target::Window(w), cx));
 }
 
 /// Asks `ask` in `window` once nothing else of ours (or a GPUI prompt)

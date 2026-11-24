@@ -133,6 +133,10 @@ pub trait Sheet: 'static {
     /// Button `index` was pressed (clicked, or by Return or Esc); true
     /// closes the sheet.
     fn press(&mut self, index: usize, window: &mut Window, cx: &mut App) -> bool;
+    /// The card's width (Swift's sheets are about 460 wide; Relink 540).
+    fn width(&self) -> f32 {
+        CARD_WIDTH
+    }
 }
 
 /// A window's sheet, if one is up.
@@ -216,12 +220,27 @@ impl DocumentWindow {
         let enabled = sheet.buttons(cx).get(index).is_some_and(|b| b.enabled);
         let close = enabled && sheet.press(index, window, cx);
         if close {
-            self.set_sheet_editing(false, cx);
-            window.focus(&self.focus, cx);
+            self.sheet_closed(window, cx);
         } else {
             self.sheet.sheet = Some(sheet);
         }
         cx.notify();
+    }
+
+    /// Takes the sheet down without a press (the app's own: the Relink
+    /// sheet goes once nothing is left to relink).
+    pub fn close_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sheet.sheet.take().is_some() {
+            self.sheet_closed(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn sheet_closed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_sheet_editing(false, cx);
+        window.focus(&self.focus, cx);
+        // What waited for the window (an alert, another offer) shows.
+        cx.defer(crate::alerts::present);
     }
 
     /// A key while a sheet is up (the keystroke interceptor's call): Esc
@@ -319,6 +338,7 @@ impl DocumentWindow {
             self.sheet.focus.contains_focused(window, cx) && !self.sheet.focus.is_focused(window);
         self.set_sheet_editing(editing, cx);
         let label = sheet.label();
+        let width = sheet.width();
         let buttons = sheet.buttons(cx);
         let mut card_scope = scope.container();
         let body = sheet.render(&mut card_scope.container(), window, cx);
@@ -331,6 +351,7 @@ impl DocumentWindow {
         });
         self.sheet.sheet = Some(sheet);
         let card = card()
+            .w(px(width))
             .id("sheet-card")
             .track_focus(&self.sheet.focus)
             .child(body)
@@ -398,7 +419,7 @@ fn buttons_row(
         }))
 }
 
-fn button_face(i: usize, b: &SheetButton) -> Stateful<Div> {
+pub(crate) fn button_face(i: usize, b: &SheetButton) -> Stateful<Div> {
     let background = match b.role {
         ButtonRole::Default if b.enabled => DEFAULT_BUTTON,
         ButtonRole::Destructive if b.enabled => DESTRUCTIVE_BUTTON,

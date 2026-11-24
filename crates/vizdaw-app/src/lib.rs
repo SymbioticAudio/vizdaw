@@ -19,6 +19,7 @@ pub mod piano_roll;
 pub mod position;
 pub mod prefs;
 pub mod project_settings;
+pub mod relink;
 pub mod session;
 pub mod store;
 #[cfg(feature = "test-support")]

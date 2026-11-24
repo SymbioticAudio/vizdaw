@@ -91,6 +91,8 @@ pub struct DocumentModel {
     pub(crate) midi_read: Option<crate::store::MidiRead>,
     /// The Recovered Recordings offer.
     recovery: recovery::RecoveryOffer,
+    /// The Relink sheet's offer.
+    pub(crate) relink: crate::relink::RelinkOffer,
     /// The report of the last import or export this document's UI ran
     /// (Swift `InterchangeModel.report`).
     pub(crate) last_report: Option<vizdaw_ffi::ReportRow>,
@@ -208,6 +210,7 @@ impl DocumentModel {
             opened_file_end: None,
             midi_read: None,
             recovery: recovery::RecoveryOffer::default(),
+            relink: crate::relink::RelinkOffer::default(),
             last_report: None,
             merge_held: false,
             media_rows: Mutex::new(None),
@@ -289,6 +292,7 @@ impl DocumentModel {
             if news.media_changed {
                 self.media_version += 1;
                 self.refresh_project_info();
+                self.relink_due();
                 arrived = true;
             }
         }

@@ -17,6 +17,9 @@
 //! - Import MIDI File…: its panel, then the import sheet's read of the
 //!   file (Swift `beginImport`; a file that cannot be read is the alert
 //!   "Import Failed"; the sheet itself is slice 7c's).
+//! - Relink Media…: the Relink sheet ([`crate::sheets::relink`]).
+//! - Open Co-Producer Copy…: panel #2 in the project's copies folder, then
+//!   the store's `open_copy` (a new untitled project).
 //! - The items whose sheets come later do nothing yet
 //!   ([`LATER`]).
 //!
@@ -37,10 +40,9 @@ use crate::sheet_host::{Sheet, SheetDialog};
 use crate::shell::DocumentWindow;
 
 /// The File items whose sheet or flow lands later; their menu item does
-/// nothing yet: Open Co-Producer Copy… and Relink Media… (Task 5),
-/// Bounce… (Task 6), the Export items and the report (slice 7c).
+/// nothing yet: Bounce… (Task 6), the Export items and the report (slice
+/// 7c).
 pub const LATER: &[&str] = &[
-    "file.open_copy",
     "file.bounce",
     "file.export_dawproject",
     "file.export_aaf",
@@ -48,7 +50,6 @@ pub const LATER: &[&str] = &[
     "file.export_midi_clip",
     "file.export_for_daw",
     "file.interchange_report",
-    "media.relink",
 ];
 
 /// Handles the File items that need no document.
@@ -84,6 +85,12 @@ pub(crate) fn run_in_window(
     let doc = view.doc();
     match action.id.as_ref() {
         "file.project_settings" => crate::sheets::project_settings::show(view, window, cx),
+        "media.relink" => AppState::global(cx).update(cx, |s, cx| {
+            // The presenter shows the sheet once the window is free.
+            s.store.with_document(doc, |d, _| d.show_relink());
+            cx.notify();
+        }),
+        "file.open_copy" => open_copy(doc, window, cx),
         "media.import" => choose(&panels::IMPORT_AUDIO, window, cx, move |paths, cx| {
             let paths = paths
                 .into_iter()
@@ -106,6 +113,36 @@ pub(crate) fn run_in_window(
     }
 }
 
+/// Open Co-Producer Copy…: panel #2 in `doc`'s `Co-Producer/Copies`
+/// folder, then the copy as a new untitled project (anything else is the
+/// alert "Open Failed" / "That is not a Co-Producer copy."). On Linux a
+/// project is chosen by its `project.json`: that is its package (owner
+/// ruling 2026-11-23). No panel under the control channel.
+fn open_copy(doc: vizdaw_app::DocId, window: &Window, cx: &mut App) {
+    if crate::control::channel_on(cx) {
+        return;
+    }
+    let package = AppState::global(cx)
+        .read(cx)
+        .store
+        .document(doc)
+        .and_then(|d| d.path());
+    let Some(package) = package else { return };
+    let place = PanelPlace {
+        directory: Some(panels::co_producer_copies(&package)),
+        ..PanelPlace::default()
+    };
+    choose_at(&panels::OPEN_COPY, place, window, cx, |paths, cx| {
+        let Some(path) = paths.first() else { return };
+        let path = vizdaw_app::store::project_path(path);
+        let opened = AppState::global(cx).update(cx, |s, cx| {
+            cx.notify();
+            s.store.open_copy(&path).ok()
+        });
+        crate::show(opened, cx);
+    });
+}
+
 /// Shows `spec`'s panel over `window`; `then` takes the chosen paths. A
 /// panel that cannot show is the alert "Open Failed".
 fn choose(
@@ -114,12 +151,18 @@ fn choose(
     cx: &mut App,
     then: impl FnOnce(Vec<PathBuf>, &mut App) + 'static,
 ) {
-    let chosen = file_panels::choose(
-        spec,
-        PanelPlace::default(),
-        Some(window.window_handle()),
-        cx,
-    );
+    choose_at(spec, PanelPlace::default(), window, cx, then);
+}
+
+/// [`choose`] with the panel's folder and name filled in.
+pub(crate) fn choose_at(
+    spec: &PanelSpec,
+    place: PanelPlace,
+    window: &Window,
+    cx: &mut App,
+    then: impl FnOnce(Vec<PathBuf>, &mut App) + 'static,
+) {
+    let chosen = file_panels::choose(spec, place, Some(window.window_handle()), cx);
     cx.spawn(async move |cx| {
         let answer = chosen.await;
         cx.update(|cx| match answer {
