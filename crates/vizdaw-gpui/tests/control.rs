@@ -320,7 +320,7 @@ fn commands_outside_the_slice_are_unavailable(cx: &mut TestAppContext) {
             "command.run",
             json!({"id": "mixer.make_mine", "params": {"strip": 1}}),
         ),
-        ("state.get", json!({"target": "media"})),
+        ("state.get", json!({"target": "record"})),
         (
             "ui.drag",
             json!({"from": {"x": 1, "y": 1}, "to": {"x": 2, "y": 2}}),
@@ -328,7 +328,7 @@ fn commands_outside_the_slice_are_unavailable(cx: &mut TestAppContext) {
     ] {
         let e = call(&s, cx, cmd, params).unwrap_err();
         assert_eq!(e.code, ErrorCode::Unavailable, "{cmd}");
-        assert!(e.message.contains("slice 6a"), "{cmd}: {}", e.message);
+        assert!(e.message.contains("slice 7a"), "{cmd}: {}", e.message);
     }
 }
 

@@ -307,6 +307,12 @@ pub struct SlowRead {
 }
 
 impl SlowRead {
+    /// Which read this is: what [`DocumentStore::cancel_read`] takes when
+    /// it can never land (its work panicked or was dropped).
+    pub fn ticket(&self) -> u64 {
+        self.ticket
+    }
+
     /// Runs the read (slow): what [`DocumentStore::land`] takes.
     pub fn run(self) -> Landed {
         Landed {
@@ -907,6 +913,18 @@ impl DocumentStore {
     /// Whether a read has not landed yet.
     pub fn reading(&self) -> bool {
         !self.reads.waiting.is_empty()
+    }
+
+    /// Read `ticket` will never land (its work panicked or was dropped):
+    /// it is forgotten, so [`DocumentStore::reading`] does not stay true.
+    pub fn cancel_read(&mut self, ticket: u64) {
+        self.reads.waiting.remove(&ticket);
+    }
+
+    /// Whether windows wait to open ([`DocumentStore::take_pending`]) or
+    /// close ([`DocumentStore::take_closed`]).
+    pub fn settling(&self) -> bool {
+        !self.pending.is_empty() || !self.closed.is_empty()
     }
 
     /// A read's answer: applied when the store still wants it; an

@@ -44,6 +44,9 @@ pub use shell::DocumentWindow;
 /// handles the app-level actions (New, New Demo, Open, Quit).
 pub fn install(store: DocumentStore, cx: &mut App) -> gpui::Entity<AppState> {
     let state = app_state::create(store, cx);
+    // The store's file reads (DAWproject and AAF opens) run off the UI
+    // thread from now on.
+    control::files::install_spawner(cx);
     let keymap = state.read(cx).keymap.clone();
     menus::install(&keymap, cx);
     cx.on_action(|_: &NewDocument, cx| {
@@ -92,8 +95,8 @@ pub fn open_path(path: &Path, cx: &mut App) -> Option<WindowHandle<DocumentWindo
                 .store
                 .answer_crash(CrashChoice::Normally)
                 .or_else(|| s.store.answer_autosave(false)),
-            // The file is read first; its project arrives later (Task 5
-            // runs the reads).
+            // The file is read first, off the UI thread; its project's
+            // window opens when the read lands (`control::files::settle`).
             Ok(Opened::Reading) | Err(_) => None,
         }
     });
@@ -109,7 +112,7 @@ pub fn open_path(path: &Path, cx: &mut App) -> Option<WindowHandle<DocumentWindo
 }
 
 /// A window for `doc`; with none, the store's alert is all there is.
-fn show(doc: Option<DocId>, cx: &mut App) -> Option<WindowHandle<DocumentWindow>> {
+pub(crate) fn show(doc: Option<DocId>, cx: &mut App) -> Option<WindowHandle<DocumentWindow>> {
     let app = AppState::global(cx);
     let handle = doc.and_then(|d| DocumentWindow::open(&app, d, cx).ok());
     if handle.is_none() && app.read(cx).windows().is_empty() {
@@ -241,7 +244,7 @@ pub fn run() {
         let state = install(DocumentStore::live(), cx);
         // The preferences under the launch home (a throwaway e2e home
         // keeps its own).
-        state.update(cx, |s, _| s.prefs = vizdaw_app::Prefs::open());
+        state.update(cx, |s, _| s.set_prefs(vizdaw_app::Prefs::open()));
         // Before any document opens.
         if let Some(path) = &options.control
             && let Err(e) = control::start(path, cx)

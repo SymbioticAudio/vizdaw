@@ -385,7 +385,12 @@ impl DocumentWindow {
                         if s.poll(doc) {
                             cx.notify();
                         }
-                    })
+                    });
+                    // A job the poll ended may close a project the store
+                    // made (or open one): outside this window's update.
+                    if this.app.read(cx).store.settling() {
+                        cx.defer(crate::control::files::settle);
+                    }
                 });
                 if polled.is_err() {
                     break;

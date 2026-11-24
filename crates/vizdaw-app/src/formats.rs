@@ -133,7 +133,7 @@ pub(crate) fn has(args: &[(String, ArgValue)], name: &str) -> bool {
 }
 
 /// Text argument `name`; another type is `invalid_params`.
-pub(crate) fn text<'a>(
+pub fn text<'a>(
     id: &str,
     args: &'a [(String, ArgValue)],
     name: &str,
@@ -146,7 +146,7 @@ pub(crate) fn text<'a>(
 }
 
 /// Flag argument `name`; another type is `invalid_params`.
-pub(crate) fn flag(
+pub fn flag(
     id: &str,
     args: &[(String, ArgValue)],
     name: &str,

@@ -22,6 +22,11 @@
 //! name by its number. With `VIZDAW_FRAME_STATS` set (a measurement
 //! build's switch, see [`crate::frame_stats`]) each `state.get windows`
 //! row carries the window's `frames` since the last read.
+//! Slice 7a adds the File commands (see [`files`]): the new projects and
+//! demos (`app.new_demo {audio}` too), `file.open` and `app.open` with
+//! their recovery answers, `file.open_copy`, the imports, exports,
+//! checks, bounce, project settings, convert and relink, whose job
+//! replies wait for the job's end, and `state.get media|project`.
 //! Everything else answers `unavailable`.
 //!
 //! A `wait` is not answered in the tick it is taken unless it already
@@ -68,6 +73,8 @@ use crate::app_state::{AppState, WindowEntry};
 use crate::menus;
 use crate::shell::DocumentWindow;
 use crate::transport_fields::NO_FIELDS;
+
+pub(crate) mod files;
 
 /// The theme `state.get windows` names: the one fixed look the GPUI app
 /// draws until themes are ported (its dark palette).
@@ -123,6 +130,11 @@ pub trait CallSource {
     fn is_waiting(&self, _token: u64) -> bool {
         true
     }
+    /// Gives call `token` `by` from now to be answered instead of the
+    /// server's app timeout (a job's reply waits up to 600 s).
+    fn extend(&self, _token: u64, _by: Duration) -> bool {
+        true
+    }
 }
 
 impl CallSource for Server {
@@ -141,6 +153,10 @@ impl CallSource for Server {
     fn is_waiting(&self, token: u64) -> bool {
         Server::is_waiting(self, token)
     }
+
+    fn extend(&self, token: u64, by: Duration) -> bool {
+        Server::extend(self, token, by)
+    }
 }
 
 /// What [`handle`] made of a call.
@@ -150,6 +166,16 @@ pub enum Handled {
     Reply(Result<Value, ControlError>),
     /// Answer `{quitting: true}`, then quit without asking.
     Quit,
+    /// Job `job` of `doc` started: answered when it ends (at most
+    /// [`vizdaw_app::jobs::JOB_WAIT_MS`]).
+    Job {
+        command: String,
+        doc: DocId,
+        job: u64,
+    },
+    /// Work runs off the UI thread (a file read, a dry run): answered
+    /// once it lands. The number is its generation.
+    Later(u64),
 }
 
 /// What one pump tick did.
@@ -161,6 +187,8 @@ pub struct Tick {
     pub quit: bool,
     /// `wait` calls still waiting after this tick.
     pub waiting: usize,
+    /// Job replies and off-thread calls still waiting after this tick.
+    pub deferred: usize,
 }
 
 /// Takes and answers up to [`MAX_CALLS_PER_TICK`] calls, then checks the
@@ -197,14 +225,49 @@ pub fn pump(calls: &impl CallSource, cx: &mut App) -> Tick {
                     // After this update: the reply is on its way first.
                     cx.defer(crate::quit_now);
                 }
+                later => files::defer(calls, call.token, &later, cx),
             },
         }
     }
     if !tick.quit {
         check_waits(calls, cx);
+        answer_questions(cx);
+        files::check(calls, cx);
+        files::settle(cx);
     }
     tick.waiting = cx.try_global::<Waits>().map_or(0, |w| w.0.len());
+    tick.deferred = files::deferred_count(cx);
     tick
+}
+
+/// The notes the channel took instead of asking (Swift
+/// `ControlChannel.alerts`): `state.get windows` lists the last 20.
+#[derive(Default)]
+struct Notes(Vec<vizdaw_app::AlertItem>);
+
+impl Global for Notes {}
+
+/// The most notes kept.
+const NOTES_KEPT: usize = 20;
+
+/// Under the channel nothing asks: a return prompt is answered Cancel, a
+/// crash question Cancel and an autosave question Open Last Saved; each
+/// is noted.
+fn answer_questions(cx: &mut App) {
+    let app = AppState::global(cx);
+    let notes = app.update(cx, |s, _| s.store.answer_for_channel());
+    if notes.is_empty() {
+        return;
+    }
+    let kept = &mut cx.default_global::<Notes>().0;
+    for n in notes {
+        eprintln!("vizdaw: alert {}: {}", n.title, n.message);
+        kept.push(n);
+    }
+    if kept.len() > NOTES_KEPT {
+        let extra = kept.len() - NOTES_KEPT;
+        kept.drain(..extra);
+    }
 }
 
 /// A `wait` not answered yet.
@@ -346,15 +409,19 @@ fn facts(window: Option<&WindowRef>, cx: &mut App) -> Facts {
 pub fn handle(command: &Command, cx: &mut App) -> Handled {
     match command {
         Command::AppQuit { discard } => quit(*discard, cx),
+        Command::CommandRun { id, args, window } if files::DOC_IDS.contains(&id.as_str()) => {
+            match target(window.as_ref(), cx) {
+                Ok(entry) => files::run(id, args, &entry, cx),
+                Err(e) => Handled::Reply(Err(e)),
+            }
+        }
         other => Handled::Reply(answer(other, cx)),
     }
 }
 
 fn answer(command: &Command, cx: &mut App) -> Result<Value, ControlError> {
     match command {
-        Command::AppNewDemo { audio: true } => Err(not_yet(
-            "app.new_demo with `audio`: the audio demo is not in slice 1",
-        )),
+        Command::AppNewDemo { audio: true } => files::new_demo_audio(cx),
         Command::AppNewDemo { audio: false } => {
             let before = alert_id(cx);
             match crate::new_demo(cx) {
@@ -362,12 +429,15 @@ fn answer(command: &Command, cx: &mut App) -> Result<Value, ControlError> {
                 None => Err(failure(before, "no demo was made", cx)),
             }
         }
-        Command::AppOpen { path, .. } => {
+        Command::AppOpen { path, answers } => {
+            let doc = files::open_answered(path, answers, cx)?;
+            let app = AppState::global(cx);
             let before = alert_id(cx);
-            match crate::open_path(path, cx) {
-                Some(h) => opened(h, cx),
-                None => Err(failure(before, "the project did not open", cx)),
-            }
+            let h = match app.read(cx).window_of(doc) {
+                Some(w) => w.handle,
+                None => DocumentWindow::open(&app, doc, cx).map_err(|m| failure(before, &m, cx))?,
+            };
+            opened(h, cx)
         }
         Command::CommandRun { id, args, window } => {
             if let Some(r) = app_wide(id, args, cx) {
@@ -414,6 +484,13 @@ fn answer(command: &Command, cx: &mut App) -> Result<Value, ControlError> {
         } => {
             let entry = target(window.as_ref(), cx)?;
             mixer_state(*what, entry.doc, cx)
+        }
+        Command::StateGet {
+            target: what @ (StateTarget::Media | StateTarget::Project),
+            window,
+        } => {
+            let entry = target(window.as_ref(), cx)?;
+            file_state(*what, entry.doc, cx)
         }
         Command::StateGet { target, .. } => Err(not_yet(&format!(
             "state.get {}",
@@ -552,6 +629,17 @@ fn run_command(
             return Ok(ran_json(id, doc, entry, ran.undo, ran.status));
         }
         _ if TRANSPORT_COMMANDS.contains(&id) => return run_transport(id, args, entry, cx),
+        // A key (`ui.key`) runs a File command without arguments: it asks
+        // for its dialog, which is the answer.
+        _ if files::DOC_IDS.contains(&id) => {
+            return match files::run(id, args, entry, cx) {
+                Handled::Reply(r) => r,
+                _ => Err(ControlError::new(
+                    ErrorCode::Unavailable,
+                    format!("{id} answers when it ends: run it with command.run"),
+                )),
+            };
+        }
         "file.close" => {
             // Never asks (Swift `control_close_never_prompts`): the window
             // closes without its save prompt and the document goes, saved
@@ -680,8 +768,8 @@ fn app_wide(
     args: &[(String, ArgValue)],
     cx: &mut App,
 ) -> Option<Result<Value, ControlError>> {
-    if id == "file.new" {
-        return Some(new_document(args, cx));
+    if files::APP_IDS.contains(&id) {
+        return Some(files::run_app(id, args, cx));
     }
     if !APP_COMMANDS.contains(&id) {
         return None;
@@ -699,26 +787,6 @@ fn app_wide(
             "undo": ran.undo, "status": ran.status,
         })
     }))
-}
-
-/// `command.run file.new`: an empty document in a new window; no document
-/// need be open. Project formats (`rate`, `depth`) are not in this slice.
-fn new_document(args: &[(String, ArgValue)], cx: &mut App) -> Result<Value, ControlError> {
-    if let Some((name, _)) = args.first() {
-        return Err(not_yet(&format!("file.new with `{name}`")));
-    }
-    let before = alert_id(cx);
-    let Some(h) = crate::new_document(cx) else {
-        return Err(failure(before, "file.new made no document", cx));
-    };
-    let entry = AppState::global(cx)
-        .read(cx)
-        .windows()
-        .iter()
-        .find(|w| w.handle == h)
-        .cloned()
-        .ok_or_else(gone)?;
-    Ok(ran_json("file.new", entry.doc, &entry, None, None))
 }
 
 /// `state.get document`, in the Swift app's fields: the latest snapshot,
@@ -834,6 +902,29 @@ fn mixer_state(target: StateTarget, doc: DocId, cx: &App) -> Result<Value, Contr
     Ok(result_json(&result))
 }
 
+/// `state.get media` (the pool, read fresh; none when it cannot be read)
+/// and `state.get project` (the format and what does not match it; a
+/// refused read is the call's `busy` or `failed`).
+fn file_state(target: StateTarget, doc: DocId, cx: &App) -> Result<Value, ControlError> {
+    let s = AppState::global(cx);
+    let s = s.read(cx);
+    let d = s.store.document(doc).ok_or_else(closed)?;
+    let session = d.session();
+    let result = match target {
+        StateTarget::Media => ControlResult::Media {
+            doc: doc_id(doc),
+            items: session.media().unwrap_or_default(),
+        },
+        _ => ControlResult::Project {
+            doc: doc_id(doc),
+            info: session
+                .project_info()
+                .map_err(|e| vizdaw_app::mixer::commands::thrown(&e, "Project Unavailable"))?,
+        },
+    };
+    Ok(result_json(&result))
+}
+
 /// `state.get selection`: the time range, tracks and events selected.
 fn selection_state(doc: DocId, cx: &App) -> Result<Value, ControlError> {
     let s = AppState::global(cx);
@@ -912,12 +1003,14 @@ fn windows_state(cx: &mut App) -> Value {
         }
         rows.push(row);
     }
-    let alerts: Vec<Value> = app
-        .read(cx)
-        .store
-        .alert()
+    let notes = cx
+        .try_global::<Notes>()
+        .map(|n| n.0.clone())
+        .unwrap_or_default();
+    let alerts: Vec<Value> = notes
+        .iter()
+        .chain(app.read(cx).store.alert())
         .map(|a| json!({ "title": a.title, "message": a.message }))
-        .into_iter()
         .collect();
     json!({ "windows": rows, "alerts": alerts, "theme": THEME })
 }
@@ -1327,8 +1420,11 @@ fn not_yet(what: &str) -> ControlError {
     ControlError::new(
         ErrorCode::Unavailable,
         format!(
-            "{what} is not available in the GPUI app yet (slice 6a answers app.new_demo, \
-             app.open, app.quit, command.run file.new / file.close / file.save / file.save_as / \
+            "{what} is not available in the GPUI app yet (slice 7a answers app.new_demo, \
+             app.open, app.quit, command.run file.new / file.create_demo / \
+             file.create_demo_audio / file.open / file.open_copy / file.close / file.save / \
+             file.save_as / file.project_settings / file.bounce / file.import_* / file.export_* / \
+             file.interchange_report / media.import / media.convert / media.relink / \
              transport.* (not recording or the click) / ui.set_transport_bar / \
              ui.reset_transport_bar / edit.undo / edit.redo / track.* / editors.snap / \
              editors.list / editors.close_detail / editors.insert_event / ui.view_arrange / \
@@ -1338,7 +1434,7 @@ fn not_yet(what: &str) -> ControlError {
              mixer.set_output / mixer.add_send / mixer.set_send / mixer.remove_send / \
              mixer.remove_bus / mixer.set_colour / mixer.*group* / mixer.*vca* / window.mixer, \
              state.get transport / windows / document / editor / selection / \
-             mixer / layout / automation, ui.tree, ui.click, ui.key, ui.screenshot and wait)"
+             mixer / layout / automation / media / project, ui.tree, ui.click, ui.key, ui.screenshot and wait)"
         ),
     )
 }

@@ -95,6 +95,13 @@ impl AppState {
         cx.set_global(GlobalAppState(state));
     }
 
+    /// Takes `prefs` as the app's preferences; new projects are made in
+    /// their default format.
+    pub fn set_prefs(&mut self, prefs: Prefs) {
+        self.store.set_default_format(prefs.default_format());
+        self.prefs = prefs;
+    }
+
     /// The transport bar every document window draws.
     pub fn transport_layout(&self) -> TransportLayout {
         self.prefs.transport_bar()
