@@ -569,7 +569,7 @@ fn with_sheet_prompts_an_alert_waits_for_the_close_question(cx: &mut TestAppCont
     assert!(up(&mut vcx));
     let shown = showing(cx);
     assert!(
-        matches!(&shown[..], [(_, Showing::Asked(m))] if m.starts_with("Save changes")),
+        matches!(&shown[..], [(_, Showing::Asked(m))] if m.starts_with("Do you want to save the changes")),
         "{shown:?}"
     );
     assert_eq!(store_alert(cx).as_deref(), Some("Open Failed"));

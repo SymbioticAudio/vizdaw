@@ -6,8 +6,9 @@
 pub const SAVE: &str = "Save";
 pub const DONT_SAVE: &str = "Don't Save";
 pub const CANCEL: &str = "Cancel";
-/// The close question's informative text.
-pub const CHANGES_LOST: &str = "Your changes are lost if you don't save them.";
+/// The close question's informative text (Swift
+/// `M/ClosePrompts.swift:25`).
+pub const CHANGES_LOST: &str = "Your changes will be lost if you don't save them.";
 /// Its informative text while a save is owed after the recording pass.
 pub const SAVE_PENDING_INFORMATIVE: &str =
     "Recording is still going. The take and your changes will be saved when it stops.";
@@ -25,7 +26,8 @@ pub struct ClosePrompt {
 /// The close question for document `name`; `save_pending`: a Save made
 /// while recording is still owed (no Don't Save then).
 pub fn close_prompt(name: &str, save_pending: bool) -> ClosePrompt {
-    let message = format!("Save changes to \u{201c}{name}\u{201d}?");
+    // Swift `M/ClosePrompts.swift:24`.
+    let message = format!("Do you want to save the changes you made to \u{201c}{name}\u{201d}?");
     if save_pending {
         ClosePrompt {
             message,

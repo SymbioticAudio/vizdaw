@@ -10,11 +10,21 @@ use vizdaw_app::close_prompts::{
 #[test]
 fn the_close_question_offers_dont_save_only_with_no_save_owed() {
     let p = close_prompt("Song", false);
-    assert_eq!(p.message, "Save changes to \u{201c}Song\u{201d}?");
-    assert_eq!(p.detail, "Your changes are lost if you don't save them.");
+    // Swift `M/ClosePrompts.swift:23-26`.
+    assert_eq!(
+        p.message,
+        "Do you want to save the changes you made to \u{201c}Song\u{201d}?"
+    );
+    assert_eq!(
+        p.detail,
+        "Your changes will be lost if you don't save them."
+    );
     assert_eq!(p.buttons, vec![SAVE, DONT_SAVE, CANCEL]);
     let p = close_prompt("Song", true);
-    assert_eq!(p.message, "Save changes to \u{201c}Song\u{201d}?");
+    assert_eq!(
+        p.message,
+        "Do you want to save the changes you made to \u{201c}Song\u{201d}?"
+    );
     assert_eq!(p.detail, SAVE_PENDING_INFORMATIVE);
     assert_eq!(
         SAVE_PENDING_INFORMATIVE,
