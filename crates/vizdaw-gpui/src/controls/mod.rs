@@ -26,13 +26,13 @@ use gpui::{
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
     Point, Styled, Subscription, WeakEntity, Window, canvas,
 };
-use vizdaw_app::mixer::{MixerModel, MixerPlacement};
+use vizdaw_app::mixer::{MidiControl, MidiStripMath, MixerModel, MixerPlacement};
 use vizdaw_app::{DocId, DocumentModel};
 use vizdaw_ffi::events::AutomationTargetRow as Target;
 
 use crate::AppState;
 
-pub use fader::fader;
+pub use fader::{fader, fader_on};
 pub use knob::{KnobSize, knob};
 pub use menu_face::menu_face;
 pub use meter::meter;
@@ -84,12 +84,109 @@ impl MixerRef {
     }
 }
 
-/// What a fader or knob shows and moves: its target, its record in the
+/// What a fader or knob drags: an automation target (a strip's fader,
+/// pan or send, a VCA's fader: a gesture on the core), or an external MIDI
+/// destination's volume or pan (previews, then one commit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Grip {
+    Gesture(Target),
+    Midi { dest: u64, control: MidiControl },
+}
+
+impl Grip {
+    /// A key step: 0.01 of the position (a MIDI value, 1/127), ×10 with ⇧.
+    pub fn step(self) -> f64 {
+        match self {
+            Grip::Gesture(_) => STEP,
+            Grip::Midi { .. } => MidiStripMath::STEP,
+        }
+    }
+
+    /// The mouse went down on it in `p` (⌥ held: `option`).
+    fn press(
+        self,
+        m: &mut MixerModel,
+        d: &mut DocumentModel,
+        p: MixerPlacement,
+        travel: f64,
+        option: bool,
+        now: Instant,
+    ) {
+        match self {
+            Grip::Gesture(t) => m.press(d, p, t, travel, option, now),
+            Grip::Midi { dest, control } => m.midi_press(d, p, dest, control, travel, now),
+        }
+    }
+
+    /// The press in `p` moved by (`dx`, `dy`).
+    #[allow(clippy::too_many_arguments)]
+    fn drag(
+        self,
+        m: &mut MixerModel,
+        d: &mut DocumentModel,
+        p: MixerPlacement,
+        dx: f64,
+        dy: f64,
+        fine: bool,
+        now: Instant,
+    ) {
+        match self {
+            Grip::Gesture(_) => m.drag(d, p, dx, dy, fine, now),
+            Grip::Midi { .. } => m.midi_drag(d, p, dx, dy, fine, now),
+        }
+    }
+
+    /// The press in `p` lifts; a second click that did not drag is a
+    /// double-click.
+    fn lift(
+        self,
+        m: &mut MixerModel,
+        d: &mut DocumentModel,
+        p: MixerPlacement,
+        clicks: usize,
+        now: Instant,
+    ) {
+        match self {
+            Grip::Gesture(t) => {
+                let dragged = m.is_dragging(p);
+                m.lift(d, p, now);
+                if !dragged && clicks >= 2 {
+                    m.double_click(d, p, t, now);
+                }
+            }
+            Grip::Midi { dest, control } => {
+                let dragged = m.is_midi_dragging(p);
+                m.midi_lift(d, p, now);
+                if !dragged && clicks >= 2 {
+                    m.midi_double_click(d, p, dest, control, now);
+                }
+            }
+        }
+    }
+
+    /// A key step of `delta`.
+    fn nudge(self, m: &mut MixerModel, d: &mut DocumentModel, delta: f64, now: Instant) {
+        match self {
+            Grip::Gesture(t) => m.nudge(d, t, delta, now),
+            Grip::Midi { dest, control } => m.midi_nudge(d, dest, control, delta, now),
+        }
+    }
+
+    /// The press in `p` is on it.
+    pub fn held(self, m: &MixerModel, p: MixerPlacement) -> bool {
+        match self {
+            Grip::Gesture(t) => m.pressed(p) == Some(t),
+            Grip::Midi { dest, control } => m.midi_pressed(p) == Some((dest, control)),
+        }
+    }
+}
+
+/// What a fader or knob shows and moves: what it drags, its record in the
 /// tree, and its position (0…1).
 #[derive(Clone)]
 pub struct ControlBinding {
     pub mixer: MixerRef,
-    pub target: Target,
+    pub target: Grip,
     /// "Fader of Synth", "Pan knob of Synth", "Send knob 1 of Synth".
     pub label: String,
     /// "−4.2 dB", "L 24".
@@ -106,7 +203,7 @@ impl ControlBinding {
     pub fn of(mixer: &MixerRef, m: &MixerModel, t: Target, label: String, value: String) -> Self {
         ControlBinding {
             mixer: mixer.clone(),
-            target: t,
+            target: Grip::Gesture(t),
             label,
             value,
             position: m.position(t),
@@ -125,6 +222,44 @@ impl ControlBinding {
             format!("Fader of {}", s.name),
             vizdaw_app::mixer::StripEntry::level_text(m.gain_db(s)),
         ))
+    }
+
+    /// VCA `vca`'s fader: "Fader of VCA <name>", its level text.
+    pub fn vca(mixer: &MixerRef, m: &MixerModel, vca: u64) -> Option<Self> {
+        let v = m.vca(vca)?;
+        Some(Self::of(
+            mixer,
+            m,
+            Target::VcaFader { vca },
+            vizdaw_app::mixer::VcaStripLabels::fader(&v.name),
+            vizdaw_app::mixer::StripEntry::level_text(m.vca_gain_db(v)),
+        ))
+    }
+
+    /// External MIDI destination `dest`'s fader ("Fader of <name>", the
+    /// volume) or pan knob ("Pan knob of <name>", the pan).
+    pub fn midi(mixer: &MixerRef, m: &MixerModel, dest: u64, control: MidiControl) -> Option<Self> {
+        let d = m.destinations().iter().find(|d| d.id == dest)?;
+        let mix = m.midi_mix(dest)?;
+        let (label, value) = match control {
+            MidiControl::Volume => (
+                vizdaw_app::mixer::MidiStripLabels::fader(&d.name),
+                MidiStripMath::volume_label(mix.volume),
+            ),
+            MidiControl::Pan => (
+                vizdaw_app::mixer::MidiStripLabels::pan_knob(&d.name),
+                MidiStripMath::pan_label(mix.pan),
+            ),
+        };
+        Some(ControlBinding {
+            mixer: mixer.clone(),
+            target: Grip::Midi { dest, control },
+            label,
+            value,
+            position: m.midi_position(dest, control),
+            enabled: true,
+            touched: false,
+        })
     }
 
     /// Strip `strip`'s pan knob: "Pan knob of <name>", its pan text.
@@ -218,7 +353,7 @@ pub fn drag_state(b: &ControlBinding, window: &mut Window, cx: &mut App) -> Enti
             }
             let Some(app) = weak.upgrade() else { return };
             MixerRef::new(app, doc, p).with(cx, |m, d| {
-                if m.pressed(p) == Some(target) {
+                if target.held(m, p) {
                     m.cancel_drags(d, p, Instant::now());
                 }
             });
@@ -240,7 +375,9 @@ pub fn drag_state(b: &ControlBinding, window: &mut Window, cx: &mut App) -> Enti
 /// and decide when an event comes whether this control holds the press:
 /// GPUI dispatches mouse events against the last frame drawn, so a
 /// mouse-up that comes before the frame after the press must still find
-/// them.
+/// them. They listen in the capture phase, so no element that stops the
+/// event keeps the mouse-up from them; and any press while this control
+/// still holds one (its mouse-up was lost) lifts that one first.
 pub(crate) fn drag_surface(
     surface: Div,
     b: &ControlBinding,
@@ -275,7 +412,7 @@ pub(crate) fn drag_surface(
             let p = pressed.placement;
             let option = e.modifiers.alt;
             pressed.with(cx, |m, d| {
-                m.press(d, p, target, travel, option, Instant::now())
+                target.press(m, d, p, travel, option, Instant::now())
             });
             cx.stop_propagation();
         })
@@ -290,17 +427,21 @@ pub(crate) fn drag_surface(
                 ("down", _) | ("left", StepKeys::All) => false,
                 _ => return,
             };
-            let step = if m.shift { STEP * 10. } else { STEP };
+            let step = if m.shift {
+                target.step() * 10.
+            } else {
+                target.step()
+            };
             let delta = if up { step } else { -step };
-            stepped.with(cx, |m, d| m.nudge(d, target, delta, Instant::now()));
+            stepped.with(cx, |m, d| target.nudge(m, d, delta, Instant::now()));
             cx.stop_propagation();
         })
 }
 
 /// The mixer's press in `mixer`'s placement is on `target`.
-fn holds(mixer: &MixerRef, target: Target, cx: &App) -> bool {
+fn holds(mixer: &MixerRef, target: Grip, cx: &App) -> bool {
     mixer
-        .read(cx, |m, _| m.pressed(mixer.placement) == Some(target))
+        .read(cx, |m, _| target.held(m, mixer.placement))
         .unwrap_or(false)
 }
 
@@ -309,7 +450,7 @@ fn holds(mixer: &MixerRef, target: Target, cx: &App) -> bool {
 fn held_origin(
     state: &WeakEntity<DragState>,
     mixer: &MixerRef,
-    target: Target,
+    target: Grip,
     cx: &App,
 ) -> Option<Point<Pixels>> {
     let origin = state.read_with(cx, |s, _| s.origin).ok().flatten()?;
@@ -321,20 +462,13 @@ fn held_origin(
 fn lift(
     state: &WeakEntity<DragState>,
     mixer: &MixerRef,
-    target: Target,
+    target: Grip,
     clicks: usize,
     cx: &mut App,
 ) {
     state.update(cx, |s, _| s.origin = None).ok();
     let p = mixer.placement;
-    mixer.with(cx, |m, d| {
-        let now = Instant::now();
-        let dragged = m.is_dragging(p);
-        m.lift(d, p, now);
-        if !dragged && clicks >= 2 {
-            m.double_click(d, p, target, now);
-        }
-    });
+    mixer.with(cx, |m, d| target.lift(m, d, p, clicks, Instant::now()));
 }
 
 /// An invisible canvas whose paint registers the window-wide listeners
@@ -346,9 +480,20 @@ fn follow(b: &ControlBinding, state: &Entity<DragState>) -> gpui::Canvas<()> {
     canvas(
         |_, _, _| {},
         move |_, _, window, _| {
+            // A press anywhere while this control still holds one: its
+            // mouse-up was lost, so it lifts before the new press lands.
+            let (pressed, pressed_state) = (mixer.clone(), state.clone());
+            window.on_mouse_event(move |_: &MouseDownEvent, phase, _, cx| {
+                if phase != DispatchPhase::Capture
+                    || held_origin(&pressed_state, &pressed, target, cx).is_none()
+                {
+                    return;
+                }
+                lift(&pressed_state, &pressed, target, 1, cx);
+            });
             let (moved, moved_state) = (mixer.clone(), state.clone());
             window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
-                if phase != DispatchPhase::Bubble {
+                if phase != DispatchPhase::Capture {
                     return;
                 }
                 let Some(origin) = held_origin(&moved_state, &moved, target, cx) else {
@@ -364,11 +509,13 @@ fn follow(b: &ControlBinding, state: &Entity<DragState>) -> gpui::Canvas<()> {
                     f64::from(e.position.y - origin.y),
                 );
                 let fine = e.modifiers.alt;
-                moved.with(cx, |m, d| m.drag(d, p, dx, dy, fine, Instant::now()));
+                moved.with(cx, |m, d| {
+                    target.drag(m, d, p, dx, dy, fine, Instant::now())
+                });
             });
             let (released, released_state) = (mixer.clone(), state.clone());
             window.on_mouse_event(move |e: &MouseUpEvent, phase, _, cx| {
-                if phase != DispatchPhase::Bubble || e.button != MouseButton::Left {
+                if phase != DispatchPhase::Capture || e.button != MouseButton::Left {
                     return;
                 }
                 if held_origin(&released_state, &released, target, cx).is_none() {

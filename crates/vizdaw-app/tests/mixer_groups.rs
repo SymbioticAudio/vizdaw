@@ -299,10 +299,12 @@ fn a_follower_that_goes_mid_drag_is_released_by_nobody_here() {
     mx(&mut d, |m, d| m.poll_automation(d));
     f.edit_mixer(|m| m.strips.retain(|s| s.id != 3));
     // An edit refetches the mixer: Snare is gone.
-    mx(&mut d, |m, d| {
-        m.set_output(d, 4, None);
-        m.release(d, lead, now);
-    });
+    mx(&mut d, |m, d| m.set_output(d, 4, None));
+    assert!(
+        d.mixer().unwrap().strip(3).is_none(),
+        "the refetch dropped Snare before the release"
+    );
+    mx(&mut d, |m, d| m.release(d, lead, now));
     let releases: Vec<T> = f
         .gestures()
         .iter()
@@ -445,4 +447,76 @@ fn the_channel_never_fills_the_selection() {
             "{id}"
         );
     }
+}
+
+/// On the real core: a group, its two members, and the mixer.
+fn real_group() -> (Arc<vizdaw_ffi::Session>, DocumentModel, u64, u64, String) {
+    use vizdaw_app::DocSession;
+    use vizdaw_ffi::mixer::StripKindRow;
+    let session = vizdaw_ffi::Session::new_demo().unwrap();
+    session.add_bus("Bus 1".into()).unwrap();
+    let mut d = DocumentModel::new(session.clone() as Arc<dyn DocSession>).unwrap();
+    assert!(d.ensure_mixer());
+    let members: Vec<u64> = d
+        .mixer()
+        .unwrap()
+        .strips()
+        .filter(|s| s.kind != StripKindRow::Master)
+        .map(|s| s.id)
+        .take(2)
+        .collect();
+    assert_eq!(members.len(), 2, "the demo's strip and the bus");
+    mx(&mut d, |m, d| m.new_group(d, &members));
+    assert!(d.alert.is_none(), "{:?}", d.alert);
+    let m = d.mixer().unwrap();
+    let g = m.groups().first().expect("the group").clone();
+    assert_eq!(g.members, members);
+    (session, d, members[0], members[1], g.name)
+}
+
+/// Drags `lead`'s fader 60 points up (⌥ at the press when `option`).
+fn drag_fader(d: &mut DocumentModel, lead: u64, option: bool) {
+    let p = MixerPlacement::View;
+    let t = T::StripFader { strip: lead };
+    let now = Instant::now();
+    mx(d, |m, d| {
+        m.press(d, p, t, 300.0, option, now);
+        m.drag(d, p, 0.0, -10.0, false, now);
+        m.drag(d, p, 0.0, -60.0, false, now);
+        m.lift(d, p, now);
+    });
+}
+
+/// Carried from Task 2: a group drag on the real core moves the
+/// follower too and is one step "Move Group <name>".
+#[test]
+fn a_real_group_drag_moves_the_follower_as_one_step() {
+    let (session, mut d, lead, follower, name) = real_group();
+    let before = |d: &DocumentModel, s: u64| d.mixer().unwrap().strip(s).unwrap().gain_db;
+    let (lead_at, follower_at) = (before(&d, lead), before(&d, follower));
+    drag_fader(&mut d, lead, false);
+    assert!(d.alert.is_none(), "{:?}", d.alert);
+    mx(&mut d, |m, d| m.refresh_if_needed(d));
+    assert!(before(&d, lead) > lead_at, "the lead moved");
+    assert!(before(&d, follower) > follower_at, "the follower moved");
+    assert_eq!(
+        d.snapshot().undo_label.as_deref(),
+        Some(format!("Move Group {name}").as_str())
+    );
+    session.close().unwrap();
+}
+
+/// ⌥ at the press: the follower stays and the step is the plain fader's.
+#[test]
+fn a_real_option_drag_moves_the_lead_alone() {
+    let (session, mut d, lead, follower, _) = real_group();
+    let before = |d: &DocumentModel, s: u64| d.mixer().unwrap().strip(s).unwrap().gain_db;
+    let (lead_at, follower_at) = (before(&d, lead), before(&d, follower));
+    drag_fader(&mut d, lead, true);
+    assert!(d.alert.is_none(), "{:?}", d.alert);
+    mx(&mut d, |m, d| m.refresh_if_needed(d));
+    assert!(before(&d, lead) > lead_at, "the lead moved");
+    assert_eq!(before(&d, follower), follower_at, "the follower stayed");
+    assert_eq!(d.snapshot().undo_label.as_deref(), Some("Set Fader"));
+    session.close().unwrap();
 }

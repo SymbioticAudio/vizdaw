@@ -717,3 +717,68 @@ fn set_midi_mix_sets_and_keeps_absent_values() {
     assert!(f.midi_mixes().iter().all(|(dest, _)| *dest == 7));
     assert_eq!(d.snapshot().version, f.snap().version, "each step applied");
 }
+
+/// Carried from Task 3: on the real core, a MIDI fader drag previews
+/// without touching the document (the core takes the previews it sends)
+/// and its release is one step "Set MIDI Mix" holding the new volume.
+#[test]
+fn a_real_midi_drag_previews_and_commits_on_the_core() {
+    use core_model::command::{Command, RoutingCmd, apply};
+    use core_model::document::{DestKind, Document};
+    use vizdaw_app::DocSession;
+    let add = Command::Routing(RoutingCmd::AddDestination {
+        name: "Juno".into(),
+        kind: DestKind::MidiEndpoint {
+            endpoint_ref: "Juno Port".into(),
+            group: 0,
+            channel: 0,
+        },
+        default_patch: None,
+    });
+    let doc = apply(&Document::new(), &add).unwrap().doc;
+    // A package holding it, opened on the core.
+    let dir = tempfile::tempdir().unwrap();
+    let package = dir.path().join("Juno.vizdaw");
+    std::fs::create_dir(&package).unwrap();
+    let json = core_model::file::to_json(&doc).unwrap();
+    std::fs::write(package.join(core_model::file::PROJECT_FILE), json).unwrap();
+    let session = vizdaw_ffi::Session::open(package.display().to_string()).unwrap();
+    let mut d = DocumentModel::new(session.clone() as Arc<dyn DocSession>).unwrap();
+    assert!(d.ensure_mixer());
+    let dest = d
+        .mixer()
+        .unwrap()
+        .destinations()
+        .iter()
+        .find(|x| x.external)
+        .expect("Juno")
+        .id;
+    // The previews' shape is one the core takes (the app drops a refused
+    // preview silently, as Swift does).
+    assert!(session.preview_midi_mix(dest, Some(90), None).is_ok());
+    assert!(session.preview_midi_mix(dest, None, Some(64)).is_ok());
+    let t0 = Instant::now();
+    mx(&mut d, |m, d| {
+        m.midi_press(d, P::View, dest, MidiControl::Volume, 127.0, t0);
+        m.midi_drag(d, P::View, 0.0, 10.0, false, t0);
+        m.midi_drag(d, P::View, 0.0, 30.0, false, t0 + ms(30));
+    });
+    let core_mix = |s: &vizdaw_ffi::Session| {
+        s.destinations()
+            .unwrap()
+            .into_iter()
+            .find(|x| x.id == dest)
+            .unwrap()
+            .midi_mix
+    };
+    assert_eq!(core_mix(&session), MidiMixRow::default(), "a preview only");
+    assert!(session.snapshot().unwrap().undo_label.is_none());
+    let shown = d.mixer().unwrap().midi_mix(dest).unwrap().volume;
+    // 20 of 127 points down from where it began moving.
+    assert_eq!(shown, Some(80));
+    mx(&mut d, |m, d| m.midi_lift(d, P::View, t0 + ms(40)));
+    assert!(d.alert.is_none(), "{:?}", d.alert);
+    assert_eq!(core_mix(&session).volume, Some(80));
+    assert_eq!(d.snapshot().undo_label.as_deref(), Some("Set MIDI Mix"));
+    session.close().unwrap();
+}

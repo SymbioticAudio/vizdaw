@@ -20,7 +20,7 @@ use super::MixerRef;
 use crate::registry::RegistryScope;
 use crate::strip_palette::tokens;
 use crate::text_input::{TextInput, TextInputEvent};
-use vizdaw_app::mixer::{MixerModel, StripEntry};
+use vizdaw_app::mixer::{MidiStripLabels, MidiStripMath, MixerModel, StripEntry, VcaStripLabels};
 
 /// The box's drawn size (Swift `ControlMetrics.numberBox`).
 pub const SIZE: (f64, f64) = (56., 22.);
@@ -40,6 +40,18 @@ pub enum Entry {
     Send {
         strip: u64,
         index: usize,
+    },
+    /// A VCA's level.
+    Vca {
+        vca: u64,
+    },
+    /// An external MIDI destination's volume (0 to 127).
+    MidiVolume {
+        dest: u64,
+    },
+    /// An external MIDI destination's pan ("L 24", "C", "R 10", 0 to 127).
+    MidiPan {
+        dest: u64,
     },
 }
 
@@ -89,6 +101,44 @@ impl NumberBinding {
             entry: Entry::Send { strip, index },
             label: format!("Send {} of {}", index + 1, s.name),
             value: StripEntry::level_text(m.send_level_db(s, index)),
+            enabled: true,
+        })
+    }
+}
+
+impl NumberBinding {
+    /// VCA `vca`'s level: "Level of VCA <name>".
+    pub fn vca(mixer: &MixerRef, m: &MixerModel, vca: u64) -> Option<Self> {
+        let v = m.vca(vca)?;
+        Some(NumberBinding {
+            mixer: mixer.clone(),
+            entry: Entry::Vca { vca },
+            label: VcaStripLabels::level(&v.name),
+            value: StripEntry::level_text(m.vca_gain_db(v)),
+            enabled: true,
+        })
+    }
+
+    /// External MIDI destination `dest`'s volume: "Volume of <name>".
+    pub fn midi_volume(mixer: &MixerRef, m: &MixerModel, dest: u64) -> Option<Self> {
+        let d = m.destinations().iter().find(|d| d.id == dest)?;
+        Some(NumberBinding {
+            mixer: mixer.clone(),
+            entry: Entry::MidiVolume { dest },
+            label: MidiStripLabels::volume_box(&d.name),
+            value: MidiStripMath::volume_label(m.midi_mix(dest)?.volume),
+            enabled: true,
+        })
+    }
+
+    /// External MIDI destination `dest`'s pan: "Pan of <name>".
+    pub fn midi_pan(mixer: &MixerRef, m: &MixerModel, dest: u64) -> Option<Self> {
+        let d = m.destinations().iter().find(|d| d.id == dest)?;
+        Some(NumberBinding {
+            mixer: mixer.clone(),
+            entry: Entry::MidiPan { dest },
+            label: MidiStripLabels::pan_box(&d.name),
+            value: MidiStripMath::pan_label(m.midi_mix(dest)?.pan),
             enabled: true,
         })
     }
@@ -223,6 +273,9 @@ impl NumberBox {
                         Entry::Level { strip } => m.type_level(d, strip, &text, now),
                         Entry::Pan { strip } => m.type_pan(d, strip, &text, now),
                         Entry::Send { strip, index } => m.type_send(d, strip, index, &text, now),
+                        Entry::Vca { vca } => m.type_vca_level(d, vca, &text, now),
+                        Entry::MidiVolume { dest } => m.type_midi_volume(d, dest, &text),
+                        Entry::MidiPan { dest } => m.type_midi_pan(d, dest, &text),
                     }
                 })
                 .unwrap_or(false);

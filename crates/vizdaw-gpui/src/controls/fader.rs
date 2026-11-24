@@ -56,11 +56,30 @@ pub fn fader_size(throw: f64) -> (f64, f64) {
     (SCALE_WIDTH + COLUMN, throw.max(0.) + CAP.1)
 }
 
-/// Fader `b` with a throw of `throw` points and its cap in `cap`.
+/// Fader `b` with a throw of `throw` points and its cap in `cap`, on the
+/// dB scale.
 pub fn fader(
     b: &ControlBinding,
     throw: f64,
     cap: Rgba,
+    scope: &mut RegistryScope,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let marks: Vec<(f64, String)> = marks()
+        .into_iter()
+        .map(|(p, l)| (p, l.to_owned()))
+        .collect();
+    fader_on(b, throw, cap, &marks, scope, window, cx)
+}
+
+/// Fader `b` on the scale `marks` (position, label), as [`fader`] (a
+/// MIDI strip's 0…127).
+pub fn fader_on(
+    b: &ControlBinding,
+    throw: f64,
+    cap: Rgba,
+    marks: &[(f64, String)],
     scope: &mut RegistryScope,
     window: &mut Window,
     cx: &mut App,
@@ -75,7 +94,8 @@ pub fn fader(
         .w(px(SCALE_WIDTH as f32))
         .h(px(h as f32))
         .flex_none()
-        .children(marks().into_iter().map(|(p, label)| {
+        .children(marks.iter().map(|(p, label)| {
+            let (p, label) = (*p, label.clone());
             div()
                 .absolute()
                 .left_0()
@@ -96,7 +116,7 @@ pub fn fader(
         cap,
         focused,
         touched: b.touched,
-        marks: marks().into_iter().map(|m| m.0).collect(),
+        marks: marks.iter().map(|m| m.0).collect(),
     };
     let column = div()
         .relative()

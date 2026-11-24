@@ -10,6 +10,7 @@ pub mod frame_stats;
 pub mod list_editor;
 pub mod menu_bar;
 pub mod menus;
+mod midi_strip;
 pub mod mixer_view;
 pub mod panes;
 pub mod piano_roll;
@@ -21,6 +22,7 @@ pub mod text_input;
 pub mod track_headers;
 pub mod transport_bar;
 pub mod transport_fields;
+mod vca_strip;
 
 use std::path::Path;
 

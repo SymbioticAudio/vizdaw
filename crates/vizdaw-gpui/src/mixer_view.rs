@@ -16,6 +16,14 @@
 //! window or the plugin catalogue ("Open", a slot's double-click, the
 //! instrument menu, "+", "EQ ＋", "Replace…") shows disabled.
 //!
+//! A grouped strip shows its group tag under its kind (its menu: Link
+//! Mutes, Link Solos, Remove from Group, Ungroup); a drag of its fader is
+//! the core's group drag, ⌥ at the press moving it alone. While the mixer
+//! has a VCA every strip has the VCA offset row under its level box (a
+//! member's fader shows its own level). External MIDI destinations'
+//! strips (`midi_strip`) sit before the first bus and the VCA columns
+//! (`vca_strip`) after the strips; all of them share the strips' rows.
+//!
 //! The strips scroll across (and down, when even the shortest fader does
 //! not fit); only the strips in view are drawn and recorded.
 //!
@@ -44,11 +52,14 @@ use gpui::{
     deferred, div, point, px, rgb,
 };
 use vizdaw_app::DocumentModel;
-use vizdaw_app::mixer::layout::{RowHeights, StripGrid, StripLayout, StripRowKind, rows_of};
+use vizdaw_app::mixer::layout::{
+    RowHeights, StripGrid, StripLayout, StripRowKind, midi_rows, rows_of, vca_rows,
+};
 use vizdaw_app::mixer::meters::{METER_PERIOD, POLL_INTERVAL};
 use vizdaw_app::mixer::{
-    AutomationModes, InstrumentRow, MeterLevel, MixerModel, MixerPlacement, SendLabels, SlotLabels,
-    SlotMenuItem, SlotPlace, SlotState, StripPalette,
+    AutomationModes, GroupLabels, InstrumentRow, MeterLevel, MidiControl, MidiStripLabels,
+    MidiStripMath, MixerColumn, MixerModel, MixerPlacement, SendLabels, SlotLabels, SlotMenuItem,
+    SlotPlace, SlotState, StripPalette, VcaStripLabels,
 };
 use vizdaw_ffi::automation::AutomationModeRow;
 use vizdaw_ffi::edit::MonitorModeRow;
@@ -88,9 +99,19 @@ const LINE: f32 = 20.;
 /// `tick` reads at most every 30 ms).
 pub const POLL_EVERY: Duration = METER_PERIOD;
 
-/// A strip's typed box.
+/// A column of the mixer: an audio strip, a VCA, or an external MIDI
+/// destination's strip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum BoxKind {
+pub enum ColumnKey {
+    Strip(u64),
+    Vca(u64),
+    Dest(u64),
+}
+
+/// A column's typed box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum BoxKind {
+    /// The level (a MIDI strip's volume).
     Level,
     Pan,
     /// Send `n`'s (from 0).
@@ -110,6 +131,24 @@ pub enum StripMenu {
     Send(usize),
     /// A slot's menu (the slot's ID).
     Slot(u64),
+    /// A grouped strip's group tag: Link Mutes, Link Solos, Remove from
+    /// Group, Ungroup.
+    GroupTag,
+    /// A VCA's name menu (its ID with it): Rename VCA…, Delete VCA.
+    Vca,
+    /// A VCA's automation mode menu (its ID with it).
+    VcaMode,
+}
+
+impl StripMenu {
+    /// The column the menu belongs to: `id` names a VCA for a VCA's
+    /// menus, else a strip.
+    fn column(self, id: u64) -> ColumnKey {
+        match self {
+            StripMenu::Vca | StripMenu::VcaMode => ColumnKey::Vca(id),
+            _ => ColumnKey::Strip(id),
+        }
+    }
 }
 
 /// The gap between two inserts and their height: a drag moves an insert
@@ -148,29 +187,74 @@ pub struct StripLook {
     pub meter: MeterLevel,
 }
 
+/// What a rename field renames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameTarget {
+    /// A strip, in its header: losing the keyboard commits.
+    Strip(u64),
+    /// A VCA, in a popover under its name: dismissing it cancels.
+    Vca(u64),
+}
+
+impl RenameTarget {
+    fn renaming(self, m: &MixerModel, p: MixerPlacement) -> bool {
+        match self {
+            RenameTarget::Strip(s) => m.is_renaming(s, p),
+            RenameTarget::Vca(v) => m.is_renaming_vca(v, p),
+        }
+    }
+
+    /// Ends it in the mixer (still renaming here), with the field's text
+    /// when `commit`.
+    fn end(
+        self,
+        m: &mut MixerModel,
+        d: &mut DocumentModel,
+        p: MixerPlacement,
+        text: String,
+        commit: bool,
+    ) {
+        if !self.renaming(m, p) {
+            return;
+        }
+        match (self, commit) {
+            (RenameTarget::Strip(_), true) => {
+                m.rename_draft = text;
+                m.commit_rename(d);
+            }
+            (RenameTarget::Strip(_), false) => m.cancel_rename(),
+            (RenameTarget::Vca(_), true) => {
+                m.rename_draft = text;
+                m.commit_vca_rename(d);
+            }
+            (RenameTarget::Vca(_), false) => m.cancel_vca_rename(),
+        }
+    }
+}
+
 /// An open rename field.
-struct RenameField {
-    strip: u64,
-    field: Entity<TextInput>,
+pub(crate) struct RenameField {
+    pub(crate) target: RenameTarget,
+    pub(crate) field: Entity<TextInput>,
     _subscriptions: Vec<Subscription>,
 }
 
 /// One placement of a document's mixer: its scroll, its typed boxes, its
 /// open menu and rename field.
 pub struct MixerView {
-    mixer: MixerRef,
+    pub(crate) mixer: MixerRef,
     /// The strips' scroll (x, y), in points.
     scroll: (f64, f64),
     /// How far the strips scrolled last frame at most (x, y).
     room: (f64, f64),
     /// The strips' area, as last drawn.
     area: Rc<Cell<Bounds<Pixels>>>,
-    boxes: HashMap<(u64, BoxKind), Entity<NumberBox>>,
-    menu: Option<(u64, StripMenu)>,
+    boxes: HashMap<(ColumnKey, BoxKind), Entity<NumberBox>>,
+    pub(crate) menu: Option<(u64, StripMenu)>,
     /// The row of the open menu whose submenu is open.
     submenu: Option<usize>,
     insert_drag: Option<InsertDrag>,
-    rename: Option<RenameField>,
+    pub(crate) rename: Option<RenameField>,
     /// The placement told the mixer it shows.
     appeared: bool,
     /// The mixer was asked for (to show, or to be read again) less than
@@ -178,6 +262,9 @@ pub struct MixerView {
     /// ends, which draws a frame.
     hold: Option<Task<()>>,
     drawn: Vec<StripLook>,
+    /// The MIDI strips drawn last frame: each destination and the note
+    /// activity its meter showed.
+    midi_drawn: Vec<(u64, f64)>,
     /// The mixer's `shown_version` this placement last drew for.
     seen: Option<u64>,
     /// When the placement came (the synthetic meters' clock).
@@ -202,15 +289,12 @@ impl MixerView {
                     cx.notify();
                 });
                 // The field goes with its placement (the bottom pane hidden
-                // for a frame): its rename commits, as a field losing the
-                // keyboard does (Swift's `endPaneEdits`).
-                let strip = r.strip;
-                gone.with(cx, |m, d| {
-                    if m.is_renaming(strip, p) {
-                        m.rename_draft = text;
-                        m.commit_rename(d);
-                    }
-                });
+                // for a frame): a strip's rename commits, as a field
+                // losing the keyboard does (Swift's `endPaneEdits`); a
+                // VCA's popover goes with it, cancelled.
+                let target = r.target;
+                let commit = matches!(target, RenameTarget::Strip(_));
+                gone.with(cx, |m, d| target.end(m, d, p, text, commit));
                 drop(r);
             }
             if v.appeared {
@@ -243,6 +327,7 @@ impl MixerView {
             appeared: false,
             hold: None,
             drawn: vec![],
+            midi_drawn: vec![],
         };
         // Now, so the frame that shows the placement has its strips; a
         // busy core is asked again when the hold ends.
@@ -353,6 +438,12 @@ impl MixerView {
         &self.drawn
     }
 
+    /// The MIDI strips drawn last frame, left to right: each destination
+    /// and the note activity (0…1) its meter showed.
+    pub fn midi_drawn(&self) -> &[(u64, f64)] {
+        &self.midi_drawn
+    }
+
     /// The strips' scroll (x, y).
     pub fn scroll(&self) -> (f64, f64) {
         self.scroll
@@ -379,18 +470,49 @@ impl MixerView {
     /// Escape cancels, the field losing the keyboard commits. A rename
     /// already open commits first.
     pub fn begin_rename(&mut self, strip: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_field(RenameTarget::Strip(strip), window, cx);
+    }
+
+    /// Starts the rename of VCA `vca` in this placement (Swift's popover
+    /// under its name): Return commits, Escape cancels, and the popover
+    /// going (a click elsewhere, the field losing the keyboard) cancels.
+    pub fn begin_vca_rename(&mut self, vca: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_field(RenameTarget::Vca(vca), window, cx);
+    }
+
+    /// The open rename field's target.
+    pub fn renaming(&self) -> Option<RenameTarget> {
+        self.rename.as_ref().map(|r| r.target)
+    }
+
+    fn begin_field(&mut self, target: RenameTarget, window: &mut Window, cx: &mut Context<Self>) {
         self.end_rename(true, cx);
         let p = self.mixer.placement;
         let Some(name) = self.mixer.with(cx, |m, _| {
-            m.strip(strip)?;
-            m.begin_rename(strip, p);
+            match target {
+                RenameTarget::Strip(strip) => {
+                    m.strip(strip)?;
+                    m.begin_rename(strip, p);
+                }
+                RenameTarget::Vca(vca) => {
+                    m.vca(vca)?;
+                    m.begin_vca_rename(vca, p);
+                }
+            }
             Some(m.rename_draft.clone())
         }) else {
             return;
         };
         let Some(name) = name else { return };
-        let field = cx.new(|cx| TextInput::new(NAME, cx).with_text(&name));
+        let label = match target {
+            RenameTarget::Strip(_) => NAME,
+            RenameTarget::Vca(_) => VcaStripLabels::RENAME_FIELD,
+        };
+        let field = cx.new(|cx| TextInput::new(label, cx).with_text(&name));
         let focus = field.focus_handle(cx);
+        // A strip's field losing the keyboard commits; a VCA's popover
+        // going cancels (Swift).
+        let blur_commits = matches!(target, RenameTarget::Strip(_));
         let subscriptions = vec![
             cx.subscribe_in(
                 &field,
@@ -401,7 +523,9 @@ impl MixerView {
                     TextInputEvent::Tab | TextInputEvent::BackTab => {}
                 },
             ),
-            cx.on_blur(&focus, window, |this, _, cx| this.end_rename(true, cx)),
+            cx.on_blur(&focus, window, move |this, _, cx| {
+                this.end_rename(blur_commits, cx)
+            }),
             // The mixer holds what is typed, so a commit from elsewhere (a
             // view change, Save) takes it.
             cx.observe(&field, move |this, field, cx| {
@@ -412,7 +536,7 @@ impl MixerView {
                 // move and blink.
                 let changed = this
                     .mixer
-                    .read(cx, |m, _| m.is_renaming(strip, p) && m.rename_draft != text)
+                    .read(cx, |m, _| target.renaming(m, p) && m.rename_draft != text)
                     .unwrap_or(false);
                 if changed {
                     this.mixer.with(cx, |m, _| m.rename_draft = text);
@@ -428,15 +552,15 @@ impl MixerView {
             cx.notify();
         });
         self.rename = Some(RenameField {
-            strip,
+            target,
             field,
             _subscriptions: subscriptions,
         });
         cx.notify();
     }
 
-    /// Ends the open rename field: the strip is renamed to its text when
-    /// `commit` and the mixer still renames it here.
+    /// Ends the open rename field: the strip or VCA is renamed to its
+    /// text when `commit` and the mixer still renames it here.
     pub fn end_rename(&mut self, commit: bool, cx: &mut Context<Self>) {
         let Some(r) = self.rename.take() else { return };
         let text = r.field.read(cx).text().to_owned();
@@ -447,18 +571,9 @@ impl MixerView {
                 .with_document(doc, |d, _| d.end_text_editing(&owner));
             cx.notify();
         });
-        let strip = r.strip;
-        self.mixer.with(cx, |m, d| {
-            if !m.is_renaming(strip, p) {
-                return;
-            }
-            if commit {
-                m.rename_draft = text;
-                m.commit_rename(d);
-            } else {
-                m.cancel_rename();
-            }
-        });
+        let target = r.target;
+        self.mixer
+            .with(cx, |m, d| target.end(m, d, p, text, commit));
         cx.notify();
     }
 
@@ -467,7 +582,7 @@ impl MixerView {
         self.submenu
     }
 
-    fn toggle_menu(&mut self, strip: u64, which: StripMenu, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_menu(&mut self, strip: u64, which: StripMenu, cx: &mut Context<Self>) {
         self.menu = if self.menu == Some((strip, which)) {
             None
         } else {
@@ -478,7 +593,7 @@ impl MixerView {
     }
 
     /// Opens a context menu (a right-click).
-    fn open_menu(&mut self, strip: u64, which: StripMenu, cx: &mut Context<Self>) {
+    pub(crate) fn open_menu(&mut self, strip: u64, which: StripMenu, cx: &mut Context<Self>) {
         self.menu = Some((strip, which));
         self.submenu = None;
         cx.notify();
@@ -581,9 +696,9 @@ impl MixerView {
     }
 
     /// The box `key`, made once and kept while its strip is there.
-    fn number_box(
+    pub(crate) fn number_box(
         &mut self,
-        key: (u64, BoxKind),
+        key: (ColumnKey, BoxKind),
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<NumberBox> {
@@ -657,6 +772,86 @@ struct StripParts {
     output: Option<(String, Vec<OutputChoice>)>,
     mode: AutomationModeRow,
     meter: MeterLevel,
+    /// Its group's tag, when grouped.
+    group: Option<GroupTag>,
+    /// The VCA offset row, while the mixer has a VCA.
+    offset: Option<OffsetParts>,
+}
+
+/// A grouped strip's tag (Swift `StripGroupTag`).
+struct GroupTag {
+    id: u64,
+    name: String,
+    colour: Rgba,
+    link_mute: bool,
+    link_solo: bool,
+}
+
+/// A strip's VCA offset row (Swift `StripVcaOffset`).
+struct OffsetParts {
+    /// "VCA −3.0"; none at 0.0.
+    text: Option<String>,
+    /// The "VCA" mark, lit while a VCA mutes or solos it; none for a
+    /// strip in no VCA.
+    mark: Option<bool>,
+}
+
+/// What a VCA column shows (Swift `VcaStripCells`).
+pub(crate) struct VcaParts {
+    pub(crate) index: usize,
+    pub(crate) id: u64,
+    pub(crate) name: String,
+    /// Its label: "VCA <name>".
+    pub(crate) title: String,
+    /// "VCA · 3 members".
+    pub(crate) kind_line: String,
+    pub(crate) colour: Rgba,
+    pub(crate) fader: ControlBinding,
+    pub(crate) level: NumberBinding,
+    pub(crate) mute: Toggle,
+    pub(crate) solo: Toggle,
+    pub(crate) mode: AutomationModeRow,
+}
+
+/// What an external MIDI destination's strip shows (Swift
+/// `MidiStripCells`).
+pub(crate) struct MidiParts {
+    pub(crate) index: usize,
+    pub(crate) id: u64,
+    pub(crate) name: String,
+    pub(crate) kind_label: String,
+    pub(crate) cap: Rgba,
+    pub(crate) pan: ControlBinding,
+    pub(crate) pan_box: NumberBinding,
+    /// The pan is set (unset values are dimmed).
+    pub(crate) pan_set: bool,
+    pub(crate) fader: ControlBinding,
+    pub(crate) volume: NumberBinding,
+    pub(crate) volume_set: bool,
+    pub(crate) mute: Toggle,
+    pub(crate) arm: Toggle,
+    /// The track R arms.
+    pub(crate) lane: Option<u64>,
+    /// The note activity, 0…1.
+    pub(crate) activity: f64,
+}
+
+/// One column in view (made and drawn once a frame each, so not boxed).
+#[allow(clippy::large_enum_variant)]
+enum ColumnParts {
+    Audio(StripParts),
+    Vca(VcaParts),
+    Midi(MidiParts),
+}
+
+impl ColumnParts {
+    fn index(&self) -> usize {
+        match self {
+            ColumnParts::Audio(s) => s.index,
+            ColumnParts::Vca(v) => v.index,
+            ColumnParts::Midi(m) => m.index,
+        }
+    }
 }
 
 /// What the placement draws this frame.
@@ -668,9 +863,11 @@ struct Gathered {
     scroll: (f64, f64),
     /// The most it scrolls (x, y).
     room: (f64, f64),
-    strips: Vec<StripParts>,
-    ids: Vec<u64>,
+    strips: Vec<ColumnParts>,
+    /// Every column, drawn or not.
+    keys: HashSet<ColumnKey>,
     renaming: Option<(u64, MixerPlacement)>,
+    renaming_vca: Option<(u64, MixerPlacement)>,
 }
 
 /// The view's area: its measured size, else the window's.
@@ -697,20 +894,21 @@ fn gather(
     sample_rate: f64,
     now: Instant,
 ) -> Gathered {
-    let mut all: Vec<&StripRow> = m
-        .columns()
-        .into_iter()
-        .filter_map(|c| match c {
-            vizdaw_app::mixer::MixerColumn::Audio(s) => Some(s),
-            // MIDI destination strips and VCAs come with slice 6b.
-            _ => None,
+    // The columns (strips, MIDI strips before the first bus, VCAs), then
+    // master after the divider.
+    let mut all: Vec<MixerColumn<'_>> = m.columns();
+    let divider_before = m.master().map(|_| all.len());
+    all.extend(m.master().map(MixerColumn::Audio));
+    let rows: Vec<BTreeMap<StripRowKind, f64>> = all
+        .iter()
+        .map(|c| match c {
+            MixerColumn::Audio(s) => rows_of(s, m.can_arm(d, s)),
+            MixerColumn::Vca(_) => vca_rows(),
+            MixerColumn::Midi(_) => midi_rows(),
         })
         .collect();
-    let divider_before = m.master().map(|_| all.len());
-    all.extend(m.master());
-    let rows: Vec<BTreeMap<StripRowKind, f64>> =
-        all.iter().map(|s| rows_of(s, m.can_arm(d, s))).collect();
-    let grid = StripGrid::new(&rows, (view.1 - 2. * PADDING).max(0.));
+    let has_vcas = !m.vcas().is_empty();
+    let grid = StripGrid::with_offset(&rows, (view.1 - 2. * PADDING).max(0.), has_vcas);
     let content = (
         2. * PADDING + StripGrid::width(all.len(), divider_before),
         2. * PADDING + grid.total,
@@ -718,108 +916,40 @@ fn gather(
     let room = ((content.0 - view.0).max(0.), (content.1 - view.1).max(0.));
     let scroll = (scroll.0.clamp(0., room.0), scroll.1.clamp(0., room.1));
     let selected = d.selected_strips();
-    let pressed = m.pressed(mixer.placement).and_then(|t| match t {
-        vizdaw_ffi::events::AutomationTargetRow::StripFader { strip }
-        | vizdaw_ffi::events::AutomationTargetRow::StripPan { strip }
-        | vizdaw_ffi::events::AutomationTargetRow::SendLevel { strip, .. } => Some(strip),
-        _ => None,
-    });
-    let t = tokens();
+    use vizdaw_ffi::events::AutomationTargetRow as Target;
+    let p = mixer.placement;
+    let pressed = m
+        .pressed(p)
+        .and_then(|t| match t {
+            Target::StripFader { strip }
+            | Target::StripPan { strip }
+            | Target::SendLevel { strip, .. } => Some(ColumnKey::Strip(strip)),
+            Target::VcaFader { vca } => Some(ColumnKey::Vca(vca)),
+            _ => None,
+        })
+        .or_else(|| m.midi_pressed(p).map(|(dest, _)| ColumnKey::Dest(dest)));
+    let key_of = |c: &MixerColumn<'_>| match c {
+        MixerColumn::Audio(s) => ColumnKey::Strip(s.id),
+        MixerColumn::Vca(v) => ColumnKey::Vca(v.id),
+        MixerColumn::Midi(x) => ColumnKey::Dest(x.id),
+    };
     let mut strips = vec![];
-    for (index, s) in all.iter().enumerate() {
+    for (index, c) in all.iter().enumerate() {
         let left = PADDING + StripGrid::x(index, divider_before);
         let in_view = left + StripLayout::WIDTH > scroll.0 && left < scroll.0 + view.0;
-        // A strip whose control the mouse holds is drawn wherever it is,
+        // A column whose control the mouse holds is drawn wherever it is,
         // so a scroll does not end the drag.
-        if !in_view && pressed != Some(s.id) {
+        if !in_view && pressed != Some(key_of(c)) {
             continue;
         }
-        let master = s.kind == StripKindRow::Master;
-        let (Some(fader), Some(level), Some(mute)) = (
-            ControlBinding::fader(mixer, m, s.id),
-            NumberBinding::level(mixer, m, s.id),
-            Toggle::mute(m, s.id),
-        ) else {
-            continue;
+        let part = match c {
+            MixerColumn::Audio(s) => {
+                audio_parts(m, d, mixer, s, index, selected, has_vcas, now).map(ColumnParts::Audio)
+            }
+            MixerColumn::Vca(v) => vca_parts(m, mixer, v.id, index).map(ColumnParts::Vca),
+            MixerColumn::Midi(x) => midi_parts(m, d, mixer, x.id, index).map(ColumnParts::Midi),
         };
-        let lane = m.input_lane(d, s);
-        let armable = lane.is_some();
-        let monitor = lane.map_or(MonitorModeRow::Off, |l| l.monitor);
-        let output = (!master).then(|| {
-            let mut choices = vec![("Master".to_owned(), None)];
-            choices.extend(m.targets(s).iter().map(|b| (b.name.clone(), Some(b.id))));
-            (format!("\u{2192} {}", m.output_name(s)), choices)
-        });
-        let slot = |x: &SlotRow, place| slot_part(m, x, place);
-        let sends = (!master).then(|| {
-            (0..s.sends.len())
-                .filter_map(|i| {
-                    let send = &s.sends[i];
-                    Some(SendPart {
-                        index: i,
-                        name: m.send_name(send),
-                        enabled: send.enabled,
-                        pre_fader: send.pre_fader,
-                        knob: ControlBinding::send(mixer, m, s.id, i)?,
-                        level: NumberBinding::send(mixer, m, s.id, i)?,
-                    })
-                })
-                .collect()
-        });
-        strips.push(StripParts {
-            index,
-            id: s.id,
-            name: s.name.clone(),
-            kind_label: s.kind_label.clone(),
-            instrument: MixerModel::instrument_row(s).map(|r| match r {
-                InstrumentRow::Plugin(x) => InstrumentPart::Plugin(slot(x, SlotPlace::Instrument)),
-                InstrumentRow::BuiltinSynth => InstrumentPart::BuiltinSynth,
-            }),
-            eq: s.eq.as_ref().map(|x| slot(x, SlotPlace::Eq)),
-            inserts: s
-                .inserts
-                .iter()
-                .enumerate()
-                .map(|(i, x)| slot(x, SlotPlace::Insert(i)))
-                .collect(),
-            sends,
-            bar: t.bar(s),
-            cap: t.cap(s.kind_colour),
-            dimmed: s.solo_muted,
-            selected: selected.contains(&s.id),
-            fader,
-            level,
-            pan: if master {
-                None
-            } else {
-                ControlBinding::pan(mixer, m, s.id).zip(NumberBinding::pan(mixer, m, s.id))
-            },
-            mute,
-            solo: if master { None } else { Toggle::solo(m, s.id) },
-            arm: Toggle {
-                letter: "R",
-                on: lane.is_some_and(|l| l.arm),
-                colour: t.state_record,
-                label: format!("Record arm {}", s.name),
-                enabled: armable,
-                touched: false,
-            },
-            monitor: Toggle {
-                letter: "I",
-                on: monitor != MonitorModeRow::Off,
-                colour: if monitor == MonitorModeRow::Input {
-                    t.state_warning
-                } else {
-                    t.state_play
-                },
-                label: format!("Input monitor {}", s.name),
-                enabled: armable,
-                touched: false,
-            },
-            output,
-            mode: s.automation,
-            meter: m.meters().level_at(s.id, now),
-        });
+        strips.extend(part);
     }
     Gathered {
         load: m.load_text(sample_rate),
@@ -829,9 +959,199 @@ fn gather(
         scroll,
         room,
         strips,
-        ids: all.iter().map(|s| s.id).collect(),
+        keys: all.iter().map(key_of).collect(),
         renaming: m.renaming(),
+        renaming_vca: m.renaming_vca(),
     }
+}
+
+/// Audio strip `s` (column `index`), as it shows.
+#[allow(clippy::too_many_arguments)]
+fn audio_parts(
+    m: &MixerModel,
+    d: &DocumentModel,
+    mixer: &MixerRef,
+    s: &StripRow,
+    index: usize,
+    selected: &std::collections::BTreeSet<u64>,
+    has_vcas: bool,
+    now: Instant,
+) -> Option<StripParts> {
+    let t = tokens();
+    let master = s.kind == StripKindRow::Master;
+    let fader = ControlBinding::fader(mixer, m, s.id)?;
+    let level = NumberBinding::level(mixer, m, s.id)?;
+    let mute = Toggle::mute(m, s.id)?;
+    let lane = m.input_lane(d, s);
+    let armable = lane.is_some();
+    let monitor = lane.map_or(MonitorModeRow::Off, |l| l.monitor);
+    let output = (!master).then(|| {
+        let mut choices = vec![("Master".to_owned(), None)];
+        choices.extend(m.targets(s).iter().map(|b| (b.name.clone(), Some(b.id))));
+        (format!("\u{2192} {}", m.output_name(s)), choices)
+    });
+    let slot = |x: &SlotRow, place| slot_part(m, x, place);
+    let sends = (!master).then(|| {
+        (0..s.sends.len())
+            .filter_map(|i| {
+                let send = &s.sends[i];
+                Some(SendPart {
+                    index: i,
+                    name: m.send_name(send),
+                    enabled: send.enabled,
+                    pre_fader: send.pre_fader,
+                    knob: ControlBinding::send(mixer, m, s.id, i)?,
+                    level: NumberBinding::send(mixer, m, s.id, i)?,
+                })
+            })
+            .collect()
+    });
+    let group = m.group_of(s).map(|g| GroupTag {
+        id: g.id,
+        name: g.name.clone(),
+        colour: t.swatch(g.colour),
+        link_mute: g.link_mute,
+        link_solo: g.link_solo,
+    });
+    let offset = has_vcas.then(|| OffsetParts {
+        text: MixerModel::vca_offset_text(m.vca_offset_db(s)),
+        mark: (!s.vcas.is_empty()).then(|| m.vca_mark(s)),
+    });
+    Some(StripParts {
+        index,
+        id: s.id,
+        name: s.name.clone(),
+        kind_label: s.kind_label.clone(),
+        instrument: MixerModel::instrument_row(s).map(|r| match r {
+            InstrumentRow::Plugin(x) => InstrumentPart::Plugin(slot(x, SlotPlace::Instrument)),
+            InstrumentRow::BuiltinSynth => InstrumentPart::BuiltinSynth,
+        }),
+        eq: s.eq.as_ref().map(|x| slot(x, SlotPlace::Eq)),
+        inserts: s
+            .inserts
+            .iter()
+            .enumerate()
+            .map(|(i, x)| slot(x, SlotPlace::Insert(i)))
+            .collect(),
+        sends,
+        bar: t.bar(s),
+        cap: t.cap(s.kind_colour),
+        dimmed: s.solo_muted,
+        selected: selected.contains(&s.id),
+        fader,
+        level,
+        pan: if master {
+            None
+        } else {
+            ControlBinding::pan(mixer, m, s.id).zip(NumberBinding::pan(mixer, m, s.id))
+        },
+        mute,
+        solo: if master { None } else { Toggle::solo(m, s.id) },
+        arm: Toggle {
+            letter: "R",
+            on: lane.is_some_and(|l| l.arm),
+            colour: t.state_record,
+            label: format!("Record arm {}", s.name),
+            enabled: armable,
+            touched: false,
+        },
+        monitor: Toggle {
+            letter: "I",
+            on: monitor != MonitorModeRow::Off,
+            colour: if monitor == MonitorModeRow::Input {
+                t.state_warning
+            } else {
+                t.state_play
+            },
+            label: format!("Input monitor {}", s.name),
+            enabled: armable,
+            touched: false,
+        },
+        output,
+        mode: s.automation,
+        meter: m.meters().level_at(s.id, now),
+        group,
+        offset,
+    })
+}
+
+/// VCA `vca` (column `index`), as it shows (Swift `VcaStripCells`).
+fn vca_parts(m: &MixerModel, mixer: &MixerRef, vca: u64, index: usize) -> Option<VcaParts> {
+    let t = tokens();
+    let v = m.vca(vca)?;
+    Some(VcaParts {
+        index,
+        id: v.id,
+        name: v.name.clone(),
+        title: VcaStripLabels::title(&v.name),
+        kind_line: VcaStripLabels::kind_line(v.members.len()),
+        colour: t.swatch(v.colour),
+        fader: ControlBinding::vca(mixer, m, vca)?,
+        level: NumberBinding::vca(mixer, m, vca)?,
+        mute: Toggle {
+            letter: "M",
+            on: v.mute,
+            colour: t.state_mute,
+            label: VcaStripLabels::mute(&v.name),
+            enabled: true,
+            touched: false,
+        },
+        solo: Toggle {
+            letter: "S",
+            on: v.solo,
+            colour: t.state_solo,
+            label: VcaStripLabels::solo(&v.name),
+            enabled: true,
+            touched: false,
+        },
+        mode: v.automation,
+    })
+}
+
+/// External MIDI destination `dest` (column `index`), as its strip shows
+/// (Swift `MidiStripCells` in a mixer placement: no destination menu).
+fn midi_parts(
+    m: &MixerModel,
+    d: &DocumentModel,
+    mixer: &MixerRef,
+    dest: u64,
+    index: usize,
+) -> Option<MidiParts> {
+    let t = tokens();
+    let x = m.destinations().iter().find(|x| x.id == dest)?;
+    let mix = m.midi_mix(dest)?;
+    let lane = m.midi_lane(d, dest);
+    Some(MidiParts {
+        index,
+        id: dest,
+        name: x.name.clone(),
+        kind_label: MidiStripMath::kind_label(x.channel, x.mpe.as_ref()),
+        cap: t.cap(vizdaw_ffi::mixer::StripColourRow::Instrument),
+        pan: ControlBinding::midi(mixer, m, dest, MidiControl::Pan)?,
+        pan_box: NumberBinding::midi_pan(mixer, m, dest)?,
+        pan_set: mix.pan.is_some(),
+        fader: ControlBinding::midi(mixer, m, dest, MidiControl::Volume)?,
+        volume: NumberBinding::midi_volume(mixer, m, dest)?,
+        volume_set: mix.volume.is_some(),
+        mute: Toggle {
+            letter: "M",
+            on: mix.mute,
+            colour: t.state_mute,
+            label: MidiStripLabels::mute(&x.name),
+            enabled: true,
+            touched: false,
+        },
+        arm: Toggle {
+            letter: "R",
+            on: lane.is_some_and(|l| l.arm),
+            colour: t.state_record,
+            label: MidiStripLabels::arm(lane.map_or(x.name.as_str(), |l| l.name.as_str())),
+            enabled: lane.is_some(),
+            touched: false,
+        },
+        lane: lane.map(|l| l.id),
+        activity: m.midi_activity(dest),
+    })
 }
 
 /// Slot `x` at `place`, as its row shows it.
@@ -919,30 +1239,49 @@ pub fn render(
     view.update(cx, |v, cx| {
         v.scroll = g.scroll;
         v.room = g.room;
-        let ids: HashSet<u64> = g.ids.iter().copied().collect();
-        v.boxes.retain(|(id, _), _| ids.contains(id));
+        v.boxes.retain(|(key, _), _| g.keys.contains(key));
         v.drawn = g
             .strips
             .iter()
-            .map(|s| StripLook {
-                strip: s.id,
-                dimmed: s.dimmed,
-                selected: s.selected,
-                meter: s.meter,
+            .filter_map(|c| match c {
+                ColumnParts::Audio(s) => Some(StripLook {
+                    strip: s.id,
+                    dimmed: s.dimmed,
+                    selected: s.selected,
+                    meter: s.meter,
+                }),
+                _ => None,
             })
             .collect();
-        if v.menu.is_some_and(|(id, _)| !g.ids.contains(&id)) {
+        v.midi_drawn = g
+            .strips
+            .iter()
+            .filter_map(|c| match c {
+                ColumnParts::Midi(x) => Some((x.id, x.activity)),
+                _ => None,
+            })
+            .collect();
+        if v.menu
+            .is_some_and(|(id, which)| !g.keys.contains(&which.column(id)))
+        {
             v.menu = None;
             v.submenu = None;
         }
         // The strip of a dragged insert went: the drag ends.
-        if v.insert_drag.is_some_and(|d| !g.ids.contains(&d.strip)) {
+        if v.insert_drag
+            .is_some_and(|d| !g.keys.contains(&ColumnKey::Strip(d.strip)))
+        {
             v.insert_drag = None;
         }
         // The mixer ended the rename (a pane change committed it, the
-        // strip went): the field goes.
+        // strip or VCA went): the field goes.
+        let p = v.mixer.placement;
+        let still = |t: RenameTarget| match t {
+            RenameTarget::Strip(s) => g.renaming == Some((s, p)),
+            RenameTarget::Vca(x) => g.renaming_vca == Some((x, p)),
+        };
         if let Some(r) = &v.rename
-            && g.renaming != Some((r.strip, v.mixer.placement))
+            && !still(r.target)
         {
             let w = weak.clone();
             cx.defer(move |cx| {
@@ -958,19 +1297,23 @@ pub fn render(
         // Every column takes its place in the tree, drawn or not, so a
         // strip's controls keep their IDs as the strips scroll.
         let mut strip_scope = area_scope.container();
-        let Some(s) = parts.next_if(|s| s.index == index) else {
+        let Some(c) = parts.next_if(|c| c.index() == index) else {
             continue;
         };
-        strips.push(strip(
-            view,
-            s,
-            &g.grid,
-            g.divider_before,
-            g.scroll,
-            &mut strip_scope,
-            window,
-            cx,
-        ));
+        let place = Place {
+            grid: &g.grid,
+            divider_before: g.divider_before,
+            scroll: g.scroll,
+        };
+        strips.push(match c {
+            ColumnParts::Audio(s) => strip(view, s, &place, &mut strip_scope, window, cx),
+            ColumnParts::Vca(v) => {
+                crate::vca_strip::vca_strip(view, v, &place, &mut strip_scope, window, cx)
+            }
+            ColumnParts::Midi(x) => {
+                crate::midi_strip::midi_strip(view, x, &place, &mut strip_scope, window, cx)
+            }
+        });
     }
     let t = tokens();
     let divider = g.divider_before.map(|d| {
@@ -1140,7 +1483,7 @@ fn bar(load: &str, mixer: &MixerRef, scope: &mut RegistryScope) -> AnyElement {
 }
 
 /// A part of a strip at (`x`, `y`) inside it, `w` × `h`.
-fn at(x: f64, y: f64, w: f64, h: f64) -> gpui::Div {
+pub(crate) fn at(x: f64, y: f64, w: f64, h: f64) -> gpui::Div {
     div()
         .absolute()
         .left(px(x as f32))
@@ -1149,42 +1492,80 @@ fn at(x: f64, y: f64, w: f64, h: f64) -> gpui::Div {
         .h(px(h as f32))
 }
 
+/// Where the columns go: the shared rows, the divider, the scroll.
+pub(crate) struct Place<'a> {
+    pub(crate) grid: &'a StripGrid,
+    pub(crate) divider_before: Option<usize>,
+    pub(crate) scroll: (f64, f64),
+}
+
+impl Place<'_> {
+    /// Row `k`'s top and height, when a column has it.
+    pub(crate) fn row(&self, k: StripRowKind) -> (Option<f64>, Option<f64>) {
+        (
+            self.grid.tops.get(&k).copied(),
+            self.grid.rows.get(&k).copied(),
+        )
+    }
+
+    /// Column `index`'s panel, in the scrolled area (half dimmed when
+    /// `dimmed`).
+    pub(crate) fn panel(&self, index: usize, dimmed: bool) -> gpui::Div {
+        let t = tokens();
+        let left = PADDING + StripGrid::x(index, self.divider_before) - self.scroll.0;
+        let top = PADDING - self.scroll.1;
+        let mut fill = rgb(t.surface_raised);
+        if dimmed {
+            fill.a = 0.5;
+        }
+        div()
+            .absolute()
+            .left(px(left as f32))
+            .top(px(top as f32))
+            .w(px(StripLayout::WIDTH as f32))
+            .h(px(self.grid.total as f32))
+            .child(
+                div()
+                    .absolute()
+                    .size_full()
+                    .rounded(px(PANEL_RADIUS))
+                    .bg(fill),
+            )
+    }
+}
+
+/// A panel's edge, over every row: the accent when `selected`.
+pub(crate) fn edge(selected: bool) -> gpui::Div {
+    let t = tokens();
+    let (edge, width) = if selected {
+        (t.accent, 2.)
+    } else {
+        (t.surface_separator, 1.)
+    };
+    div()
+        .absolute()
+        .size_full()
+        .rounded(px(PANEL_RADIUS))
+        .border(px(width))
+        .border_color(rgb(edge))
+}
+
 /// One strip, placed in the scrolled area.
-#[allow(clippy::too_many_arguments)]
 fn strip(
     view: &Entity<MixerView>,
     s: StripParts,
-    g: &StripGrid,
-    divider_before: Option<usize>,
-    scroll: (f64, f64),
+    place: &Place<'_>,
     scope: &mut RegistryScope,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let t = tokens();
     let mixer = view.read(cx).mixer.clone();
-    let left = PADDING + StripGrid::x(s.index, divider_before) - scroll.0;
-    let top = PADDING - scroll.1;
+    let g = place.grid;
     let side = StripLayout::SIDE_PADDING;
     let inner = StripLayout::inner();
-    let row = |k: StripRowKind| (g.tops.get(&k).copied(), g.rows.get(&k).copied());
-    let mut panel_fill = rgb(t.surface_raised);
-    if s.dimmed {
-        panel_fill.a = 0.5;
-    }
-    let mut out = div()
-        .absolute()
-        .left(px(left as f32))
-        .top(px(top as f32))
-        .w(px(StripLayout::WIDTH as f32))
-        .h(px(g.total as f32))
-        .child(
-            div()
-                .absolute()
-                .size_full()
-                .rounded(px(PANEL_RADIUS))
-                .bg(panel_fill),
-        );
+    let row = |k: StripRowKind| place.row(k);
+    let mut out = place.panel(s.index, s.dimmed);
     // The header.
     if let (Some(y), Some(h)) = row(StripRowKind::Header) {
         out = out.child(header(view, &s, (side, y, inner, h), scope, window, cx));
@@ -1236,7 +1617,9 @@ fn strip(
     }
     // The pan.
     if let (Some((knob, text)), (Some(y), Some(h))) = (&s.pan, row(StripRowKind::Pan)) {
-        let nb = view.update(cx, |v, cx| v.number_box((s.id, BoxKind::Pan), window, cx));
+        let nb = view.update(cx, |v, cx| {
+            v.number_box((ColumnKey::Strip(s.id), BoxKind::Pan), window, cx)
+        });
         let knob_el = controls::knob(
             knob,
             KnobSize::Medium,
@@ -1276,7 +1659,9 @@ fn strip(
             ),
     );
     // The level.
-    let level_box = view.update(cx, |v, cx| v.number_box((s.id, BoxKind::Level), window, cx));
+    let level_box = view.update(cx, |v, cx| {
+        v.number_box((ColumnKey::Strip(s.id), BoxKind::Level), window, cx)
+    });
     let level_el = controls::number_box(&level_box, s.level.clone(), scope, cx);
     out = out.child(
         at(side, g.level_top, inner, StripLayout::LEVEL_BOX)
@@ -1284,6 +1669,11 @@ fn strip(
             .justify_center()
             .child(level_el),
     );
+    // The VCA offset and mark, while the mixer has a VCA.
+    if let Some(o) = &s.offset {
+        out =
+            out.child(at(side, g.offset_top, inner, g.offset).child(vca_offset(&s.name, o, scope)));
+    }
     // M S R I; master keeps the solo's place blank.
     let strip_id = s.id;
     let mut buttons = at(side, g.buttons_top, inner, StripLayout::TOGGLE_ROW)
@@ -1350,21 +1740,59 @@ fn strip(
         mode = mode.children(popup(view, "mixer-mode-menu", items, scope, window, cx));
     }
     out = out.child(mode);
-    // The edge, over every row.
-    let (edge, width) = if s.selected {
-        (t.accent, 2.)
-    } else {
-        (t.surface_separator, 1.)
-    };
-    out.child(
-        div()
-            .absolute()
-            .size_full()
-            .rounded(px(PANEL_RADIUS))
-            .border(px(width))
-            .border_color(rgb(edge)),
-    )
-    .into_any_element()
+    out.child(edge(s.selected)).into_any_element()
+}
+
+/// A strip's VCA offset row (Swift `StripVcaOffset`): "VCA −3.0" while its
+/// VCAs change what is heard, and the "VCA" mark, lit while a VCA mutes
+/// or solos it.
+fn vca_offset(name: &str, o: &OffsetParts, scope: &mut RegistryScope) -> AnyElement {
+    let t = tokens();
+    let mut row = div()
+        .size_full()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .gap(px(4.))
+        .text_size(px(9.));
+    if let Some(text) = &o.text {
+        row = row.child(
+            div()
+                .relative()
+                .whitespace_nowrap()
+                .text_color(rgb(t.text_secondary))
+                .child(text.clone())
+                .child(scope.control("text", &VcaStripLabels::offset(text), true)),
+        );
+    }
+    if let Some(lit) = o.mark {
+        let (fill, legend) = if lit {
+            (rgb(t.state_mute), t.legend_on(t.state_mute))
+        } else {
+            let mut off = rgb(t.text_secondary);
+            off.a = 0.5;
+            (rgb(t.surface_inset), off)
+        };
+        row = row.child(
+            div()
+                .relative()
+                .px(px(2.))
+                .rounded(px(t.radius))
+                .bg(fill)
+                .font_weight(FontWeight::BOLD)
+                .text_color(legend)
+                .child(VcaStripLabels::MARK_TEXT)
+                .child(scope.control_with(
+                    "text",
+                    &VcaStripLabels::mark(name),
+                    true,
+                    Some(if lit { "on" } else { "off" }),
+                    false,
+                )),
+        );
+    }
+    row.into_any_element()
 }
 
 /// The header: the colour bar, the name (or its rename field) and the
@@ -1383,7 +1811,7 @@ fn header(
         .read(cx)
         .rename
         .as_ref()
-        .filter(|r| r.strip == s.id)
+        .filter(|r| r.target == RenameTarget::Strip(s.id))
         .map(|r| r.field.clone());
     let name: AnyElement = match field {
         Some(field) => {
@@ -1445,6 +1873,10 @@ fn header(
         name_holder =
             name_holder.children(popup(view, "mixer-strip-menu", items, scope, window, cx));
     }
+    let tag = s
+        .group
+        .as_ref()
+        .map(|g| group_tag(view, s.id, g, w, scope, window, cx));
     at(x, y, w, h)
         .child(
             at(0., 0., w, StripLayout::COLOUR_BAR)
@@ -1452,6 +1884,7 @@ fn header(
                 .bg(s.bar),
         )
         .child(name_holder)
+        .children(tag)
         .child(
             at(0., KIND_TOP, w, KIND_HEIGHT)
                 .relative()
@@ -1467,6 +1900,65 @@ fn header(
                 .child(scope.control("text", &s.kind_label, true)),
         )
         .into_any_element()
+}
+
+/// A grouped strip's group tag under its kind (Swift `StripGroupTag`):
+/// the group's colour and name, `menu` "Group <name>"; its menu holds Link
+/// Mutes and Link Solos (checked while on), Remove from Group (this
+/// strip) and Ungroup.
+fn group_tag(
+    view: &Entity<MixerView>,
+    strip: u64,
+    g: &GroupTag,
+    w: f64,
+    scope: &mut RegistryScope,
+    window: &Window,
+    cx: &App,
+) -> AnyElement {
+    let label = VcaStripLabels::group(&g.name);
+    let opening = view.downgrade();
+    let face = controls::menu_face(
+        &label,
+        &g.name,
+        Some(g.colour),
+        true,
+        scope,
+        move |_, cx| {
+            opening
+                .update(cx, |v, cx| v.toggle_menu(strip, StripMenu::GroupTag, cx))
+                .ok();
+        },
+    );
+    let top = RowHeights::HEADER + RowHeights::PART_GAP;
+    let mut holder = at(0., top, w, RowHeights::GROUP_TAG)
+        .id(gpui::ElementId::Name(
+            format!("mixer-group-tag:{strip}").into(),
+        ))
+        .child(face);
+    if view.read(cx).menu == Some((strip, StripMenu::GroupTag)) {
+        let mixer = view.read(cx).mixer.clone();
+        let (group, mute, solo) = (g.id, g.link_mute, g.link_solo);
+        let (a, b, c, e) = (mixer.clone(), mixer.clone(), mixer.clone(), mixer);
+        let items = vec![
+            MenuEntry::item(GroupLabels::LINK_MUTES, move |_, cx| {
+                a.with(cx, |m, d| m.set_group_links(d, group, Some(!mute), None));
+            })
+            .checked(mute),
+            MenuEntry::item(GroupLabels::LINK_SOLOS, move |_, cx| {
+                b.with(cx, |m, d| m.set_group_links(d, group, None, Some(!solo)));
+            })
+            .checked(solo),
+            MenuEntry::Separator,
+            MenuEntry::item(GroupLabels::REMOVE, move |_, cx| {
+                c.with(cx, |m, d| m.remove_from_group(d, group, &[strip]));
+            }),
+            MenuEntry::item(GroupLabels::UNGROUP, move |_, cx| {
+                e.with(cx, |m, d| m.delete_group(d, group));
+            }),
+        ];
+        holder = holder.children(popup(view, "mixer-group-menu", items, scope, window, cx));
+    }
+    holder.into_any_element()
 }
 
 /// A strip section's small heading (Swift `StripHeading`; not in the
@@ -1816,7 +2308,7 @@ fn sends_row(
             .child(name)
             .children(chip);
         let nb = view.update(cx, |v, cx| {
-            v.number_box((strip, BoxKind::Send(i)), window, cx)
+            v.number_box((ColumnKey::Strip(strip), BoxKind::Send(i)), window, cx)
         });
         let knob = controls::knob(
             &send.knob,
@@ -1915,10 +2407,10 @@ fn sends_row(
 }
 
 /// What a menu item does when picked (the menu has closed).
-type Pick = Box<dyn Fn(&mut Window, &mut App)>;
+pub(crate) type Pick = Box<dyn Fn(&mut Window, &mut App)>;
 
 /// One row of a strip menu.
-enum MenuEntry {
+pub(crate) enum MenuEntry {
     Item {
         title: String,
         /// The current one (checked).
@@ -1938,7 +2430,10 @@ enum MenuEntry {
 }
 
 impl MenuEntry {
-    fn item(title: impl Into<String>, pick: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+    pub(crate) fn item(
+        title: impl Into<String>,
+        pick: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> Self {
         MenuEntry::Item {
             title: title.into(),
             checked: false,
@@ -1961,7 +2456,7 @@ impl MenuEntry {
         }
     }
 
-    fn checked(mut self, on: bool) -> Self {
+    pub(crate) fn checked(mut self, on: bool) -> Self {
         if let MenuEntry::Item { checked, .. } = &mut self {
             *checked = on;
         }
@@ -2195,7 +2690,7 @@ fn add_send_entries(mixer: &MixerRef, m: &MixerModel, strip: u64) -> Vec<MenuEnt
 
 /// A strip menu open under its face: a backdrop that closes it, and the
 /// list of `items`, recorded as menu items (an open submenu's after them).
-fn popup(
+pub(crate) fn popup(
     view: &Entity<MixerView>,
     id: &'static str,
     items: Vec<MenuEntry>,

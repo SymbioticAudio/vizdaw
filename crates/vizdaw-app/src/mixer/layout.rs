@@ -37,6 +37,9 @@ impl StripLayout {
     pub const TOGGLE_ROW: f64 = 24.;
     /// The automation mode menu.
     pub const MODE_MENU: f64 = 24.;
+    /// The VCA offset row under the level box, in every strip while the
+    /// mixer has a VCA.
+    pub const VCA_OFFSET: f64 = 16.;
     /// The gap between the strip's sections.
     pub const GAP: f64 = 6.;
     /// The padding above and below.
@@ -106,6 +109,8 @@ pub struct RowHeights;
 impl RowHeights {
     /// The colour bar (4), the name (16), the kind (14), two 2-point gaps.
     pub const HEADER: f64 = 38.;
+    /// A grouped strip's group tag under its kind (a 24-point menu face).
+    pub const GROUP_TAG: f64 = 24.;
     /// One slot row (the instrument's, an insert's).
     pub const SLOT: f64 = 20.;
     /// The EQ slot: its "EQ \u{FF0B}" face, or the loaded EQ beside its
@@ -136,6 +141,16 @@ impl RowHeights {
     /// The medium pan knob's hit size.
     pub const PAN: f64 = 38.;
 
+    /// The header: a grouped strip's has the group tag, 2 points under
+    /// the kind.
+    pub fn header(grouped: bool) -> f64 {
+        if grouped {
+            Self::HEADER + Self::PART_GAP + Self::GROUP_TAG
+        } else {
+            Self::HEADER
+        }
+    }
+
     /// The inserts with `n` slots: the heading, the slots and the "+",
     /// two points apart.
     pub fn inserts(n: usize) -> f64 {
@@ -153,7 +168,7 @@ impl RowHeights {
 /// The MIDI FX section is not drawn in this slice and takes no row.
 pub fn rows_of(s: &StripRow, input: bool) -> BTreeMap<StripRowKind, f64> {
     let mut rows = BTreeMap::from([
-        (StripRowKind::Header, RowHeights::HEADER),
+        (StripRowKind::Header, RowHeights::header(s.group.is_some())),
         (StripRowKind::Eq, RowHeights::EQ),
         (StripRowKind::Inserts, RowHeights::inserts(s.inserts.len())),
     ]);
@@ -171,6 +186,21 @@ pub fn rows_of(s: &StripRow, input: bool) -> BTreeMap<StripRowKind, f64> {
     rows
 }
 
+/// A VCA column's rows (Swift `VcaStripCells`): only the header (its
+/// colour bar, name and members line); the rest stay empty.
+pub fn vca_rows() -> BTreeMap<StripRowKind, f64> {
+    BTreeMap::from([(StripRowKind::Header, RowHeights::HEADER)])
+}
+
+/// An external MIDI destination's strip's rows (Swift `MidiStripCells`):
+/// the header and the pan (its MIDI FX section waits for its slice).
+pub fn midi_rows() -> BTreeMap<StripRowKind, f64> {
+    BTreeMap::from([
+        (StripRowKind::Header, RowHeights::HEADER),
+        (StripRowKind::Pan, RowHeights::PAN),
+    ])
+}
+
 /// Where the shared rows and the parts below the fader go, for strips in
 /// a placement `height` tall.
 #[derive(Debug, Clone, PartialEq)]
@@ -184,6 +214,10 @@ pub struct StripGrid {
     pub total: f64,
     pub fader_top: f64,
     pub level_top: f64,
+    /// The VCA offset row's height: [`StripLayout::VCA_OFFSET`] while the
+    /// mixer has a VCA, else 0. It sits under the level box.
+    pub offset: f64,
+    pub offset_top: f64,
     pub buttons_top: f64,
     pub mode_top: f64,
 }
@@ -224,6 +258,17 @@ impl StripGrid {
         strips: impl IntoIterator<Item = &'a BTreeMap<StripRowKind, f64>>,
         height: f64,
     ) -> StripGrid {
+        Self::with_offset(strips, height, false)
+    }
+
+    /// The grid, with the VCA offset row under every level box when
+    /// `offset` (the mixer has a VCA; Swift `StripGrid.place`).
+    pub fn with_offset<'a>(
+        strips: impl IntoIterator<Item = &'a BTreeMap<StripRowKind, f64>>,
+        height: f64,
+        offset: bool,
+    ) -> StripGrid {
+        let offset = if offset { StripLayout::VCA_OFFSET } else { 0. };
         let rows = Self::row_heights(strips);
         let mut tops = BTreeMap::new();
         let mut y = StripLayout::PADDING;
@@ -232,11 +277,12 @@ impl StripGrid {
             y += h + Self::ROW_GAP;
         }
         let up = Self::upper(&rows);
-        let throw = StripLayout::split(height, up).throw;
-        let total = StripLayout::content_height(up, throw);
+        let throw = StripLayout::split(height, up + offset).throw;
+        let total = StripLayout::content_height(up + offset, throw);
         let fader_top = StripLayout::PADDING + up + StripLayout::GAP;
         let level_top = fader_top + throw + StripLayout::FADER_CAP + StripLayout::GAP;
-        let buttons_top = level_top + StripLayout::LEVEL_BOX + StripLayout::GAP;
+        let offset_top = level_top + StripLayout::LEVEL_BOX;
+        let buttons_top = offset_top + offset + StripLayout::GAP;
         let mode_top = buttons_top + StripLayout::TOGGLE_ROW + StripLayout::GAP;
         StripGrid {
             rows,
@@ -245,6 +291,8 @@ impl StripGrid {
             total,
             fader_top,
             level_top,
+            offset,
+            offset_top,
             buttons_top,
             mode_top,
         }

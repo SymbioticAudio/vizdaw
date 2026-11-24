@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use support::strip_row;
 use vizdaw_app::mixer::layout::{
-    RowHeights, StripGrid, StripLayout, StripRowKind as K, StripSplit, rows_of,
+    RowHeights, StripGrid, StripLayout, StripRowKind as K, StripSplit, midi_rows, rows_of, vca_rows,
 };
 use vizdaw_ffi::mixer::StripKindRow;
 
@@ -176,4 +176,45 @@ fn inserts_and_sends_grow_with_their_count() {
     let g = StripGrid::new([&rows, &rows_of(&synth, false)], 700.);
     assert_eq!(g.rows[&K::Inserts], rows[&K::Inserts]);
     assert_eq!(g.rows[&K::Sends], rows[&K::Sends]);
+}
+
+/// Slice 6b Task 5: a grouped strip's header holds its group tag; the
+/// VCA and MIDI columns take only their own rows; while the mixer has a
+/// VCA, every strip has the 16-point offset row under its level box and
+/// the strip still fits its height exactly (Swift `StripGrid.place`).
+#[test]
+fn group_tags_vca_offsets_and_columns_keep_the_strip_fitting() {
+    let mut kick = strip_row(2, "Kick", StripKindRow::AudioPath { path: 1 });
+    assert_eq!(rows_of(&kick, false)[&K::Header], RowHeights::HEADER);
+    kick.group = Some(1);
+    assert_eq!(
+        rows_of(&kick, false)[&K::Header],
+        RowHeights::HEADER + 2.0 + 24.0
+    );
+    assert_eq!(vca_rows().keys().copied().collect::<Vec<_>>(), [K::Header]);
+    assert_eq!(
+        midi_rows().keys().copied().collect::<Vec<_>>(),
+        [K::Header, K::Pan]
+    );
+    let rows = [rows_of(&kick, false), vca_rows(), midi_rows()];
+    let plain = StripGrid::new(&rows, 800.);
+    assert_eq!(plain.offset, 0.0);
+    assert_eq!(
+        plain.buttons_top,
+        plain.level_top + StripLayout::LEVEL_BOX + StripLayout::GAP
+    );
+    let g = StripGrid::with_offset(&rows, 800., true);
+    assert_eq!(g.offset, StripLayout::VCA_OFFSET);
+    assert_eq!(g.offset_top, g.level_top + StripLayout::LEVEL_BOX);
+    assert_eq!(
+        g.buttons_top,
+        g.offset_top + StripLayout::VCA_OFFSET + StripLayout::GAP
+    );
+    // The throw gives the row its room: the strip is still 800 tall.
+    assert_eq!(g.total, 800.0);
+    assert_eq!(g.throw, plain.throw - StripLayout::VCA_OFFSET);
+    assert_eq!(
+        g.mode_top + StripLayout::MODE_MENU + StripLayout::PADDING,
+        g.total
+    );
 }
