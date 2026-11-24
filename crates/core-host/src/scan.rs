@@ -346,14 +346,6 @@ pub fn discover_clap() -> Vec<Source> {
         .collect()
 }
 
-/// Every VST3 bundle in the standard folders, as sources.
-pub fn discover_vst3() -> Vec<Source> {
-    crate::vst3::find_bundles(&crate::vst3::search_paths())
-        .iter()
-        .map(|p| Source::vst3_bundle(p))
-        .collect()
-}
-
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

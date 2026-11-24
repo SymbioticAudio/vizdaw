@@ -27,7 +27,8 @@ mod vst3_module;
 pub use bundle::{bundle, copy_bundle, copy_vst3_bundle, scanner, vst3_bundle};
 pub use editor::{BASE_SIZE, MAX_SIZE, MIN_SIZE};
 pub use vst3_module::{
-    VST3_CONTROLLER_ID, VST3_CRASHER_ID, VST3_GAIN_ID, VST3_HANGER_ID, VST3_SYNTH_ID,
+    VST3_CONTROLLER_ID, VST3_CRASHER_ID, VST3_GAIN_ID, VST3_HANGER_ID, VST3_SYNTH_ID, Vst3Counters,
+    Vst3Mode, Vst3Probe,
 };
 
 use clack_plugin::entry::prelude::*;

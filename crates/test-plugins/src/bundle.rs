@@ -210,8 +210,21 @@ pub fn vst3_bundle() -> PathBuf {
 }
 
 /// Copies the VST3 test bundle to `to` (test helper; panics on I/O errors).
+/// On Linux a bundle's binary is named after the bundle folder, so the
+/// copy's `.so` is renamed to `to`'s stem (macOS names it in `Info.plist`).
 pub fn copy_vst3_bundle(to: &Path) {
     copy_tree(&vst3_bundle(), to);
+    if cfg!(target_os = "macos") {
+        return;
+    }
+    let dir = to
+        .join("Contents")
+        .join(format!("{}-linux", std::env::consts::ARCH));
+    let stem = to.file_stem().unwrap().to_string_lossy().into_owned();
+    let new = dir.join(format!("{stem}.so"));
+    if !new.exists() {
+        std::fs::rename(dir.join("VizDAW Test.so"), new).unwrap();
+    }
 }
 
 /// The `vizdaw-scan` binary, built once per test process into the same

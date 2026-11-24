@@ -5785,6 +5785,7 @@ dependencies = [
  "clack-extensions",
  "clack-host",
  "clack-plugin",
+ "libloading",
  "vst3",
  "x11rb",
 ]
