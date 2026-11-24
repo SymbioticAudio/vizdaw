@@ -371,13 +371,6 @@ pub(super) struct Reads {
     pub(super) midi_generation: HashMap<DocId, u64>,
 }
 
-impl crate::DocumentModel {
-    /// The MIDI file the import sheet reads, once read (slice 7c).
-    pub fn midi_read(&self) -> Option<&MidiRead> {
-        self.midi_read.as_ref()
-    }
-}
-
 /// A store alert as a control failure ("<title>: <message>").
 fn alert_failure(a: &AlertItem) -> ControlError {
     ControlError::new(ErrorCode::Failed, format!("{}: {}", a.title, a.message))
@@ -742,6 +735,23 @@ impl DocumentStore {
         })
     }
 
+    /// The Import MIDI File sheet's Import with "A new project" chosen
+    /// (Swift `importAsNewProject`): document `doc`'s sheet goes and a new
+    /// [`MIDI_PROJECT_RATE`] project imports its file with its choices,
+    /// every channel on a new built-in synth. As an open's: a refusal
+    /// leaves nothing behind and alerts "Import Failed"; a job that then
+    /// fails or is cancelled takes the untouched project with it. The new
+    /// project's ID, for its window.
+    pub fn import_midi_as_new_project(&mut self, doc: DocId) -> Option<DocId> {
+        let d = self.documents.get_mut(&doc)?;
+        let sheet = d.midi_import()?.clone();
+        d.hide_midi_import();
+        self.import_for_open(MIDI_PROJECT_RATE, |d| {
+            FileJob::ImportMidi(sheet.new_project_request(d.selected_seq().unwrap_or(0)))
+        })
+        .ok()
+    }
+
     /// Makes a project at `rate` for a file the UI opened and starts
     /// `job` there, listed on the document. A refusal to start closes it
     /// and alerts "Import Failed"; a job that then fails or is cancelled
@@ -963,7 +973,7 @@ impl DocumentStore {
                 };
                 match r {
                     Err(e) => self.post_alert(AlertItem::from_error(&e, IMPORT_FAILED)),
-                    Ok(info) => d.midi_read = Some(MidiRead { path, info }),
+                    Ok(info) => d.midi_read_landed(MidiRead { path, info }),
                 }
             }
             _ => {}

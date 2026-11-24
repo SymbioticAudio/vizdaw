@@ -443,14 +443,17 @@ pub(crate) fn button_face(i: usize, b: &SheetButton) -> Stateful<Div> {
             colors::DISABLED
         }))
         .when(b.enabled, |d| d.cursor_pointer())
-        .when_some(b.help.clone(), |d, help| {
-            let help = SharedString::from(help);
-            d.tooltip(move |_, cx| {
-                let help = help.clone();
-                cx.new(|_| HelpTip(help)).into()
-            })
-        })
+        .when_some(b.help.clone(), with_help)
         .child(b.label.clone())
+}
+
+/// `d` with `help` as its tooltip (Swift `.help`).
+pub(crate) fn with_help(d: Stateful<Div>, help: impl Into<SharedString>) -> Stateful<Div> {
+    let help = help.into();
+    d.tooltip(move |_, cx| {
+        let help = help.clone();
+        cx.new(|_| HelpTip(help)).into()
+    })
 }
 
 /// A button's help, shown while the pointer rests on it.

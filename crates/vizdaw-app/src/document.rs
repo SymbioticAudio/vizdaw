@@ -87,8 +87,8 @@ pub struct DocumentModel {
     /// That import failed (its message) or was cancelled (`None`); the
     /// store closes the project or shows the alert.
     pub(crate) opened_file_end: Option<Option<String>>,
-    /// The MIDI file the import sheet reads (slice 7c shows it).
-    pub(crate) midi_read: Option<crate::store::MidiRead>,
+    /// The Import MIDI File sheet, once its read landed (slice 7c).
+    pub(crate) midi_import: Option<crate::interchange::MidiImport>,
     /// The Recovered Recordings offer.
     recovery: recovery::RecoveryOffer,
     /// The Relink sheet's offer.
@@ -98,6 +98,8 @@ pub struct DocumentModel {
     /// The report of the last import or export this document's UI ran
     /// (Swift `InterchangeModel.report`).
     pub(crate) last_report: Option<vizdaw_ffi::ReportRow>,
+    /// That report waits to be shown (Swift `reportShown`).
+    pub(crate) report_shown: bool,
     /// A DAWproject merge is held, waiting to be confirmed (Swift
     /// `DocumentModel.mergeHeld`; the merge sheet sets it, slice 7c).
     pub(crate) merge_held: bool,
@@ -210,11 +212,12 @@ impl DocumentModel {
             disk_warning_dismissed: Arc::new(AtomicBool::new(false)),
             opened_file: false,
             opened_file_end: None,
-            midi_read: None,
+            midi_import: None,
             recovery: recovery::RecoveryOffer::default(),
             relink: crate::relink::RelinkOffer::default(),
             bounce: crate::bounce::Bounce::default(),
             last_report: None,
+            report_shown: false,
             merge_held: false,
             media_rows: Mutex::new(None),
             copies_read: Mutex::new(None),

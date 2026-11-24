@@ -11,6 +11,7 @@ pub mod commands;
 pub mod document;
 pub mod editor;
 pub mod formats;
+pub mod interchange;
 pub mod interchange_commands;
 pub mod jobs;
 pub mod list;

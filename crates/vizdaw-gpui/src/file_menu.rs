@@ -14,9 +14,10 @@
 //!   document at Swift's import target (one file: the selected track of
 //!   the shown sequence, else new tracks; at the transport's tick).
 //! - Project Settings…: its sheet ([`crate::sheets::project_settings`]).
-//! - Import MIDI File…: its panel, then the import sheet's read of the
-//!   file (Swift `beginImport`; a file that cannot be read is the alert
-//!   "Import Failed"; the sheet itself is slice 7c's).
+//! - Import MIDI File…: its panel, then the read of the file off the UI
+//!   thread (Swift `beginImport`; a file that cannot be read is the alert
+//!   "Import Failed"), then the Import MIDI File sheet
+//!   ([`crate::sheets::import_midi`]).
 //! - Relink Media…: the Relink sheet ([`crate::sheets::relink`]).
 //! - Bounce…: the Bounce sheet ([`crate::sheets::bounce`]).
 //! - Open Co-Producer Copy…: panel #2 in the project's copies folder, then

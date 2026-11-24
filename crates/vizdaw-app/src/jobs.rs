@@ -481,13 +481,14 @@ impl DocumentModel {
                     if !r.problems.is_empty() {
                         self.job_problems = r.problems.clone();
                     }
-                    // An import or export the UI started keeps its report
-                    // (Swift `InterchangeModel.jobEnded`; its sheet is
-                    // slice 7c's).
+                    // An import or export the UI started keeps its report,
+                    // to be shown (Swift `InterchangeModel.jobEnded`; the
+                    // report sheet shows it while `report_shown`).
                     if REPORTING.contains(&r.kind)
                         && let Some(report) = &r.report
                     {
                         self.last_report = Some(report.clone());
+                        self.report_shown = true;
                     }
                     // The file is in: the project stays whatever happens next.
                     if opens {
