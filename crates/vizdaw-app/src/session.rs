@@ -35,6 +35,8 @@ pub struct IdleNews {
     /// Slots finished loading, failed, restarted or came back: the mixer
     /// is read again.
     pub slots_changed: bool,
+    /// The media rows changed (a job finished, media went offline).
+    pub media_changed: bool,
 }
 
 /// What the app logic needs from a core session. The real `Session`
@@ -335,6 +337,7 @@ impl DocSession for Session {
         Session::idle(self).map(|u| IdleNews {
             snapshot: u.snapshot,
             slots_changed: u.slots_changed,
+            media_changed: u.media_changed,
         })
     }
     fn lanes(&self, seq: u64) -> Result<Vec<LaneRow>, VizError> {

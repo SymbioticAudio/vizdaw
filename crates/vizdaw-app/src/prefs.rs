@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
+use vizdaw_ffi::{BitDepthRow, ProjectFormatRow};
 
 use crate::list::{ListColumns, ListFilter, ListPrefs};
 use crate::transport_bar::{TransportItem, TransportLayout};
@@ -13,6 +14,9 @@ use crate::transport_bar::{TransportItem, TransportLayout};
 pub const TRANSPORT_BAR_KEY: &str = "transportBar";
 /// The list editors' default filter and columns (Swift "VizDAW.list").
 pub const LIST_KEY: &str = "list";
+/// The format File › New makes (Swift "defaultProjectFormat",
+/// `<rate>/<16|24|32f>`).
+pub const DEFAULT_FORMAT_KEY: &str = "defaultProjectFormat";
 /// The stored value of the default bar: it follows the default when a
 /// later version changes it.
 const STANDARD: &str = "standard";
@@ -149,6 +153,45 @@ impl Prefs {
         self.set_list(&p)
     }
 
+    /// The default project format; a missing or damaged value is 48 kHz,
+    /// 24-bit.
+    pub fn default_format(&self) -> ProjectFormatRow {
+        self.map
+            .get(DEFAULT_FORMAT_KEY)
+            .and_then(Value::as_str)
+            .and_then(parse_format)
+            .unwrap_or(ProjectFormatRow {
+                sample_rate: 48_000,
+                depth: BitDepthRow::Int24,
+            })
+    }
+
+    /// Writes the default project format; on a failure nothing changes.
+    pub fn set_default_format(&mut self, f: ProjectFormatRow) -> Result<(), String> {
+        let depth = match f.depth {
+            BitDepthRow::Int16 => "16",
+            BitDepthRow::Int24 => "24",
+            BitDepthRow::Float32 => "32f",
+        };
+        self.set_raw(
+            DEFAULT_FORMAT_KEY,
+            Value::String(format!("{}/{depth}", f.sample_rate)),
+        )
+    }
+
+    /// Sets `key` and writes; on a failure the old value stays.
+    pub fn set_raw(&mut self, key: &str, value: Value) -> Result<(), String> {
+        let old = self.map.insert(key.into(), value);
+        if let Err(e) = self.save() {
+            match old {
+                Some(o) => self.map.insert(key.into(), o),
+                None => self.map.remove(key),
+            };
+            return Err(e);
+        }
+        Ok(())
+    }
+
     fn save(&self) -> Result<(), String> {
         let Some(path) = &self.path else {
             return Ok(());
@@ -162,6 +205,22 @@ impl Prefs {
         std::fs::write(&tmp, text).map_err(fail)?;
         std::fs::rename(&tmp, path).map_err(fail)
     }
+}
+
+/// `<rate>/<16|24|32f>` with a project rate.
+fn parse_format(s: &str) -> Option<ProjectFormatRow> {
+    let (rate, depth) = s.split_once('/')?;
+    let sample_rate: u32 = rate.parse().ok()?;
+    if !vizdaw_ffi::project_rates().contains(&sample_rate) {
+        return None;
+    }
+    let depth = match depth {
+        "16" => BitDepthRow::Int16,
+        "24" => BitDepthRow::Int24,
+        "32f" => BitDepthRow::Float32,
+        _ => return None,
+    };
+    Some(ProjectFormatRow { sample_rate, depth })
 }
 
 fn decode(v: &Value) -> Option<TransportLayout> {

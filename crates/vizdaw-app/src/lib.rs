@@ -4,9 +4,11 @@
 pub mod alerts;
 pub mod arrangement;
 pub mod audition;
+pub mod banners;
 pub mod commands;
 pub mod document;
 pub mod editor;
+pub mod jobs;
 pub mod list;
 pub mod mixer;
 pub mod piano_roll;
@@ -22,7 +24,9 @@ pub mod transport_fields;
 pub mod view;
 
 pub use alerts::AlertItem;
+pub use banners::{BannerAction, ProjectBanner};
 pub use document::{DocumentModel, SaveAction};
+pub use jobs::JobAnswer;
 pub use prefs::Prefs;
 pub use session::{CoreCalls, DocSession, LiveCore};
 pub use store::{DocId, DocumentStore, WindowToken};

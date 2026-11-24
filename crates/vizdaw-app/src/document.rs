@@ -6,6 +6,7 @@ mod editing;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use vizdaw_ffi::VizError;
@@ -64,6 +65,16 @@ pub struct DocumentModel {
     pub(crate) list_focused: bool,
     /// The mixer, made when first asked, and its strip selection.
     pub(crate) mixer: crate::mixer::DocMixer,
+    /// The jobs this document's UI started, as last read (slice 7a).
+    pub(crate) jobs: Vec<vizdaw_ffi::JobRow>,
+    /// A finished job's problems (the Problems banner).
+    pub(crate) job_problems: Vec<String>,
+    /// The project format and mismatches, as last read.
+    pub(crate) project_info: Option<vizdaw_ffi::ProjectInfoRow>,
+    pub(crate) media_version: u64,
+    /// Disk too slow was dismissed; a transport read without an underrun
+    /// clears it (the transport model shares it).
+    pub(crate) disk_warning_dismissed: Arc<AtomicBool>,
 }
 
 /// What the arrangement reads of one track, read when first asked for.
@@ -161,7 +172,13 @@ impl DocumentModel {
             list_prefs: crate::list::ListPrefs::default(),
             list_focused: false,
             mixer: crate::mixer::DocMixer::default(),
+            jobs: vec![],
+            job_problems: vec![],
+            project_info: None,
+            media_version: 0,
+            disk_warning_dismissed: Arc::new(AtomicBool::new(false)),
         };
+        model.refresh_project_info();
         model.reset_infos();
         model.refresh_lanes();
         Ok(model)
@@ -234,6 +251,26 @@ impl DocumentModel {
                 self.apply(s);
                 arrived = true;
             }
+            if news.media_changed {
+                self.media_version += 1;
+                self.refresh_project_info();
+                arrived = true;
+            }
+        }
+        // The device rate moved (the transport says so first): the
+        // banner reads the project info again.
+        let mismatch = self.last_transport().rate_mismatch;
+        if self
+            .project_info
+            .as_ref()
+            .is_some_and(|i| i.rate_mismatch != mismatch)
+        {
+            self.refresh_project_info();
+            arrived = true;
+        }
+        if !self.jobs.is_empty() {
+            self.poll_jobs();
+            arrived = true;
         }
         pending || arrived
     }
@@ -509,10 +546,15 @@ impl DocumentModel {
         self.transport.clone()
     }
 
+    pub(crate) fn shared_disk_warning(&self) -> Arc<AtomicBool> {
+        self.disk_warning_dismissed.clone()
+    }
+
     /// Reads the transport. A read that fails (Busy included) leaves the
     /// last good one in place, and is returned for the caller to judge.
     pub fn poll_transport(&self) -> Result<TransportState, VizError> {
         let t = self.session.transport()?;
+        crate::banners::note_transport(&self.disk_warning_dismissed, &t);
         *self.transport.lock().unwrap() = t.clone();
         Ok(t)
     }

@@ -57,6 +57,9 @@ pub struct TransportModel {
     state: TransportState,
     /// The document's last good read, which every poll feeds.
     shared: Arc<Mutex<TransportState>>,
+    /// The document's Disk too slow dismissal, cleared by a read with no
+    /// underrun.
+    disk_warning_dismissed: Arc<std::sync::atomic::AtomicBool>,
     /// Shared with the document, whose commands start playing too.
     play_start: Arc<Mutex<Option<i64>>>,
     clock: Clock,
@@ -76,6 +79,7 @@ impl TransportModel {
             session: doc.session().clone(),
             state,
             shared: doc.shared_transport(),
+            disk_warning_dismissed: doc.shared_disk_warning(),
             play_start: doc.shared_play_start(),
             clock: Clock::new(),
         })
@@ -161,6 +165,7 @@ impl TransportModel {
             Ok(t) => {
                 self.clock
                     .sample(t.tick, t.playing, t.seq, t.ticks_per_second, Instant::now());
+                crate::banners::note_transport(&self.disk_warning_dismissed, &t);
                 *self.shared.lock().unwrap() = t.clone();
                 self.state = t;
                 PollResult::Updated

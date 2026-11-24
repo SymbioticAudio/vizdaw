@@ -114,6 +114,7 @@ struct State {
     channel_touches: u32,
     /// What the next `idle()` says of the slots (once).
     idle_slots_changed: bool,
+    idle_media_changed: bool,
     /// The slots safe mode holds off.
     held: Vec<u64>,
     /// Every `load_plugins(slots)`.
@@ -440,6 +441,7 @@ impl FakeSession {
             holders: vec![],
             channel_touches: 0,
             idle_slots_changed: false,
+            idle_media_changed: false,
             held: vec![],
             loaded: vec![],
             midi_previews: vec![],
@@ -518,6 +520,11 @@ impl FakeSession {
     /// Makes the next `idle()` say the slots changed (once).
     pub fn set_idle_slots_changed(&self) {
         self.st().idle_slots_changed = true;
+    }
+
+    /// The next `idle` says the media rows changed.
+    pub fn set_idle_media_changed(&self) {
+        self.st().idle_media_changed = true;
     }
 
     /// Makes the session hold exactly `s` as its selection.
@@ -1349,6 +1356,7 @@ impl DocSession for FakeSession {
         Ok(IdleNews {
             snapshot: n,
             slots_changed: std::mem::take(&mut s.idle_slots_changed),
+            media_changed: std::mem::take(&mut s.idle_media_changed),
         })
     }
     fn lanes(&self, seq: u64) -> Result<Vec<LaneRow>, VizError> {
