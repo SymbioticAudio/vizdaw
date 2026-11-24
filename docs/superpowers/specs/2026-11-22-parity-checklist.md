@@ -23,25 +23,25 @@ item (false: keys, the Keys settings and the control channel only).
 | file.new | File | New | ⌘N | true | S1 | S1 |
 | file.open | File | Open… | ⌘O | true | S1 | S1 |
 | file.create_demo | File | Create Demo Project |  | true | S1 | S1 |
-| file.create_demo_audio | File | Create Demo Project with Audio |  | true | | |
-| media.import | File | Import Audio… | ⇧⌘I | true | | |
+| file.create_demo_audio | File | Create Demo Project with Audio |  | true | S7 | S7 |
+| media.import | File | Import Audio… | ⇧⌘I | true | S7 | S7 |
 | file.close | File | Close | ⌘W | true | S1 | S1 |
 | file.save | File | Save | ⌘S | true | S1 | S1 |
 | file.save_as | File | Save As… | ⇧⌘S | true | S1 | S1 |
-| file.project_settings | File | Project Settings… |  | true | | |
-| file.bounce | File | Bounce… |  | true | | |
-| file.import_midi | File | Import MIDI File… |  | true | | |
-| file.export_midi | File | MIDI File… |  | true | | |
-| file.export_midi_clip | File | MIDI Clip File… |  | true | | |
-| file.export_for_daw | File | For Another DAW… |  | true | | |
-| file.import_dawproject | File | DAWproject… |  | true | | |
-| file.export_dawproject | File | DAWproject… |  | true | | |
-| file.import_aaf | File | AAF… |  | true | | |
-| file.export_aaf | File | AAF… |  | true | | |
-| file.interchange_report | File | Last Import or Export Report… |  | true | | |
-| media.convert | File | Convert Media to Project Format |  | false | | |
-| media.relink | File | Relink Media… |  | true | | |
-| file.open_copy | File | Open Co-Producer Copy… |  | true | | |
+| file.project_settings | File | Project Settings… |  | true | S7 | S7 |
+| file.bounce | File | Bounce… |  | true | S7 | S7 |
+| file.import_midi | File | Import MIDI File… |  | true | S7 | S7 |
+| file.export_midi | File | MIDI File… |  | true | S7 | S7 |
+| file.export_midi_clip | File | MIDI Clip File… |  | true | S7 | S7 |
+| file.export_for_daw | File | For Another DAW… |  | true | S7 | S7 |
+| file.import_dawproject | File | DAWproject… |  | true | S7 | S7 |
+| file.export_dawproject | File | DAWproject… |  | true | S7 | S7 |
+| file.import_aaf | File | AAF… |  | true | S7 | S7 |
+| file.export_aaf | File | AAF… |  | true | S7 | S7 |
+| file.interchange_report | File | Last Import or Export Report… |  | true | S7 | S7 |
+| media.convert | File | Convert Media to Project Format |  | false | S7 | S7 |
+| media.relink | File | Relink Media… |  | true | S7 | S7 |
+| file.open_copy | File | Open Co-Producer Copy… |  | true | S7 | S7 |
 
 ### Edit
 
@@ -457,26 +457,26 @@ is one site used by four callers.
 
 | Panel | Prompt | Mac | Linux |
 |---|---|---|---|
-| Open (project, MIDI, DAWproject or AAF): `chooseProject` | Open | | |
-| Open Co-Producer copy: `chooseCoProducerCopy` | Open Copy | | |
-| Import MIDI file: `chooseMidi` | Import | | |
-| Save location: `chooseSaveLocation` | Save | | |
-| Relink audio file: `chooseRelink` | Relink | | |
-| Search folder for missing audio: `chooseFolder` | Search | | |
-| Import audio files: `chooseAudio` | Import | | |
-| Bounce file: `chooseBounceFile` | Bounce | | |
-| Folder panel (shared site `chooseFolder(prompt:message:)`): bounce stems folder, MIDI export folder, export folder for another DAW, AAF export folder | Bounce, Export, Export Here | | |
-| MIDI export file: `chooseMidiExportFile` | Export | | |
-| Import DAWproject: `chooseDawprojectToOpen` | Import | | |
-| Merge DAWproject (choose the original project): `chooseProjectToMerge` | Merge | | |
-| Export DAWproject file: `chooseDawprojectFile` | Export | | |
-| Import AAF: `chooseAafToOpen` | Import | | |
-| Choose the MIDI file for the AAF file: `chooseMidiBesideAaf` | Choose | | |
-| Choose folder for the AAF's missing audio: `chooseAafMediaFolder` | Choose | | |
-| Report sheet Save as Text: `chooseReportText` | Save | | |
-| Choose External Sample Editor | Choose | | |
-| Keys settings: save keys file | (save panel) | | |
-| Keys settings: open keys file | (open panel) | | |
+| Open (project, MIDI, DAWproject or AAF): `chooseProject` | Open | S7 (on screen: pending) | S7 (owner's manual check) |
+| Open Co-Producer copy: `chooseCoProducerCopy` | Open Copy | S7 (on screen: pending) | S7 (owner's manual check) |
+| Import MIDI file: `chooseMidi` | Import | S7 (on screen: pending) | S7 (owner's manual check) |
+| Save location: `chooseSaveLocation` | Save | S7 (on screen: pending) | S7 (owner's manual check) |
+| Relink audio file: `chooseRelink` | Relink | S7 (on screen: pending) | S7 (owner's manual check) |
+| Search folder for missing audio: `chooseFolder` | Search | S7 (on screen: pending) | S7 (owner's manual check) |
+| Import audio files: `chooseAudio` | Import | S7 (on screen: pending) | S7 (owner's manual check) |
+| Bounce file: `chooseBounceFile` | Bounce | S7 (on screen: pending) | S7 (owner's manual check) |
+| Folder panel (shared site `chooseFolder(prompt:message:)`): bounce stems folder, MIDI export folder, export folder for another DAW, AAF export folder | Bounce, Export, Export Here | S7 (on screen: pending) | S7 (owner's manual check) |
+| MIDI export file: `chooseMidiExportFile` | Export | S7 (on screen: pending) | S7 (owner's manual check) |
+| Import DAWproject: `chooseDawprojectToOpen` | Import | S7 (on screen: pending) | S7 (owner's manual check) |
+| Merge DAWproject (choose the original project): `chooseProjectToMerge` | Merge | S7 (on screen: pending) | S7 (owner's manual check) |
+| Export DAWproject file: `chooseDawprojectFile` | Export | S7 (on screen: pending) | S7 (owner's manual check) |
+| Import AAF: `chooseAafToOpen` | Import | S7 (on screen: pending) | S7 (owner's manual check) |
+| Choose the MIDI file for the AAF file: `chooseMidiBesideAaf` | Choose | S7 (on screen: pending) | S7 (owner's manual check) |
+| Choose folder for the AAF's missing audio: `chooseAafMediaFolder` | Choose | S7 (on screen: pending) | S7 (owner's manual check) |
+| Report sheet Save as Text: `chooseReportText` | Save | S7 (on screen: pending) | S7 (owner's manual check) |
+| Choose External Sample Editor | Choose | S7 (on screen: pending) | S7 (owner's manual check) |
+| Keys settings: save keys file | (save panel) | S7 (on screen: pending) | S7 (owner's manual check) |
+| Keys settings: open keys file | (open panel) | S7 (on screen: pending) | S7 (owner's manual check) |
 
 ## Manual checks
 
