@@ -203,19 +203,16 @@ fn quit_or_ask(cx: &mut App) {
         eprintln!("Quit: unsaved changes and no window to ask in");
         return;
     };
-    let asked = front.update(cx, |_, window, cx| {
-        window.prompt(
+    let answer = alerts::ask(
+        front.into(),
+        sheet_host::Ask::with_labels(
             PromptLevel::Warning,
             "Quit without saving?",
             Some("Some documents have unsaved changes."),
             &["Discard Changes and Quit", "Cancel"],
-            cx,
-        )
-    });
-    let Ok(answer) = asked else {
-        eprintln!("Quit: the front window could not ask about unsaved changes");
-        return;
-    };
+        ),
+        cx,
+    );
     cx.spawn(async move |cx| {
         if let Ok(0) = answer.await {
             cx.update(quit_now);

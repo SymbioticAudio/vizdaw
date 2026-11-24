@@ -336,20 +336,18 @@ pub fn choose_save(
             return Ok(Some(target.path));
         }
         let (title, detail) = replace_question(&spec, &target.path);
-        let asked = cx.update(|cx| {
-            window.update(cx, |_, window, cx| {
-                window.prompt(
+        let answer = cx.update(|cx| {
+            crate::alerts::ask(
+                window,
+                crate::sheet_host::Ask::with_labels(
                     PromptLevel::Warning,
                     &title,
                     Some(&detail),
                     &REPLACE_ANSWERS,
-                    cx,
-                )
-            })
+                ),
+                cx,
+            )
         });
-        let Ok(answer) = asked else {
-            return Ok(None);
-        };
         Ok(matches!(answer.await, Ok(0)).then_some(target.path))
     })
 }

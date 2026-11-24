@@ -31,9 +31,12 @@ use crate::registry::RegistryScope;
 use crate::shell::DocumentWindow;
 use crate::transport_bar::colors;
 
-/// The text-editing owner a sheet's field uses (Swift
-/// `beginTextEditing`): the document's bare transport keys wait.
-pub const SHEET_OWNER: &str = "sheet";
+/// The text-editing owner a sheet's field in window `token` uses (Swift
+/// `beginTextEditing`): the document's bare transport keys wait. One per
+/// window, so a document's two windows never end each other's.
+pub fn sheet_owner(token: vizdaw_app::WindowToken) -> String {
+    format!("sheet-{}", token.0)
+}
 
 /// The card's width (Swift's sheets are about this wide).
 const CARD_WIDTH: f32 = 460.;
@@ -141,6 +144,12 @@ impl SheetHost {
         }
     }
 
+    /// A field of the sheet has the keyboard (its window's owner holds the
+    /// document's keys off).
+    pub fn editing(&self) -> bool {
+        self.editing
+    }
+
     pub fn is_up(&self) -> bool {
         self.sheet.is_some()
     }
@@ -218,6 +227,10 @@ impl DocumentWindow {
         let Some(sheet) = &self.sheet.sheet else {
             return false;
         };
+        // A prompt drawn over the sheet has the keyboard.
+        if window.has_active_prompt() {
+            return false;
+        }
         let m = &key.modifiers;
         let bare = !(m.control || m.alt || m.platform || m.function);
         match key.key.as_str() {
@@ -267,12 +280,13 @@ impl DocumentWindow {
         }
         self.sheet.editing = editing;
         let doc = self.doc();
+        let owner = sheet_owner(self.token());
         crate::app_state::AppState::global(cx).update(cx, |s, cx| {
             if let Some(d) = s.store.document_mut(doc) {
                 if editing {
-                    d.begin_text_editing(SHEET_OWNER);
+                    d.begin_text_editing(&owner);
                 } else {
-                    d.end_text_editing(SHEET_OWNER);
+                    d.end_text_editing(&owner);
                 }
             }
             cx.notify();
@@ -417,6 +431,18 @@ impl Ask {
             detail: (!message.is_empty()).then(|| message.to_owned()),
             buttons: vec![SheetButton::new("OK", ButtonRole::Default)],
         }
+    }
+
+    /// A question with `labels` as its buttons: the first the default, a
+    /// "Cancel" the cancel one (as GPUI's prompt takes them).
+    pub fn with_labels(
+        level: PromptLevel,
+        message: &str,
+        detail: Option<&str>,
+        labels: &[&str],
+    ) -> Ask {
+        let buttons: Vec<PromptButton> = labels.iter().map(|l| PromptButton::from(*l)).collect();
+        Ask::from_prompt(level, message, detail, &buttons)
     }
 
     /// A disabled button cannot be shown by the platform's prompt: the

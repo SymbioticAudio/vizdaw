@@ -708,6 +708,15 @@ pub trait CoreCalls: Send + Sync {
     fn format_label(&self, format: ProjectFormatRow) -> String;
     /// The bounce settings (the tail cap).
     fn bounce_settings(&self) -> BounceSettingsRow;
+    /// Turns `plugins` off in the app's plug-in settings (the Plugin
+    /// Manager's catalog, saved), the crash question's "Disable <names>".
+    /// Without a catalog: refused.
+    fn disable_plugins(&self, plugins: &[PluginRefRow]) -> Result<(), VizError> {
+        let _ = plugins;
+        Err(VizError::Model {
+            message: "there are no plug-in settings to change".into(),
+        })
+    }
 }
 
 /// `CoreCalls` over the real core.
@@ -757,4 +766,43 @@ impl CoreCalls for LiveCore {
     fn bounce_settings(&self) -> BounceSettingsRow {
         vizdaw_ffi::bounce_settings()
     }
+    fn disable_plugins(&self, plugins: &[PluginRefRow]) -> Result<(), VizError> {
+        let catalog = live_catalog()?;
+        for p in plugins {
+            catalog.set_enabled(
+                vizdaw_ffi::PluginKey {
+                    format: p.format,
+                    id: p.id.clone(),
+                },
+                false,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// The app's plug-in catalog (`plugins.json` in the support folder),
+/// opened when first needed. Swift opened it at launch; the GPUI app has
+/// no Plugin Manager yet, so only "Disable <names>" opens it.
+fn live_catalog() -> Result<Arc<vizdaw_ffi::PluginCatalog>, VizError> {
+    static CATALOG: std::sync::Mutex<Option<Arc<vizdaw_ffi::PluginCatalog>>> =
+        std::sync::Mutex::new(None);
+    let mut c = CATALOG.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(c) = c.as_ref() {
+        return Ok(c.clone());
+    }
+    let support = vizdaw_ffi::recovery::support_dir();
+    let scanner = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.join("vizdaw-scan")))
+        .unwrap_or_default();
+    let opened = vizdaw_ffi::PluginCatalog::open(vizdaw_ffi::CatalogConfig {
+        path: support.join("plugins.json").to_string_lossy().into_owned(),
+        scanner: scanner.to_string_lossy().into_owned(),
+        clap_dirs: vec![],
+        include_au: cfg!(target_os = "macos"),
+        timeout_ms: None,
+    })?;
+    *c = Some(opened.clone());
+    Ok(opened)
 }

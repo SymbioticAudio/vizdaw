@@ -942,9 +942,46 @@ fn disabling_the_crashing_plugin_then_opening() {
 }
 
 #[test]
+fn disable_turns_off_only_the_named_plugins_in_the_catalog_and_opens_normally() {
+    let (mut s, core) = store();
+    let verb = PluginRefRow {
+        format: PluginFormatTag::Clap,
+        id: "com.example.verb".into(),
+        name: "Verb".into(),
+        vendor: "Example".into(),
+        version: "2".into(),
+    };
+    core.set_recovery(SONG, recovery(true, vec![diva(), verb.clone()], None));
+    s.open(Path::new(SONG)).unwrap();
+    assert_eq!(
+        s.open_question().unwrap().buttons()[3],
+        "Disable Diva, Verb"
+    );
+    assert!(core.disabled_plugins().is_empty());
+    let id = s.answer_crash(CrashChoice::Disable).unwrap();
+    assert!(s.document(id).is_some());
+    // Exactly the plug-ins that were loading, by format and ID.
+    assert_eq!(
+        core.disabled_plugins(),
+        [
+            (PluginFormatTag::Au, "aumu/Diva/UHfX".to_owned()),
+            (PluginFormatTag::Clap, "com.example.verb".to_owned())
+        ]
+    );
+    // Opened with plug-ins on: only those two are off.
+    assert_eq!(opens(&core), ["open(/p/Song.vizdaw)"]);
+}
+
+#[test]
 fn disabling_without_a_catalog_opens_with_plugins_off() {
     let (mut s, core) = store();
     core.set_recovery(SONG, recovery(true, vec![diva()], None));
+    core.fail_next(
+        "disable_plugins",
+        VizError::Io {
+            message: "plugin settings not saved".into(),
+        },
+    );
     s.open(Path::new(SONG)).unwrap();
     assert!(s.answer_crash(CrashChoice::Disable).is_some());
     assert_eq!(
@@ -1139,6 +1176,12 @@ fn the_channels_open_answers_the_questions_from_its_args() {
     assert_eq!(e.message, "Song.vizdaw is already open in another window.");
     s.close(id);
     // Disable, with no catalog: plugins off; the autosave declined.
+    core.fail_next(
+        "disable_plugins",
+        VizError::Io {
+            message: "plugin settings not saved".into(),
+        },
+    );
     s.open_answered(
         Path::new(SONG),
         &answers(Some(CrashAnswer::Disable), Some(false)),

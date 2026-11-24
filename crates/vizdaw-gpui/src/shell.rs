@@ -316,8 +316,17 @@ impl DocumentWindow {
             this._hold = None;
             let shuttle = &mut this.shuttle;
             let roll = &mut this.piano_roll;
+            // A sheet's field edit ends with its window: the document's
+            // keys come back.
+            let sheet_owner = this
+                .sheet
+                .editing()
+                .then(|| crate::sheet_host::sheet_owner(token));
             state.update(cx, |s, cx| {
                 s.store.with_document(doc, |d, _| {
+                    if let Some(owner) = &sheet_owner {
+                        d.end_text_editing(owner);
+                    }
                     shuttle.cancel(d);
                     shuttle.key_up(d);
                     if kind == WindowKind::Document {
@@ -1186,11 +1195,14 @@ impl DocumentWindow {
             "Save changes to \u{201c}{}\u{201d}?",
             title.unwrap_or_default()
         );
-        let answer = window.prompt(
-            PromptLevel::Warning,
-            &message,
-            Some("Your changes are lost if you don't save them."),
-            &["Save", "Don't Save", "Cancel"],
+        let answer = crate::alerts::ask(
+            window.window_handle(),
+            crate::sheet_host::Ask::with_labels(
+                PromptLevel::Warning,
+                &message,
+                Some("Your changes are lost if you don't save them."),
+                &["Save", "Don't Save", "Cancel"],
+            ),
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {

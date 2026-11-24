@@ -2723,6 +2723,8 @@ struct CoreState {
     dawproject: HashMap<String, DawprojectInfoRow>,
     aaf: HashMap<String, AafInfoRow>,
     recovery: HashMap<String, RecoveryInfo>,
+    /// The plug-ins `disable_plugins` turned off, in order.
+    disabled: Vec<(vizdaw_ffi::snapshot::PluginFormatTag, String)>,
 }
 
 /// A scripted `CoreCalls` (constructors and free functions): a call log,
@@ -2791,6 +2793,11 @@ impl FakeCore {
 
     pub fn set_aaf_info(&self, path: &str, row: AafInfoRow) {
         self.st().aaf.insert(path.to_owned(), row);
+    }
+
+    /// The plug-ins `disable_plugins` turned off, by format and ID.
+    pub fn disabled_plugins(&self) -> Vec<(vizdaw_ffi::snapshot::PluginFormatTag, String)> {
+        self.st().disabled.clone()
     }
 
     /// What `recovery_check(path)` answers (default: nothing to ask).
@@ -2922,5 +2929,14 @@ impl CoreCalls for FakeCore {
     }
     fn bounce_settings(&self) -> BounceSettingsRow {
         vizdaw_ffi::bounce_settings()
+    }
+    fn disable_plugins(&self, plugins: &[PluginRefRow]) -> Result<(), VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "disable_plugins")?;
+        for p in plugins {
+            s.calls.push(format!("disable_plugin({})", p.id));
+            s.disabled.push((p.format, p.id.clone()));
+        }
+        Ok(())
     }
 }

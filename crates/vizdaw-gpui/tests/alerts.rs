@@ -555,3 +555,156 @@ fn under_the_control_channel_nothing_shows(cx: &mut TestAppContext) {
     post(cx, "Import Failed", "x");
     assert!(dialog(cx).is_none());
 }
+
+// ---------------------------------------------------------------------
+// Review fixes (round 1)
+
+#[gpui::test]
+fn with_sheet_prompts_an_alert_waits_for_the_close_question(cx: &mut TestAppContext) {
+    let s = setup(cx);
+    cx.update(vizdaw_gpui::sheet_host::use_sheet_prompts);
+    s.fake.set_dirty(true);
+    let mut vcx = VisualTestContext::from_window(s.window.into(), cx);
+    vcx.simulate_keystrokes("secondary-w");
+    vcx.run_until_parked();
+    let up = |vcx: &mut VisualTestContext| {
+        s.window
+            .update(vcx, |_, window, _| window.has_active_prompt())
+            .unwrap()
+    };
+    assert!(up(&mut vcx), "the close question");
+    post(cx, "Open Failed", "nope");
+    // The close question survives; the alert waits.
+    assert!(up(&mut vcx));
+    let shown = showing(cx);
+    assert!(
+        matches!(&shown[..], [(_, Showing::Asked(m))] if m.starts_with("Save changes")),
+        "{shown:?}"
+    );
+    assert_eq!(store_alert(cx).as_deref(), Some("Open Failed"));
+    // Esc is the close question's Cancel: the window stays, then the
+    // alert shows.
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert_eq!(windows(cx), 1);
+    let shown = showing(cx);
+    assert!(
+        matches!(&shown[..], [(_, Showing::Alert(_, a))] if a.title == "Open Failed"),
+        "{shown:?}"
+    );
+    assert!(up(&mut vcx));
+}
+
+#[gpui::test]
+fn with_sheet_prompts_an_alert_whose_window_closes_shows_on_the_front_window(
+    cx: &mut TestAppContext,
+) {
+    let s = setup(cx);
+    cx.update(vizdaw_gpui::sheet_host::use_sheet_prompts);
+    let other = cx
+        .update(vizdaw_gpui::new_document)
+        .expect("a second window");
+    cx.run_until_parked();
+    let doc = other.read_with(cx, |v, _| v.doc()).unwrap();
+    cx.update(|cx| {
+        AppState::global(cx).update(cx, |st, cx| {
+            st.store
+                .post_document_alert(doc, AlertItem::new("Undo Failed", "gone"));
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+    assert_eq!(showing(cx)[0].0, AnyWindowHandle::from(other));
+    other
+        .update(cx, |_, window, _| window.remove_window())
+        .unwrap();
+    cx.run_until_parked();
+    let shown = showing(cx);
+    assert_eq!(shown.len(), 1, "{shown:?}");
+    assert_eq!(shown[0].0, AnyWindowHandle::from(s.window));
+    assert!(matches!(&shown[0].1, Showing::Alert(_, a) if a.title == "Undo Failed"));
+}
+
+#[gpui::test]
+fn disable_turns_off_the_loading_plugins_and_opens_with_plugins_on(cx: &mut TestAppContext) {
+    let s = setup(cx);
+    s.core
+        .set_recovery("/tmp/x/Song.vizdaw", crashed(true, false));
+    cx.update(|cx| vizdaw_gpui::open_path(Path::new("/tmp/x/Song.vizdaw"), cx));
+    cx.run_until_parked();
+    answer(cx, "Disable Verb");
+    assert_eq!(
+        s.core.disabled_plugins(),
+        [(PluginFormatTag::Clap, "com.example.verb".to_owned())]
+    );
+    assert_eq!(opened(&s.core), ["open(/tmp/x/Song.vizdaw)"]);
+    assert_eq!(windows(cx), 2);
+}
+
+#[test]
+fn the_crash_questions_cancel_is_escs() {
+    let q = vizdaw_app::store::OpenQuestion::AfterCrash {
+        project: "Song".into(),
+        loading: vec![],
+        crashed: true,
+    };
+    let b = alerts::question_ask(&q).prompt_buttons();
+    let cancels: Vec<bool> = b.iter().map(|b| b.is_cancel()).collect();
+    assert_eq!(cancels, [false, false, true]);
+    assert_eq!(b[2].label().as_ref(), "Cancel");
+    // The autosave question has none (Esc does nothing, as in Swift).
+    let q = vizdaw_app::store::OpenQuestion::RestoreAutosave {
+        project: "Song".into(),
+    };
+    assert!(
+        alerts::question_ask(&q)
+            .prompt_buttons()
+            .iter()
+            .all(|b| !b.is_cancel())
+    );
+}
+
+fn offer(s: &Setup, cx: &mut TestAppContext) -> Arc<FakeSession> {
+    let song = Arc::new(demo_fake());
+    song.set_path(Some("/tmp/x/Song.vizdaw"));
+    song.set_recovered_files(vec![RecoveredFileRow {
+        path: "Media/Recorded/Take 1.caf".into(),
+        frames: 48_000,
+        size_known: true,
+        readable: true,
+    }]);
+    s.core.hand_out("open", song.clone());
+    cx.update(|cx| vizdaw_gpui::open_path(Path::new("/tmp/x/Song.vizdaw"), cx));
+    cx.run_until_parked();
+    assert_eq!(
+        cx.pending_prompt().map(|p| p.0),
+        Some("Recovered Recordings".into())
+    );
+    song
+}
+
+#[gpui::test]
+fn move_to_trash_and_later_answer_the_offer(cx: &mut TestAppContext) {
+    let s = setup(cx);
+    let song = offer(&s, cx);
+    answer(cx, "Move to Trash");
+    assert_eq!(song.count("recover_recordings(false)"), 1);
+    assert_eq!(song.count("recover_recordings(true)"), 0);
+    tick(cx);
+    assert!(!cx.has_pending_prompt());
+    // Later: nothing moves, and nothing is offered again until the next
+    // open.
+    let doc = cx.update(|cx| AppState::global(cx).read(cx).store.front().unwrap());
+    cx.update(|cx| {
+        AppState::global(cx).update(cx, |st, _| {
+            st.store.close(doc);
+        })
+    });
+    cx.run_until_parked();
+    let song = offer(&s, cx);
+    answer(cx, "Later");
+    tick(cx);
+    assert!(!cx.has_pending_prompt());
+    assert_eq!(song.count("recover_recordings(false)"), 0);
+    assert_eq!(song.count("recover_recordings(true)"), 0);
+}

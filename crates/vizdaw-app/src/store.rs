@@ -133,6 +133,9 @@ impl DocumentStore {
 
     /// A store over `core`'s constructors and free functions.
     pub fn with_core(core: Arc<dyn CoreCalls>) -> Self {
+        // "Disable <names>" turns those plug-ins off in the app's plug-in
+        // settings (Swift `appPlugins.setEnabled`); false: it could not.
+        let disabling = core.clone();
         DocumentStore {
             core,
             documents: HashMap::new(),
@@ -150,7 +153,7 @@ impl DocumentStore {
             questions: VecDeque::new(),
             reads: opening::Reads::default(),
             shift_held: Box::new(|| false),
-            disable_plugins: Box::new(|_| false),
+            disable_plugins: Box::new(move |p| disabling.disable_plugins(p).is_ok()),
         }
     }
 

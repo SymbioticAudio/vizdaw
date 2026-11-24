@@ -44,6 +44,9 @@ pub enum Showing {
     Return,
     /// Recovered Recordings for this document.
     Recovery(DocId),
+    /// A question the app asks ([`ask`]: save changes, quit, replace),
+    /// by its message.
+    Asked(String),
 }
 
 #[derive(Default)]
@@ -52,6 +55,8 @@ struct Presenter {
     busy: HashMap<AnyWindowHandle, Showing>,
     /// The windows that are dialog windows ([`AskDialog`]).
     dialogs: HashSet<AnyWindowHandle>,
+    /// The app's own questions waiting for their window, oldest first.
+    asks: Vec<(AnyWindowHandle, Ask, oneshot::Sender<usize>)>,
 }
 
 impl Global for Presenter {}
@@ -94,6 +99,9 @@ enum Target {
 /// recovery question, then the return prompt, then each project's
 /// Recovered Recordings. Call it outside any update.
 pub fn present(cx: &mut App) {
+    // The app's own questions (asked by a key or menu) show under the
+    // channel too.
+    present_asks(cx);
     if crate::control::channel_on(cx) {
         return;
     }
@@ -140,6 +148,49 @@ pub fn present(cx: &mut App) {
     present_question(cx);
     present_return(cx);
     present_recovery(cx);
+}
+
+/// Asks `ask` in `window` once nothing else of ours (or a GPUI prompt)
+/// shows there: the save-changes, quit and replace questions go through
+/// here, so no prompt ever replaces another (GPUI's in-window prompt off
+/// macOS replaces the one up). The answer is its button; a window that
+/// closes first drops it. Can be called inside a window's update.
+pub fn ask(window: AnyWindowHandle, ask: Ask, cx: &mut App) -> oneshot::Receiver<usize> {
+    let (tx, rx) = oneshot::channel();
+    presenter(cx).asks.push((window, ask, tx));
+    cx.defer(present);
+    rx
+}
+
+fn present_asks(cx: &mut App) {
+    let asks = std::mem::take(&mut presenter(cx).asks);
+    let mut left = vec![];
+    for (window, ask, tx) in asks {
+        if tx.is_canceled() {
+            continue;
+        }
+        // One at a time per window, in order.
+        if left.iter().any(|(w, _, _)| *w == window) || prompt_up(window, false, cx) {
+            left.push((window, ask, tx));
+            continue;
+        }
+        let message = ask.message.clone();
+        // A window that went drops the answer.
+        if let Some(answer) = show(Target::Window(window), &ask, Showing::Asked(message), cx) {
+            cx.spawn(async move |cx| {
+                if let Ok(i) = answer.await {
+                    tx.send(i).ok();
+                }
+                // The window is free: what waits for it shows (after the
+                // asker's own answer has run).
+                cx.update(|cx| cx.defer(present));
+            })
+            .detach();
+        }
+    }
+    let p = presenter(cx);
+    left.append(&mut p.asks);
+    p.asks = left;
 }
 
 fn present_question(cx: &mut App) {
@@ -355,14 +406,29 @@ fn target(doc: Option<DocId>, cx: &App) -> Target {
 
 /// Whether `target` already shows one of ours (with no window open: a
 /// dialog window is up).
-fn busy(target: Target, cx: &App) -> bool {
-    let Some(p) = cx.try_global::<Presenter>() else {
-        return false;
-    };
+fn busy(target: Target, cx: &mut App) -> bool {
     match target {
-        Target::Window(w) => p.busy.contains_key(&w),
-        Target::Dialog => !p.dialogs.is_empty(),
+        Target::Window(w) => prompt_up(w, true, cx),
+        Target::Dialog => !presenter(cx).dialogs.is_empty(),
     }
+}
+
+/// Whether window `w` shows a prompt now: one of ours, an app question
+/// waiting for it, a GPUI prompt drawn in it, or (`sheets`) a sheet.
+fn prompt_up(w: AnyWindowHandle, sheets: bool, cx: &mut App) -> bool {
+    let p = presenter(cx);
+    if p.busy.contains_key(&w) || (sheets && p.asks.iter().any(|(a, _, _)| *a == w)) {
+        return true;
+    }
+    if sheets
+        && let Some(d) = w.downcast::<DocumentWindow>()
+        && d.read(cx).is_ok_and(|v| v.sheet_label().is_some())
+    {
+        return true;
+    }
+    // A window being updated cannot be asked now.
+    w.update(cx, |_, window, _| window.has_active_prompt())
+        .unwrap_or(true)
 }
 
 /// Shows `ask` at `target` as `what`: the answer, or `None` when it

@@ -408,3 +408,109 @@ fn off_macos_gpuis_prompts_are_the_sheet_card_with_return_and_esc(cx: &mut TestA
         .unwrap();
     assert!(gone);
 }
+
+// ---------------------------------------------------------------------
+// Review fixes (round 1)
+
+fn show_dummy_in(w: WindowHandle<DocumentWindow>, cx: &mut VisualTestContext) -> Shown {
+    let pressed = Rc::new(RefCell::new(vec![]));
+    let log = pressed.clone();
+    let (shown, fields) = w
+        .update(cx, |v, window, cx| {
+            let fields = [
+                cx.new(|cx| TextInput::new("Name", cx)),
+                cx.new(|cx| TextInput::new("Rate", cx)),
+            ];
+            let sheet = Dummy {
+                fields: fields.clone(),
+                pressed: log,
+                default_enabled: true,
+            };
+            (v.show_sheet(Box::new(sheet), window, cx).is_ok(), fields)
+        })
+        .unwrap();
+    assert!(shown);
+    cx.run_until_parked();
+    Shown { pressed, fields }
+}
+
+#[gpui::test]
+fn a_prompt_drawn_over_a_sheet_has_the_keyboard(cx: &mut TestAppContext) {
+    let mut s = setup(cx);
+    s.cx.update(|_, cx| vizdaw_gpui::sheet_host::use_sheet_prompts(cx));
+    let d = show_dummy(&mut s, true);
+    let answer = s
+        .window
+        .update(&mut s.cx, |_, window, cx| {
+            window.prompt(
+                PromptLevel::Warning,
+                "Quit without saving?",
+                None,
+                &["Discard Changes and Quit", "Cancel"],
+                cx,
+            )
+        })
+        .unwrap();
+    s.cx.run_until_parked();
+    s.cx.simulate_keystrokes("escape");
+    assert_eq!(answer.now_or_never(), Some(Ok(1)), "the prompt's Cancel");
+    assert!(d.pressed.borrow().is_empty(), "not the sheet's");
+    assert!(sheet_label(&mut s).is_some());
+}
+
+fn keys_on(s: &mut Setup) -> bool {
+    let doc = s.window.read_with(&s.cx, |v, _| v.doc()).unwrap();
+    s.app.read_with(&s.cx, |a, _| {
+        a.store.document(doc).unwrap().transport_keys_enabled()
+    })
+}
+
+fn mixer_window(s: &mut Setup) -> WindowHandle<DocumentWindow> {
+    let doc = s.window.read_with(&s.cx, |v, _| v.doc()).unwrap();
+    let app = s.app.clone();
+    let m =
+        s.cx.update(|_, cx| DocumentWindow::open_mixer(&app, doc, cx))
+            .expect("the Mixer window");
+    s.cx.run_until_parked();
+    m
+}
+
+#[gpui::test]
+fn closing_a_window_while_its_sheet_field_edits_gives_the_keys_back(cx: &mut TestAppContext) {
+    let mut s = setup(cx);
+    let m = mixer_window(&mut s);
+    let mut mcx = VisualTestContext::from_window(m.into(), &s.cx);
+    show_dummy_in(m, &mut mcx);
+    mcx.simulate_keystrokes("tab");
+    mcx.run_until_parked();
+    assert!(!keys_on(&mut s), "the Mixer window's sheet field edits");
+    m.update(&mut mcx, |_, window, _| window.remove_window())
+        .unwrap();
+    s.cx.run_until_parked();
+    s.cx.update(|_, _| {});
+    assert!(keys_on(&mut s), "the keys came back with the window gone");
+    s.cx.simulate_keystrokes("space");
+    assert_eq!(s.fake.count("play(3)"), 1);
+}
+
+#[gpui::test]
+fn two_windows_sheet_fields_hold_the_keys_each(cx: &mut TestAppContext) {
+    let mut s = setup(cx);
+    let m = mixer_window(&mut s);
+    let mut mcx = VisualTestContext::from_window(m.into(), &s.cx);
+    show_dummy_in(m, &mut mcx);
+    mcx.simulate_keystrokes("tab");
+    mcx.run_until_parked();
+    let mut wcx = VisualTestContext::from_window(s.window.into(), &s.cx);
+    show_dummy_in(s.window, &mut wcx);
+    wcx.simulate_keystrokes("tab");
+    wcx.run_until_parked();
+    assert!(!keys_on(&mut s));
+    // The Mixer window's sheet closes: the document window's still edits.
+    mcx.simulate_keystrokes("escape");
+    mcx.run_until_parked();
+    assert!(!keys_on(&mut s), "the other window's field still edits");
+    wcx.simulate_keystrokes("escape");
+    wcx.run_until_parked();
+    assert!(keys_on(&mut s));
+}
