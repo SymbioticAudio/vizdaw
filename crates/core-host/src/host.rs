@@ -1082,6 +1082,9 @@ impl PluginHost {
         if let Some(a) = answer {
             self.offline_states.insert(id, a);
         }
+        // What the last processor was sent and never got: the plugin does
+        // not hold it, so it stays undelivered in the new queue.
+        let lost: BTreeSet<ParamId> = live.params.undelivered().into_iter().collect();
         let ((params, gestures), audio) = param_queues();
         live.params = params;
         live.gestures = gestures;
@@ -1122,7 +1125,11 @@ impl PluginHost {
             if skip_held && live.inst.param_value(k).is_some_and(|h| holds(h, v)) {
                 continue;
             }
-            live.params.send(k, v);
+            if lost.contains(&k) {
+                live.params.send(k, v);
+            } else {
+                live.params.send_held(k, v);
+            }
         }
         Ok(())
     }
@@ -1457,8 +1464,15 @@ impl PluginHost {
         let State::Live(live) = state else {
             return Err(HostError::NotFound(format!("instance {id} is not loaded")));
         };
-        // Asked before the state is taken: what it will not hold.
-        let unsaved = live.inst.unsaved_params();
+        // Asked before the state is taken: what it will not hold. That is
+        // what the instance says (a VST3's values before its first block)
+        // and what the host queued to the running processor that no
+        // processed block has carried (the engine stopped, no device, a
+        // quick save).
+        let mut unsaved: BTreeSet<ParamId> = live.inst.unsaved_params().into_iter().collect();
+        if live.active {
+            unsaved.extend(live.params.undelivered());
+        }
         let bytes = live.inst.save_state()?;
         let overlay = history.doc().plugin_slot(id).map(|s| &s.params);
         let mut keep: BTreeMap<ParamId, f64> = automated
@@ -1471,17 +1485,16 @@ impl PluginHost {
             })
             .filter(|(_, v)| v.is_finite())
             .collect();
-        // A value the plugin has but its state does not yet (a VST3 whose
-        // processor has not run a block) stays in the overlay too: the
-        // document's value, else the one the plugin holds.
+        // A value the plugin was given but its state does not hold yet
+        // stays in the overlay too: the value the host sent (overlay,
+        // `set_param` or gesture values are in `sent`), else the base it
+        // went back to when an overlay entry went away. Never the
+        // plugin's own reading, which may be a value since removed.
         for p in unsaved {
             if keep.contains_key(&p) {
                 continue;
             }
-            let v = overlay
-                .and_then(|o| o.get(&p))
-                .copied()
-                .or_else(|| live.inst.param_value(p));
+            let v = live.sent.get(&p).or_else(|| live.base.get(&p)).copied();
             if let Some(v) = v.filter(|v| v.is_finite()) {
                 keep.insert(p, v);
             }

@@ -321,8 +321,13 @@ fn both_state_streams_survive_a_saved_song() {
     assert!((v + 12.0).abs() < 1e-9, "{v}");
     assert_eq!(p.probe.counters().last_memo, 41, "the controller's stream");
 
-    // Once a block has carried it, a newer value wins and the capture
-    // folds it into the component's state.
+    // The engine runs a block (the first block's -12 dB is delivered),
+    // then stops. A newer value is sent to the running plug-in and
+    // captured before any block carried it (the engine stopped, no device,
+    // a quick save): the host's value is kept, not the state's.
+    let (mut engine, mut be) = engine(&fresh);
+    engine.load(&doc, song).unwrap();
+    peak(&mut be, 512);
     let mut hist = History::new(doc);
     run(
         &mut hist,
@@ -332,9 +337,28 @@ fn both_state_streams_survive_a_saved_song() {
         },
     );
     fresh.sync(hist.doc());
-    let (mut engine, mut be) = engine(&fresh);
+    fresh.capture(&mut hist, gain).unwrap();
+    let kept = hist
+        .doc()
+        .plugin_slot(gain)
+        .unwrap()
+        .params
+        .get(&pid(VST3_PARAM_GAIN))
+        .copied();
+    assert!(kept.is_some_and(|v| (v + 6.0).abs() < 1e-9), "{kept:?}");
+    // The kept value counts as sent: the queued value reaches the
+    // component once, and a sync afterwards sends nothing again.
+    let before = p.probe.counters().param_points;
     engine.load(hist.doc(), song).unwrap();
-    peak(&mut be, 512);
+    peak(&mut be, 4096);
+    fresh.sync(hist.doc());
+    peak(&mut be, 4096);
+    let c = p.probe.counters();
+    assert_eq!(c.param_points - before, 1, "one point, no second apply");
+    let last = f64::from_bits(c.param_last[0]);
+    assert!((last - gain_norm(-6.0)).abs() < 1e-9, "{last}");
+    // Once a block has carried it, the next capture folds it into the
+    // component's state.
     fresh.capture(&mut hist, gain).unwrap();
     assert!(
         hist.doc().plugin_slot(gain).unwrap().params.is_empty(),
@@ -347,6 +371,50 @@ fn both_state_streams_survive_a_saved_song() {
     again.wait_ready(WAIT);
     let v = gain_of(&mut again);
     assert!((v + 6.0).abs() < 1e-9, "the component's state: {v}");
+}
+
+#[test]
+fn a_removed_value_is_not_written_back_by_a_capture_before_a_block() {
+    // The overlay's -12 dB goes to the first block, then an undo removes
+    // it (the host queues the base value) before any block ran: the
+    // capture keeps what the host sent, not the controller's -12 dB.
+    let p = private();
+    let (mut hist, _song, gain) = with_insert(VST3_GAIN_ID, "Test Gain");
+    run(
+        &mut hist,
+        MixerCmd::SetPluginParams {
+            slot: gain,
+            params: vec![(pid(VST3_PARAM_GAIN), -12.0)],
+        },
+    );
+    let mut host = host_for(&p.path, &[VST3_GAIN_ID]);
+    host.sync(hist.doc());
+    host.wait_ready(WAIT);
+    hist.undo().unwrap();
+    host.sync(hist.doc());
+    host.capture(&mut hist, gain).unwrap();
+    let base = VST3_PARAMS[0].to_plain(test_plugins::VST3_COMPONENT_GAIN);
+    let kept = hist
+        .doc()
+        .plugin_slot(gain)
+        .unwrap()
+        .params
+        .get(&pid(VST3_PARAM_GAIN))
+        .copied();
+    assert!(kept.is_none_or(|v| (v - base).abs() < 1e-9), "{kept:?}");
+    let d = tempfile::tempdir().unwrap();
+    let package = d.path().join("Undone.vizdaw");
+    core_model::file::save(hist.doc(), &package).unwrap();
+    let doc = core_model::file::load(&package).unwrap();
+    let mut fresh = host_for(&p.path, &[VST3_GAIN_ID]);
+    fresh.sync(&doc);
+    fresh.wait_ready(WAIT);
+    let v = fresh
+        .instance(gain)
+        .unwrap()
+        .param_value(pid(VST3_PARAM_GAIN))
+        .unwrap();
+    assert!((v - base).abs() < 1e-9, "the undone value came back: {v}");
 }
 
 /// Plan 5f-2 Ruling 7, for VST3: a bounce host's copies are set up with

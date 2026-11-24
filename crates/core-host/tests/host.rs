@@ -187,6 +187,44 @@ fn capture_stores_the_state_and_a_new_host_restores_it() {
     );
 }
 
+/// A value sent to a running plugin through its queue, captured before
+/// any block delivered it (the engine stopped, no device, a quick save):
+/// the plugin's state does not have it yet, so the capture keeps it in
+/// the overlay.
+#[test]
+fn a_queued_value_survives_a_capture_before_a_block() {
+    let (mut hist, _song, gain) = with_gain();
+    let mut h = host(4096);
+    h.sync(hist.doc());
+    h.wait_ready(WAIT);
+    run(
+        &mut hist,
+        MixerCmd::SetPluginParams {
+            slot: gain,
+            params: vec![(ParamId(0), 0.3)],
+        },
+    );
+    h.sync(hist.doc());
+    h.capture(&mut hist, gain).unwrap();
+    assert_eq!(
+        hist.doc()
+            .plugin_slot(gain)
+            .unwrap()
+            .params
+            .get(&ParamId(0)),
+        Some(&0.3),
+        "kept in the overlay"
+    );
+    let doc = hist.doc().clone();
+    let mut fresh = host(4096);
+    fresh.sync(&doc);
+    fresh.wait_ready(WAIT);
+    assert_eq!(
+        fresh.instance(gain).unwrap().param_value(ParamId(0)),
+        Some(0.3)
+    );
+}
+
 #[test]
 fn a_latency_change_restarts_the_plugin_and_recompiles() {
     let (hist, song, gain) = with_gain();
