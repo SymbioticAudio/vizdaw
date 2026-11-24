@@ -80,10 +80,7 @@ fn run_app(id: &str, cx: &mut App) {
             // item may be mid-update.
             let front = crate::alerts::front_window(cx).and_then(|w| {
                 let s = AppState::global(cx).read(cx);
-                let entry = s
-                    .windows()
-                    .iter()
-                    .find(|e| gpui::AnyWindowHandle::from(e.handle) == w)?;
+                let entry = s.windows().iter().find(|e| e.handle == w)?;
                 Some((entry.doc, w))
             });
             match front {

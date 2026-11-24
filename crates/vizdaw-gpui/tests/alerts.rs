@@ -536,7 +536,7 @@ fn under_the_control_channel_nothing_shows(cx: &mut TestAppContext) {
             .read(cx)
             .windows()
             .iter()
-            .map(|w| w.handle)
+            .filter_map(|w| w.document_window())
             .collect()
     });
     for w in windows {

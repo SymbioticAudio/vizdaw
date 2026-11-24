@@ -774,7 +774,11 @@ fn launch_arguments_take_the_socket_and_ignore_the_rest() {
 fn a_channel_click_on_more_names_the_bar_command(cx: &mut TestAppContext) {
     let s = setup(cx, demo_fake());
     ok(call(&s, cx, "app.new_demo", json!({})));
-    let window = cx.update(|cx| AppState::global(cx).read(cx).windows()[0].handle);
+    let window = cx.update(|cx| {
+        AppState::global(cx).read(cx).windows()[0]
+            .document_window()
+            .unwrap()
+    });
     cx.simulate_window_resize(window.into(), gpui::size(gpui::px(600.), gpui::px(640.)));
     cx.run_until_parked();
     let tree = ok(call(&s, cx, "ui.tree", json!({})));
@@ -1341,7 +1345,11 @@ fn a_refused_loop_is_the_calls_failure_not_an_alert(cx: &mut TestAppContext) {
 fn a_scrolled_out_element_is_not_clicked(cx: &mut TestAppContext) {
     let s = setup(cx, demo_fake());
     ok(call(&s, cx, "app.new_demo", json!({})));
-    let window = cx.update(|cx| AppState::global(cx).read(cx).windows()[0].handle);
+    let window = cx.update(|cx| {
+        AppState::global(cx).read(cx).windows()[0]
+            .document_window()
+            .unwrap()
+    });
     // Too short for any of the second track's header (a header partly in
     // view is clicked where it shows).
     cx.simulate_window_resize(window.into(), gpui::size(gpui::px(1000.), gpui::px(150.)));

@@ -1015,8 +1015,9 @@ impl Setup {
     /// The document's Mixer window, while open.
     fn mixer_window(&mut self) -> Option<WindowHandle<DocumentWindow>> {
         let doc = self.doc();
-        self.app
-            .read_with(&self.cx, |a, _| a.mixer_window_of(doc).map(|w| w.handle))
+        self.app.read_with(&self.cx, |a, _| {
+            a.mixer_window_of(doc).and_then(|w| w.document_window())
+        })
     }
 
     fn kinds(&mut self) -> Vec<WindowKind> {

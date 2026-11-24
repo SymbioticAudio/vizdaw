@@ -677,7 +677,9 @@ fn the_mixer_window_closes_without_asking(cx: &mut TestAppContext) {
     let doc = s.window_doc();
     let mixer = s
         .app
-        .read_with(&s.cx, |a, _| a.mixer_window_of(doc).map(|w| w.handle))
+        .read_with(&s.cx, |a, _| {
+            a.mixer_window_of(doc).and_then(|w| w.document_window())
+        })
         .expect("a Mixer window");
     let mut mcx = VisualTestContext::from_window(mixer.into(), &s.cx);
     mcx.dispatch_action(vizdaw_gpui::CloseWindow);

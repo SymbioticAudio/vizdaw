@@ -463,7 +463,7 @@ pub(crate) fn present(cx: &mut App, free: impl Fn(gpui::AnyWindowHandle, &mut Ap
     let mut windows: Vec<(DocId, gpui::WindowHandle<DocumentWindow>)> = app
         .read(cx)
         .document_windows()
-        .map(|w| (w.doc, w.handle))
+        .filter_map(|w| w.document_window().map(|h| (w.doc, h)))
         .collect();
     // The active window first: it is the one that asked.
     windows.sort_by_key(|(_, h)| Some(gpui::AnyWindowHandle::from(*h)) != active);

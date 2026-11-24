@@ -443,7 +443,7 @@ pub(crate) fn present_sheet(
     let mut windows: Vec<(DocId, gpui::WindowHandle<DocumentWindow>)> = app
         .read(cx)
         .document_windows()
-        .map(|w| (w.doc, w.handle))
+        .filter_map(|w| w.document_window().map(|h| (w.doc, h)))
         .collect();
     windows.sort_by_key(|(_, h)| Some(AnyWindowHandle::from(*h)) != active);
     let wants = |doc: DocId, cx: &App| {

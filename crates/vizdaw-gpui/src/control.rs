@@ -22,6 +22,10 @@
 //! name by its number. With `VIZDAW_FRAME_STATS` set (a measurement
 //! build's switch, see [`crate::frame_stats`]) each `state.get windows`
 //! row carries the window's `frames` since the last read.
+//! Host H2 adds the plug-in windows (kind `plugin`, titled "‹strip› —
+//! ‹plug-in›") and the Built-in Synth windows (kind `other`) to
+//! `state.get windows`; `ui.tree`, `ui.click`, `ui.key` and `ui.screenshot`
+//! reach them by their number.
 //! Slice 7a adds the File commands (see [`files`]): the new projects and
 //! demos (`app.new_demo {audio}` too), `file.open` and `app.open` with
 //! their recovery answers, `file.open_copy`, the imports, exports,
@@ -452,8 +456,12 @@ fn answer(command: &Command, cx: &mut App) -> Result<Value, ControlError> {
             let doc = files::open_answered(path, answers, cx)?;
             let app = AppState::global(cx);
             let before = alert_id(cx);
-            let h = match app.read(cx).window_of(doc) {
-                Some(w) => w.handle,
+            let h = match app
+                .read(cx)
+                .window_of(doc)
+                .and_then(|w| w.document_window())
+            {
+                Some(h) => h,
                 None => DocumentWindow::open(&app, doc, cx).map_err(|m| failure(before, &m, cx))?,
             };
             opened(h, cx)
@@ -518,13 +526,7 @@ fn answer(command: &Command, cx: &mut App) -> Result<Value, ControlError> {
         Command::UiTree { window, .. } => {
             let entry = target(window.as_ref(), cx)?;
             fresh_frame(&entry, cx)?;
-            let mut tree = entry
-                .handle
-                .read(cx)
-                .map_err(|_| gone())?
-                .registry()
-                .borrow()
-                .tree();
+            let mut tree = entry.registry(cx).ok_or_else(gone)?.borrow().tree();
             tree["window"] = json!(number(entry.handle));
             Ok(tree)
         }
@@ -747,14 +749,22 @@ fn run_transport(
         return Err(failure(before, "the command failed", cx));
     }
     let ran = ran?;
-    entry
-        .handle
-        .update(cx, |v, window, cx| v.after_transport(window, cx))
+    // A plug-in window has no transport bar: its document's window reads
+    // the transport again.
+    let bar = entry
+        .document_window()
+        .or_else(|| {
+            AppState::global(cx)
+                .read(cx)
+                .window_of(entry.doc)
+                .and_then(|w| w.document_window())
+        })
+        .ok_or_else(gone)?;
+    bar.update(cx, |v, window, cx| v.after_transport(window, cx))
         .map_err(|_| gone())?;
     if let Some(focus) = ran.focus {
         let field = focus.field();
-        let shown = entry
-            .handle
+        let shown = bar
             .update(cx, |v, window, cx| {
                 let shown = v.transport_fields.shown().contains(&field);
                 if shown {
@@ -985,9 +995,13 @@ fn windows_state(cx: &mut App) -> Value {
     let mut rows = Vec::new();
     for w in entries {
         let now = cx.background_executor().now();
-        let Ok((bounds, frames)) = w.handle.update(cx, |v, window, _| {
-            (window.bounds(), v.take_frame_stats(now))
-        }) else {
+        let shown = match w.document_window() {
+            Some(h) => h.update(cx, |v, window, _| {
+                (window.bounds(), v.take_frame_stats(now))
+            }),
+            None => w.handle.update(cx, |_, window, _| (window.bounds(), None)),
+        };
+        let Ok((bounds, frames)) = shown else {
             continue;
         };
         let (title, key) = {
@@ -1043,8 +1057,8 @@ fn click(
 ) -> Result<Value, ControlError> {
     fresh_frame(entry, cx)?;
     let at = {
-        let view = entry.handle.read(cx).map_err(|_| gone())?;
-        let registry = view.registry().borrow();
+        let registry = entry.registry(cx).ok_or_else(gone)?;
+        let registry = registry.borrow();
         let e = registry.resolve(id)?;
         // The centre of the part that shows: a block wider than the
         // canvas is clicked where it is drawn.
@@ -1071,7 +1085,7 @@ fn click_at(
     modifiers: keys::Modifiers,
     cx: &mut App,
 ) -> Result<Value, ControlError> {
-    let any: AnyWindowHandle = entry.handle.into();
+    let any: AnyWindowHandle = entry.handle;
     let count = count.max(1) as usize;
     let button = match button {
         Button::Left => MouseButton::Left,
@@ -1121,7 +1135,7 @@ fn click_at(
 /// before every stroke, so the document's keyboard focus is this
 /// moment's when the stroke is routed) are rare next to frames.
 fn fresh_frame(entry: &WindowEntry, cx: &mut App) -> Result<(), ControlError> {
-    let any: AnyWindowHandle = entry.handle.into();
+    let any: AnyWindowHandle = entry.handle;
     any.update(cx, |_, window, cx| {
         // Whole, reusing no cached view: what this tick changed may not
         // have reached the window's dirty views yet.
@@ -1271,7 +1285,7 @@ fn bound_command(entry: &WindowEntry, k: &KeyStroke, cx: &App) -> Option<&'stati
 /// keyboard) is drawn before the next.
 fn deliver(entry: &WindowEntry, k: &KeyStroke, cx: &mut App) -> Result<(), ControlError> {
     let keystroke = gpui_keystroke(k);
-    let any: AnyWindowHandle = entry.handle.into();
+    let any: AnyWindowHandle = entry.handle;
     any.update(cx, |_, window, cx| {
         window.dispatch_keystroke(keystroke.clone(), cx);
         window.dispatch_event(PlatformInput::KeyUp(KeyUpEvent { keystroke }), cx);
@@ -1325,7 +1339,7 @@ fn screenshot(
     let path = path.unwrap_or_else(temp_screenshot_path);
     fresh_frame(&entry, cx)?;
     let capture = crate::screenshot::capture_fn(cx);
-    let any: AnyWindowHandle = entry.handle.into();
+    let any: AnyWindowHandle = entry.handle;
     let shot = any
         .update(cx, |_, window, _| capture(window, scale))
         .map_err(|_| gone())??;
@@ -1374,14 +1388,14 @@ fn target(window: Option<&WindowRef>, cx: &App) -> Result<WindowEntry, ControlEr
             .store
             .front()
             .and_then(|d| s.window_of(d))
-            .or_else(|| s.windows().first())
+            .or_else(|| s.document_windows().next())
             .cloned()
             .ok_or_else(|| ControlError::new(ErrorCode::NoDocument, "no document is open")),
     }
 }
 
 /// A window's number, as `state.get windows` lists it.
-pub fn number(handle: WindowHandle<DocumentWindow>) -> i64 {
+pub fn number(handle: impl Into<AnyWindowHandle>) -> i64 {
     let any: AnyWindowHandle = handle.into();
     any.window_id().as_u64() as i64
 }
