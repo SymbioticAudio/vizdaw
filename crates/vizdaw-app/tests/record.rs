@@ -336,6 +336,7 @@ fn the_popover_sets_the_transports_modes() {
     assert!(m.layout().transport.overdub && m.layout().transport.punch);
     assert!(!m.record_spec().replace && m.record_spec().punch.is_some());
     // The punch fields: typed text is a draft until Return.
+    m.set_record_popover(true);
     m.set_punch_text(TransportField::PunchIn, "2");
     assert_eq!(m.punch_text(TransportField::PunchIn), "2");
     assert_eq!(m.layout().transport.punch_in, 0);
@@ -355,6 +356,7 @@ fn the_popover_sets_the_transports_modes() {
     );
     assert_eq!(m.status(), None);
     // Only the punch fields keep drafts.
+    m.set_record_popover(true);
     m.set_punch_text(TransportField::Position, "9");
     assert_eq!(
         m.punch_text(TransportField::Position),
@@ -500,6 +502,7 @@ fn a_refused_punch_draft_refuses_record() {
 #[test]
 fn a_refused_commit_drops_the_draft() {
     let (_f, mut m) = armed();
+    m.set_record_popover(true);
     m.set_punch_text(TransportField::PunchIn, "abc");
     assert!(!m.commit_punch(TransportField::PunchIn));
     assert!(m.status().is_some());
@@ -1333,4 +1336,25 @@ fn a_pass_that_ends_by_itself_leaves_its_line_in_the_faults() {
         m.fault_lines()
     );
     assert!(m.has_report());
+}
+
+/// Slice 8a carry: the popover's fields write drafts only while it is
+/// open, so a late keystroke after it closed leaves none (which would
+/// refuse Record with nothing on screen).
+#[test]
+fn set_punch_text_while_the_popover_is_closed_leaves_no_draft() {
+    let (_f, mut m) = armed();
+    assert!(!m.record().shows_popover());
+    m.set_punch_text(TransportField::PunchIn, "5");
+    assert!(!m.has_open_punch_draft());
+    assert_eq!(
+        m.punch_text(TransportField::PunchIn),
+        field_text(&m, TransportField::PunchIn)
+    );
+    m.set_record_popover(true);
+    m.set_punch_text(TransportField::PunchIn, "5");
+    assert!(m.has_open_punch_draft());
+    m.set_record_popover(false);
+    m.set_punch_text(TransportField::PunchOut, "9");
+    assert!(!m.has_open_punch_draft());
 }

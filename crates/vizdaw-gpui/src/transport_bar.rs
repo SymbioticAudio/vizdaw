@@ -3,9 +3,10 @@
 //! `TransportFieldsView`): the cluster (Return to Start, Rewind, Fast
 //! Forward, Play/Stop), Loop, the four readouts, the Position and Edit
 //! In/Out fields, flexible space, the Main View picker and the pane
-//! toggles, and Faults with its popover (document window only); what
-//! does not fit folds, last first, into the » menu. Recording, the click
-//! and step entry come with their slices and are not drawn yet.
+//! toggles, Faults with its popover (document window only), and the
+//! record items: Record in the cluster, Replace/Overdub, Count-in, Record
+//! Options with its popover ([`crate::record_popover`]) and the Step Entry
+//! summary; what does not fit folds, last first, into the » menu.
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -22,6 +23,7 @@ use vizdaw_app::transport_fields::TransportField;
 use crate::control;
 use crate::menus::{PlayStop, RunCommand};
 use crate::panes;
+use crate::record_popover::{self, PopoverState, RecordPopover};
 use crate::registry::RegistryScope;
 use crate::shell::DocumentWindow;
 use crate::transport_fields::TransportFields;
@@ -46,6 +48,8 @@ pub struct BarState {
     pub record: RecordBar,
     /// The Step Entry summary, while step entry is on.
     pub summary: Option<String>,
+    /// The record popover, while it is open in this window.
+    pub record_popover: Option<PopoverState>,
 }
 
 /// What the Record part of the cluster, Replace/Overdub and Count-in draw
@@ -220,6 +224,7 @@ pub enum Piece {
     ReplaceOverdub,
     CountIn,
     Summary,
+    RecordOptions,
     Separator,
 }
 
@@ -246,6 +251,9 @@ pub const REMAINING_HELP: &str =
 pub const COUNT_IN_HELP: &str = "Count in before recording (the bars are in Record Options)";
 /// The readout while counting in (`V/RecordControls.swift:37`).
 pub const COUNTING_IN: &str = "Count-in";
+/// Record Options' help (`V/RecordControls.swift:75`).
+pub const RECORD_OPTIONS_HELP: &str =
+    "Replace or overdub, punch, loop, count-in, pre-roll and MIDI takes";
 
 impl Piece {
     fn of(item: &TransportItem) -> Option<Piece> {
@@ -265,6 +273,7 @@ impl Piece {
             TransportItem::ReplaceOverdub => Piece::ReplaceOverdub,
             TransportItem::CountIn => Piece::CountIn,
             TransportItem::Summary => Piece::Summary,
+            TransportItem::RecordOptions => Piece::RecordOptions,
             TransportItem::Separator => Piece::Separator,
             _ => return None,
         })
@@ -293,6 +302,7 @@ impl Piece {
             Piece::ReplaceOverdub => MODE,
             Piece::CountIn => COUNT_IN,
             Piece::Summary => SUMMARY,
+            Piece::RecordOptions => CHEVRON,
             Piece::Separator => 1.,
         }
     }
@@ -315,6 +325,7 @@ impl Piece {
             Piece::ReplaceOverdub => "Replace/Overdub",
             Piece::CountIn => "Count-in",
             Piece::Summary => "Step Entry",
+            Piece::RecordOptions => record_popover::RECORD_OPTIONS,
             Piece::Separator => "Separator",
         }
     }
@@ -457,7 +468,12 @@ pub(crate) fn button_with_help(
 }
 
 /// A button's look, showing `text`, unrecorded.
-fn face(id: impl Into<ElementId>, text: &str, enabled: bool, background: u32) -> Stateful<Div> {
+pub(crate) fn face(
+    id: impl Into<ElementId>,
+    text: &str,
+    enabled: bool,
+    background: u32,
+) -> Stateful<Div> {
     div()
         .id(id)
         .relative()
@@ -1073,13 +1089,15 @@ fn more_menu(
             | Piece::ReplaceOverdub
             | Piece::CountIn
             | Piece::Summary
+            | Piece::RecordOptions
             | Piece::Separator => String::new(),
         };
         // Faults is an action, enabled with faults or a report (Swift
         // `M/TransportItemEntries.swift:132-133`); it folds only then.
         // Replace/Overdub and Count-in are disabled while recording.
+        // Record Options is a popover entry: it opens the popover at ».
         let acts = match piece {
-            Piece::Loop => true,
+            Piece::Loop | Piece::RecordOptions => true,
             Piece::Faults => state.faults.is_some(),
             Piece::ReplaceOverdub | Piece::CountIn => !r.recording,
             _ => false,
@@ -1129,10 +1147,11 @@ fn more_menu(
             entry = entry
                 .cursor_pointer()
                 .hover(|s| s.bg(rgb(colors::BUTTON)))
-                .on_click(cx.listener(move |this, _, _, cx| {
+                .on_click(cx.listener(move |this, _, window, cx| {
                     this.close_more(cx);
                     match piece {
                         Piece::Faults => this.toggle_faults(cx),
+                        Piece::RecordOptions => this.toggle_record_popover(window, cx),
                         Piece::ReplaceOverdub => this.press_record_mode(cx),
                         Piece::CountIn => this.toggle_count_in(cx),
                         _ => this.toggle_loop(cx),
@@ -1145,18 +1164,31 @@ fn more_menu(
     list.into_any_element()
 }
 
+/// What the window keeps for its bar: the fields, the record popover's
+/// fields, and whether » is open.
+pub struct BarParts<'a> {
+    pub fields: &'a TransportFields,
+    pub popover: &'a RecordPopover,
+    pub more_open: bool,
+}
+
 /// The bar: `plan`'s shown pieces, then » when anything folds.
 pub fn render(
     state: &BarState,
     plan: &Plan,
-    fields: &TransportFields,
-    more_open: bool,
+    parts: BarParts,
     scope: &mut RegistryScope,
     window: &Window,
     cx: &mut Context<DocumentWindow>,
 ) -> impl IntoElement {
-    // Drawn again below, while the cluster shows.
+    let BarParts {
+        fields,
+        popover,
+        more_open,
+    } = parts;
+    // Drawn again below, while the cluster and the chevron show.
     fields.record_button.set(None);
+    popover.chevron.set(None);
     let mut row = div()
         .flex()
         .flex_row()
@@ -1190,6 +1222,9 @@ pub fn render(
                 Some(t) => summary(t, scope),
                 None => continue,
             },
+            Piece::RecordOptions => {
+                record_popover::chevron(state.record_popover.as_ref(), popover, scope, window, cx)
+            }
             Piece::Separator => separator(),
         };
         row = row.child(child);
@@ -1206,6 +1241,16 @@ pub fn render(
                 .flex_none()
                 .child(more)
                 .child(faults_popover(f, scope, window, cx))
+                .into_any_element();
+        }
+        if let Some(p) = state.record_popover.as_ref()
+            && folded.contains(&Piece::RecordOptions)
+        {
+            more = div()
+                .relative()
+                .flex_none()
+                .child(more)
+                .child(record_popover::overlay(p, popover, true, scope, window, cx))
                 .into_any_element();
         }
         row = row.child(div().flex_1()).child(more);

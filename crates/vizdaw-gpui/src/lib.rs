@@ -21,6 +21,7 @@ mod midi_strip;
 pub mod mixer_view;
 pub mod panes;
 pub mod piano_roll;
+pub mod record_popover;
 pub mod registry;
 pub mod screenshot;
 pub mod sheet_host;

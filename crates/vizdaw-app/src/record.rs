@@ -710,9 +710,11 @@ impl DocumentModel {
             .unwrap_or_else(|| field_text(self, f))
     }
 
-    /// Keeps a draft for the punch fields only.
+    /// Keeps a draft for the punch fields only, and only while the
+    /// popover is open: a keystroke that lands after it closed leaves no
+    /// draft behind (which would refuse Record with nothing on screen).
     pub fn set_punch_text(&mut self, f: TransportField, text: &str) {
-        if is_punch(f) {
+        if is_punch(f) && self.record.shows_popover {
             self.record.punch_drafts.insert(f, text.to_owned());
         }
     }

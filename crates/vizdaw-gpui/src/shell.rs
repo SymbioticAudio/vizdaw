@@ -35,6 +35,7 @@ use vizdaw_app::alerts::{AlertItem, error_message};
 use vizdaw_app::commands;
 use vizdaw_app::editor::{MainView, PaneSide, PaneView, ViewLayouts};
 use vizdaw_app::mixer::MixerPlacement;
+use vizdaw_app::record::PopoverHost;
 use vizdaw_app::transport::Shuttle;
 use vizdaw_app::transport_fields::{self as fields_model, TransportField};
 use vizdaw_app::{DocId, DocumentModel, SaveAction, SaveChoice, WindowToken};
@@ -56,6 +57,7 @@ use crate::menus::{
 use crate::mixer_view::{self, MixerView};
 use crate::panes::{self, HostState, PaneDrag};
 use crate::piano_roll::{PianoRoll, RollState};
+use crate::record_popover::{PopoverState, RecordPopover};
 use crate::registry::{RegistryScope, SharedRegistry};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::track_headers::{HeadersState, Rename, TrackHeaders};
@@ -94,6 +96,8 @@ pub struct DocumentWindow {
     _status_timer: Option<Task<()>>,
     /// The transport bar's Position and Edit In/Out fields.
     pub(crate) transport_fields: TransportFields,
+    /// The record popover's punch fields (this window's host).
+    pub(crate) record_popover: RecordPopover,
     /// Rewind and Fast Forward held, and their held keys.
     shuttle: Shuttle,
     /// Winds a held button every `Shuttle::TICK_EVERY` until it ends.
@@ -304,6 +308,9 @@ impl DocumentWindow {
                     // The window lost the keyboard: a field edit cancels, a
                     // hold ends where it got to, a held key lands.
                     this.cancel_field(window, cx);
+                    // The record popover closes (Swift's transient
+                    // popover), dropping its drafts.
+                    this.escape_record_popover(window, cx);
                     this.end_shuttle(cx);
                     // A step key let go elsewhere still counts as up.
                     this.step_key_down = None;
@@ -346,6 +353,15 @@ impl DocumentWindow {
                     }
                     shuttle.cancel(d);
                     shuttle.key_up(d);
+                    // Its record popover goes with it: a draft left open
+                    // would refuse Record with nothing on screen.
+                    let host = match kind {
+                        WindowKind::Document => PopoverHost::Document,
+                        WindowKind::Mixer => PopoverHost::MixerWindow,
+                    };
+                    if d.record().shows_popover_in(host) {
+                        d.set_record_popover(false);
+                    }
                     if kind == WindowKind::Document {
                         DocumentWindow::roll_closing(roll, d);
                     }
@@ -361,6 +377,7 @@ impl DocumentWindow {
             });
         }));
         let list_editor = ListEditor::new(cx);
+        let record_popover = RecordPopover::new(window, cx);
         let views_seen = app.read(cx).store.document(doc).map(seen_views);
         let weak = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
@@ -390,6 +407,7 @@ impl DocumentWindow {
             status_shown: None,
             _status_timer: None,
             transport_fields: TransportFields::new(cx),
+            record_popover,
             shuttle: Shuttle::new(),
             _hold: None,
             more_open: false,
@@ -1086,6 +1104,7 @@ impl DocumentWindow {
         let headers = std::mem::take(&mut self.track_headers.add_menu_open);
         let more = std::mem::take(&mut self.more_open);
         let faults = self.escape_faults(cx);
+        let record = self.escape_record_popover(window, cx);
         let arrangement = self.arrangement.close_menus();
         let detail = self.pane_menu.take().is_some();
         let list = self.list_editor.close_menu();
@@ -1094,6 +1113,7 @@ impl DocumentWindow {
             || headers
             || more
             || faults
+            || record
             || arrangement
             || detail
             || list
@@ -1679,6 +1699,8 @@ impl DocumentWindow {
         if plan.folded().is_empty() {
             self.more_open = false;
         }
+        let popover = bar.as_ref().and_then(|b| b.record_popover.as_ref());
+        self.follow_record_popover(&plan, popover, window, cx);
         if title != self.title {
             window.set_window_title(&title);
             self.title = title;
@@ -1701,8 +1723,11 @@ impl DocumentWindow {
             transport_bar::render(
                 &bar,
                 &plan,
-                &self.transport_fields,
-                self.more_open,
+                transport_bar::BarParts {
+                    fields: &self.transport_fields,
+                    popover: &self.record_popover,
+                    more_open: self.more_open,
+                },
                 &mut root.container(),
                 window,
                 cx,
@@ -1876,6 +1901,8 @@ impl Render for DocumentWindow {
         if plan.folded().is_empty() {
             self.more_open = false;
         }
+        let popover = bar.as_ref().and_then(|b| b.record_popover.as_ref());
+        self.follow_record_popover(&plan, popover, window, cx);
         self.follow_status(&status, window, cx);
         if title != self.title {
             window.set_window_title(&title);
@@ -1932,8 +1959,11 @@ impl Render for DocumentWindow {
                 d.child(transport_bar::render(
                     &bar,
                     &plan,
-                    &self.transport_fields,
-                    self.more_open,
+                    transport_bar::BarParts {
+                        fields: &self.transport_fields,
+                        popover: &self.record_popover,
+                        more_open: self.more_open,
+                    },
                     &mut root.container(),
                     window,
                     cx,
@@ -2029,5 +2059,13 @@ fn bar_state(
         }),
         record: RecordBar::of(d),
         summary: d.step_summary(),
+        record_popover: d
+            .record()
+            .shows_popover_in(if document_window {
+                PopoverHost::Document
+            } else {
+                PopoverHost::MixerWindow
+            })
+            .then(|| PopoverState::of(d)),
     })
 }
