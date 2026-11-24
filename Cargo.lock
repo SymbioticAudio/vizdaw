@@ -6400,8 +6400,10 @@ name = "vizdaw-gpui"
 version = "26.0.0"
 dependencies = [
  "ashpd",
+ "block2 0.6.2",
  "core-control",
  "core-ffi",
+ "futures",
  "gpui",
  "gpui_platform",
  "image",

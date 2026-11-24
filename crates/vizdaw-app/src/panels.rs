@@ -476,7 +476,7 @@ pub fn replace_question(spec: &PanelSpec, path: &Path) -> (String, String) {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let title = format!("\u{201c}{name}\u{201d} already exists. Do you want to replace it?");
-    let detail = if spec.save_extension == SAVE_PROJECT.save_extension {
+    let detail = if spec.row == SAVE_PROJECT.row {
         "Replacing it overwrites the project that is there.".to_owned()
     } else {
         let folder = path

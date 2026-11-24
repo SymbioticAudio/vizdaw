@@ -400,15 +400,12 @@ fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-/// `path`, ending in `.vizdaw`.
+/// `path`, ending in `.vizdaw` (any case, as the save panel's check:
+/// `vizdaw_app::panels::save_target`).
 pub fn with_extension(path: &Path) -> PathBuf {
-    if path.extension().and_then(|e| e.to_str()) == Some("vizdaw") {
-        path.to_path_buf()
-    } else {
-        let mut name = path.as_os_str().to_owned();
-        name.push(".vizdaw");
-        PathBuf::from(name)
-    }
+    let (path, _) =
+        vizdaw_app::formats::with_extension(&path.to_string_lossy(), "vizdaw", &["vizdaw"]);
+    PathBuf::from(path)
 }
 
 /// Creates the app state and makes it reachable through [`AppState::global`].

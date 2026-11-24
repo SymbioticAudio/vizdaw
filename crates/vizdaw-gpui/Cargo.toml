@@ -11,6 +11,8 @@ vizdaw-app = { path = "../vizdaw-app" }
 core-control = { path = "../core-control" }
 core-ffi = { path = "../core-ffi" }
 serde_json = "1"
+# The file panels' answers (file_panels).
+futures = "0.3"
 unicode-segmentation = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 # A window's native handle, for ui.screenshot (GPUI's own version).
@@ -36,8 +38,9 @@ url = "2"
 # The file panels (file_panels/macos.rs): the versions GPUI's macOS
 # platform already uses.
 objc2 = "0.6"
+block2 = "0.6"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSString", "NSURL"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSOpenPanel", "NSPanel", "NSResponder", "NSSavePanel", "NSWindow", "objc2-uniform-type-identifiers"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSApplication", "NSOpenPanel", "NSPanel", "NSResponder", "NSSavePanel", "NSWindow", "objc2-uniform-type-identifiers"] }
 objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std", "UTType"] }
 
 [features]

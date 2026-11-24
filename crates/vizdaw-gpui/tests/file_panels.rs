@@ -3,16 +3,21 @@
 //! seen here), one panel at a time, and File › Open through the seam with
 //! a package's `project.json` opening the package.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use gpui::{TestAppContext, VisualTestContext};
+use futures::channel::oneshot;
+use gpui::{AnyWindowHandle, App, TestAppContext, VisualTestContext};
 use vizdaw_app::DocumentStore;
 use vizdaw_app::panels::{self, PanelSpec};
 use vizdaw_app::testing::{FakeSession, demo_fake};
 use vizdaw_gpui::file_panels::{
-    MacPanel, MacType, PanelPlace, PortalFilter, PortalRequest, is_up, mac_panel, portal_request,
+    Chosen, MacPanel, MacType, PanelBackend, PanelPlace, PortalFilter, PortalRequest, choose,
+    is_up, mac_panel, portal_request, set_backend,
 };
+use vizdaw_gpui::menus::{self, ItemSpec, MenuModel};
 
 fn place(dir: Option<&str>, name: &str, ext: &str) -> PanelPlace {
     PanelPlace {
@@ -138,7 +143,7 @@ fn the_linux_open_is_one_file_chooser_that_takes_a_projects_project_json() {
                 ]
                 .map(String::from)
                 .to_vec(),
-                mime_types: vec![],
+                mime_types: vec!["audio/midi".into(), "audio/x-midi".into()],
             }),
             current_folder: None,
             current_name: None,
@@ -264,4 +269,103 @@ fn a_second_panel_while_one_is_up_is_refused_quietly(cx: &mut TestAppContext) {
     s.cx.simulate_new_path_selection(|_| None);
     s.cx.run_until_parked();
     assert!(s.opened.lock().unwrap().is_empty());
+}
+
+/// Panels a test answers itself, through their completions.
+#[derive(Default)]
+struct FakePanels {
+    shown: RefCell<Vec<(&'static str, oneshot::Sender<Chosen>)>>,
+}
+
+impl PanelBackend for FakePanels {
+    fn show(
+        &self,
+        spec: &PanelSpec,
+        _place: &PanelPlace,
+        _window: Option<AnyWindowHandle>,
+        done: oneshot::Sender<Chosen>,
+        _cx: &mut App,
+    ) {
+        self.shown.borrow_mut().push((spec.row, done));
+    }
+}
+
+impl FakePanels {
+    fn rows(&self) -> Vec<&'static str> {
+        self.shown.borrow().iter().map(|(r, _)| *r).collect()
+    }
+
+    fn answer(&self, i: usize, chosen: Chosen) {
+        let (_, done) = self.shown.borrow_mut().remove(i);
+        done.send(chosen).unwrap();
+    }
+}
+
+fn fake_panels(s: &mut Setup) -> Rc<FakePanels> {
+    let fake = Rc::new(FakePanels::default());
+    let backend: Rc<dyn PanelBackend> = fake.clone();
+    s.cx.update(|_, cx| set_backend(backend, cx));
+    fake
+}
+
+fn any_enabled(model: &MenuModel) -> bool {
+    fn on(i: &ItemSpec) -> bool {
+        match i {
+            ItemSpec::Command { enabled, .. } | ItemSpec::Mixer { enabled, .. } => *enabled,
+            ItemSpec::Submenu { enabled, items, .. } => *enabled || items.iter().any(on),
+            _ => false,
+        }
+    }
+    model.menus.iter().any(|m| m.items.iter().any(on))
+}
+
+#[gpui::test]
+fn the_answer_arrives_through_the_panels_completion_and_menus_are_off_meanwhile(
+    cx: &mut TestAppContext,
+) {
+    let mut s = setup(cx);
+    let fake = fake_panels(&mut s);
+    assert!(s.cx.update(|_, cx| any_enabled(&menus::shown(cx).unwrap())));
+    let got: Rc<RefCell<Option<Chosen>>> = Rc::default();
+    let slot = got.clone();
+    s.cx.update(|_, cx| {
+        let task = choose(&panels::IMPORT_MIDI, PanelPlace::default(), None, cx);
+        cx.spawn(async move |_| *slot.borrow_mut() = Some(task.await))
+            .detach();
+    });
+    s.cx.run_until_parked();
+    assert_eq!(fake.rows(), vec!["3"]);
+    assert!(got.borrow().is_none());
+    assert!(s.cx.update(|_, cx| is_up(cx)));
+    assert!(!s.cx.update(|_, cx| any_enabled(&menus::shown(cx).unwrap())));
+    fake.answer(0, Ok(Some(vec![PathBuf::from("/m/a.mid")])));
+    s.cx.run_until_parked();
+    assert_eq!(
+        got.borrow_mut().take(),
+        Some(Ok(Some(vec![PathBuf::from("/m/a.mid")])))
+    );
+    assert!(!s.cx.update(|_, cx| is_up(cx)));
+    assert!(s.cx.update(|_, cx| any_enabled(&menus::shown(cx).unwrap())));
+}
+
+#[gpui::test]
+fn dropping_the_callers_task_still_clears_the_panel_up_flag(cx: &mut TestAppContext) {
+    let mut s = setup(cx);
+    let fake = fake_panels(&mut s);
+    s.cx.update(|_, cx| {
+        drop(choose(
+            &panels::IMPORT_MIDI,
+            PanelPlace::default(),
+            None,
+            cx,
+        ))
+    });
+    s.cx.run_until_parked();
+    assert_eq!(fake.rows(), vec!["3"]);
+    fake.answer(0, Ok(None));
+    s.cx.run_until_parked();
+    assert!(!s.cx.update(|_, cx| is_up(cx)));
+    s.cx.update(|_, cx| drop(choose(&panels::IMPORT_AAF, PanelPlace::default(), None, cx)));
+    s.cx.run_until_parked();
+    assert_eq!(fake.rows(), vec!["14"]);
 }

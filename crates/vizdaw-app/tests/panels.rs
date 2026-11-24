@@ -388,3 +388,14 @@ fn the_replace_question_names_the_file() {
     );
     assert_eq!(REPLACE_ANSWERS, ["Replace", "Cancel"]);
 }
+
+#[test]
+fn only_the_project_save_gets_the_project_wording() {
+    // Another save that also ends in `.vizdaw` is not the project's panel.
+    let other = PanelSpec {
+        row: "x",
+        ..panels::SAVE_PROJECT
+    };
+    let (_, detail) = replace_question(&other, Path::new("/m/Song.vizdaw"));
+    assert!(detail.starts_with("A file or folder"), "{detail}");
+}

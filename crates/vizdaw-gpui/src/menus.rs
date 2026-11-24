@@ -703,19 +703,94 @@ fn menu_item(i: &ItemSpec) -> MenuItem {
     }
 }
 
-/// The menu model the platform menus show now.
-struct ShownMenus(MenuModel);
+/// The menu model the platform menus show now, and whether they show it
+/// with every item off (a file panel is up).
+struct ShownMenus {
+    model: MenuModel,
+    blocked: bool,
+}
 
 impl Global for ShownMenus {}
 
 /// Shows `model` in the platform menus, unless they already show it.
+/// While a file panel is up every item is off (Swift's panels were
+/// app-modal).
 pub fn show(model: MenuModel, cx: &mut App) {
-    if cx.try_global::<ShownMenus>().is_some_and(|s| s.0 == model) {
+    let blocked = crate::file_panels::is_up(cx);
+    if cx
+        .try_global::<ShownMenus>()
+        .is_some_and(|s| s.model == model && s.blocked == blocked)
+    {
         return;
     }
-    let menus = menus(&model);
-    cx.set_global(ShownMenus(model));
+    let menus = if blocked {
+        menus(&blocked_model(&model))
+    } else {
+        menus(&model)
+    };
+    cx.set_global(ShownMenus { model, blocked });
     cx.set_menus(menus);
+}
+
+/// Shows the current model again (a file panel came up or went away).
+pub fn refresh(cx: &mut App) {
+    if let Some(model) = cx.try_global::<ShownMenus>().map(|s| s.model.clone()) {
+        show(model, cx);
+    }
+}
+
+/// What the platform menus show now: the model as shown, with every item
+/// off while a file panel is up.
+pub fn shown(cx: &App) -> Option<MenuModel> {
+    cx.try_global::<ShownMenus>().map(|s| {
+        if s.blocked {
+            blocked_model(&s.model)
+        } else {
+            s.model.clone()
+        }
+    })
+}
+
+/// `model` with every item off.
+pub fn blocked_model(model: &MenuModel) -> MenuModel {
+    fn off(i: &ItemSpec) -> ItemSpec {
+        match i {
+            ItemSpec::Command {
+                id,
+                title,
+                keys,
+                checked,
+                ..
+            } => ItemSpec::Command {
+                id,
+                title: title.clone(),
+                keys: keys.clone(),
+                enabled: false,
+                checked: *checked,
+            },
+            ItemSpec::Mixer { op, title, .. } => ItemSpec::Mixer {
+                op: *op,
+                title: title.clone(),
+                enabled: false,
+            },
+            ItemSpec::Submenu { title, items, .. } => ItemSpec::Submenu {
+                title: title.clone(),
+                enabled: false,
+                items: items.iter().map(off).collect(),
+            },
+            other => other.clone(),
+        }
+    }
+    MenuModel {
+        menus: model
+            .menus
+            .iter()
+            .map(|m| MenuSpec {
+                title: m.title.clone(),
+                items: m.items.iter().map(off).collect(),
+            })
+            .collect(),
+    }
 }
 
 /// Binds the keys and sets the menus (no document yet).

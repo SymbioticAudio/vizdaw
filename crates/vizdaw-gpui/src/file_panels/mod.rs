@@ -1,14 +1,15 @@
 //! The native file panels (slice 7b Task 1; inventory §2.5): one
 //! [`PanelSpec`] from `vizdaw_app::panels` becomes a macOS
-//! `NSOpenPanel`/`NSSavePanel` run app-modal (as Swift's `runModal`) or a
-//! Linux xdg-desktop-portal file chooser with the spec's filter, accept
-//! label and folder. GPUI's own path prompts take no types, messages or
+//! `NSOpenPanel`/`NSSavePanel` (shown with a completion handler; the app
+//! refuses menus and other panels while it is up, for Swift's app-modal
+//! `runModal`) or a Linux xdg-desktop-portal file chooser with the spec's
+//! filter, accept label and folder. GPUI's own path prompts take no types, messages or
 //! save prompts, and on Linux cannot choose files and folders together.
 //!
 //! Each request is built as a plain struct first ([`MacPanel`],
 //! [`PortalRequest`]) so tests can check it without showing a panel.
-//! Panels never run inside an entity update: [`choose`] runs them from a
-//! spawned task. One panel is up at a time: a request while one is up is
+//! Panels never run inside an entity update: [`choose`] shows them from a
+//! deferred call. One panel is up at a time: a request while one is up is
 //! refused quietly (Swift's app-modal panels allowed no second one).
 //!
 //! The test platform has no native panels: until [`use_native`] is called
@@ -21,6 +22,9 @@ mod linux;
 mod macos;
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+
+use futures::channel::oneshot;
 
 use gpui::{AnyWindowHandle, App, Global, PathPromptOptions, PromptLevel, Task};
 use vizdaw_app::panels::{
@@ -151,6 +155,10 @@ pub fn portal_request(spec: &PanelSpec, place: &PanelPlace) -> PortalRequest {
         match t {
             FileType::Audio => mime_types.push("audio/*".to_owned()),
             FileType::PlainText => mime_types.push("text/plain".to_owned()),
+            FileType::Midi => {
+                mime_types.push("audio/midi".to_owned());
+                mime_types.push("audio/x-midi".to_owned());
+            }
             _ => {}
         }
         labels.push(t.label());
@@ -194,27 +202,54 @@ fn sentence_list(items: &[&str]) -> String {
     }
 }
 
-/// Which panels [`choose`] shows.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum Backend {
-    /// GPUI's path prompts (the test platform's, answered by tests).
-    #[default]
-    Gpui,
-    /// The platform's own panels.
-    Native,
+/// What a panel answered: the chosen paths, `None` when cancelled or
+/// refused (another panel was up), an error when it could not be shown.
+pub type Chosen = Result<Option<Vec<PathBuf>>, String>;
+
+/// Shows panels. `show` returns at once; the answer is sent on `done`
+/// once the panel closes (a dropped sender reads as cancelled).
+pub trait PanelBackend {
+    fn show(
+        &self,
+        spec: &PanelSpec,
+        place: &PanelPlace,
+        window: Option<AnyWindowHandle>,
+        done: oneshot::Sender<Chosen>,
+        cx: &mut App,
+    );
 }
 
-#[derive(Default)]
+/// GPUI's path prompts (the test platform's, answered by tests).
+struct GpuiPrompts;
+
+/// The platform's own panels.
+struct NativePanels;
+
 struct PanelState {
-    backend: Backend,
+    backend: Rc<dyn PanelBackend>,
     up: bool,
+}
+
+impl Default for PanelState {
+    fn default() -> Self {
+        PanelState {
+            backend: Rc::new(GpuiPrompts),
+            up: false,
+        }
+    }
 }
 
 impl Global for PanelState {}
 
 /// Shows the platform's own panels from now on (the real app).
 pub fn use_native(cx: &mut App) {
-    cx.default_global::<PanelState>().backend = Backend::Native;
+    set_backend(Rc::new(NativePanels), cx);
+}
+
+/// Shows panels through `backend` from now on (tests).
+#[doc(hidden)]
+pub fn set_backend(backend: Rc<dyn PanelBackend>, cx: &mut App) {
+    cx.default_global::<PanelState>().backend = backend;
 }
 
 /// Whether a panel is up now.
@@ -222,13 +257,19 @@ pub fn is_up(cx: &App) -> bool {
     cx.try_global::<PanelState>().is_some_and(|s| s.up)
 }
 
-/// What a panel answered: the chosen paths, `None` when cancelled or
-/// refused (another panel was up), an error when it could not be shown.
-pub type Chosen = Result<Option<Vec<PathBuf>>, String>;
+fn set_up(up: bool, cx: &mut App) {
+    cx.default_global::<PanelState>().up = up;
+    // The platform menus are off while a panel is up (Swift's panels were
+    // app-modal).
+    crate::menus::refresh(cx);
+}
 
-/// Shows `spec`'s panel, parented to `window` where the platform can,
-/// from a task (never inside the caller's update). While it is up a
-/// second request answers `Ok(None)` at once.
+/// Shows `spec`'s panel, parented to `window` where the platform can. The
+/// panel is shown from a deferred call (never inside the caller's
+/// update) and answers through its completion, so GPUI keeps running
+/// while it is up. While it is up a second request answers `Ok(None)` at
+/// once. The panel-up flag is cleared when the panel answers, whether or
+/// not the caller still holds the returned task.
 pub fn choose(
     spec: &PanelSpec,
     place: PanelPlace,
@@ -238,18 +279,19 @@ pub fn choose(
     if is_up(cx) {
         return Task::ready(Ok(None));
     }
-    let state = cx.default_global::<PanelState>();
-    state.up = true;
-    let backend = state.backend;
-    let shown = match backend {
-        Backend::Gpui => gpui_prompt(spec, &place, cx),
-        Backend::Native => native(spec, &place, window, cx),
-    };
+    set_up(true, cx);
+    let backend = cx.default_global::<PanelState>().backend.clone();
+    let (done, answered) = oneshot::channel::<Chosen>();
+    let (out, answer) = oneshot::channel::<Chosen>();
+    let spec = *spec;
+    cx.defer(move |cx| backend.show(&spec, &place, window, done, cx));
     cx.spawn(async move |cx| {
-        let answer = shown.await;
-        cx.update(|cx| cx.default_global::<PanelState>().up = false);
-        answer
+        let chosen = answered.await.unwrap_or(Ok(None));
+        cx.update(|cx| set_up(false, cx));
+        out.send(chosen).ok();
     })
+    .detach();
+    cx.spawn(async move |_| answer.await.unwrap_or(Ok(None)))
 }
 
 /// A save panel's answer after the app's own checks: the extension added
@@ -292,63 +334,93 @@ pub fn choose_save(
     })
 }
 
-fn gpui_prompt(spec: &PanelSpec, place: &PanelPlace, cx: &mut App) -> Task<Chosen> {
-    if spec.kind == PanelKind::Save {
-        let dir = place
-            .directory
-            .clone()
-            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from("/"));
-        let name = spec.default_name_for(&place.name, &place.ext);
-        let rx = cx.prompt_for_new_path(&dir, name.as_deref());
-        return cx.spawn(async move |_| match rx.await {
-            Ok(Ok(path)) => Ok(path.map(|p| vec![p])),
-            Ok(Err(e)) => Err(e.to_string()),
-            Err(_) => Ok(None),
+impl PanelBackend for GpuiPrompts {
+    fn show(
+        &self,
+        spec: &PanelSpec,
+        place: &PanelPlace,
+        _window: Option<AnyWindowHandle>,
+        done: oneshot::Sender<Chosen>,
+        cx: &mut App,
+    ) {
+        if spec.kind == PanelKind::Save {
+            let dir = place
+                .directory
+                .clone()
+                .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+                .unwrap_or_else(|| PathBuf::from("/"));
+            let name = spec.default_name_for(&place.name, &place.ext);
+            let rx = cx.prompt_for_new_path(&dir, name.as_deref());
+            cx.spawn(async move |_| {
+                let chosen = match rx.await {
+                    Ok(Ok(path)) => Ok(path.map(|p| vec![p])),
+                    Ok(Err(e)) => Err(e.to_string()),
+                    Err(_) => Ok(None),
+                };
+                done.send(chosen).ok();
+            })
+            .detach();
+            return;
+        }
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: spec.chooses_files(),
+            directories: spec.chooses_folders(),
+            multiple: spec.multiple,
+            prompt: Some(spec.prompt.into()),
         });
+        cx.spawn(async move |_| {
+            let chosen = match rx.await {
+                Ok(Ok(paths)) => Ok(paths),
+                Ok(Err(e)) => Err(e.to_string()),
+                Err(_) => Ok(None),
+            };
+            done.send(chosen).ok();
+        })
+        .detach();
     }
-    let rx = cx.prompt_for_paths(PathPromptOptions {
-        files: spec.chooses_files(),
-        directories: spec.chooses_folders(),
-        multiple: spec.multiple,
-        prompt: Some(spec.prompt.into()),
-    });
-    cx.spawn(async move |_| match rx.await {
-        Ok(Ok(paths)) => Ok(paths),
-        Ok(Err(e)) => Err(e.to_string()),
-        Err(_) => Ok(None),
-    })
 }
 
-#[cfg(target_os = "macos")]
-fn native(
-    spec: &PanelSpec,
-    place: &PanelPlace,
-    _window: Option<AnyWindowHandle>,
-    cx: &mut App,
-) -> Task<Chosen> {
-    let panel = mac_panel(spec, place);
-    // `runModal` spins its own run loop; run it from a task so no entity
-    // or window is being updated meanwhile.
-    cx.spawn(async move |_| Ok(macos::run(&panel)))
-}
+impl PanelBackend for NativePanels {
+    #[cfg(target_os = "macos")]
+    fn show(
+        &self,
+        spec: &PanelSpec,
+        place: &PanelPlace,
+        _window: Option<AnyWindowHandle>,
+        done: oneshot::Sender<Chosen>,
+        _cx: &mut App,
+    ) {
+        // Modeless with a completion handler: a `runModal` here would run
+        // inside GPUI's main-queue drain and stop every GPUI task, timer
+        // and frame until the panel closed.
+        macos::present(&mac_panel(spec, place), done);
+    }
 
-#[cfg(target_os = "linux")]
-fn native(
-    spec: &PanelSpec,
-    place: &PanelPlace,
-    window: Option<AnyWindowHandle>,
-    cx: &mut App,
-) -> Task<Chosen> {
-    linux::run(portal_request(spec, place), window, cx)
-}
+    #[cfg(target_os = "linux")]
+    fn show(
+        &self,
+        spec: &PanelSpec,
+        place: &PanelPlace,
+        window: Option<AnyWindowHandle>,
+        done: oneshot::Sender<Chosen>,
+        cx: &mut App,
+    ) {
+        let task = linux::run(portal_request(spec, place), window, cx);
+        cx.spawn(async move |_| {
+            done.send(task.await).ok();
+        })
+        .detach();
+    }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn native(
-    spec: &PanelSpec,
-    place: &PanelPlace,
-    _window: Option<AnyWindowHandle>,
-    cx: &mut App,
-) -> Task<Chosen> {
-    gpui_prompt(spec, place, cx)
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    fn show(
+        &self,
+        spec: &PanelSpec,
+        place: &PanelPlace,
+        window: Option<AnyWindowHandle>,
+        done: oneshot::Sender<Chosen>,
+        cx: &mut App,
+    ) {
+        GpuiPrompts.show(spec, place, window, done, cx);
+    }
 }

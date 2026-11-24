@@ -635,3 +635,22 @@ fn the_mixer_window_closes_without_asking(cx: &mut TestAppContext) {
     s.cx.run_until_parked();
     assert_eq!(s.fake.count("close"), 1);
 }
+
+#[gpui::test]
+fn save_as_writes_a_name_typed_with_the_extension_in_capitals_as_typed(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    let dir = tempfile::tempdir().unwrap();
+    let pick = dir.path().join("Song.VIZDAW");
+    s.cx.dispatch_action(vizdaw_gpui::SaveAs);
+    s.cx.run_until_parked();
+    s.cx.simulate_new_path_selection(move |_| Some(pick.clone()));
+    s.cx.run_until_parked();
+    assert!(!s.cx.has_pending_prompt());
+    assert_eq!(
+        save_as_calls(&s),
+        vec![format!(
+            "save_as({})",
+            dir.path().join("Song.VIZDAW").display()
+        )]
+    );
+}
