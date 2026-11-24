@@ -9,6 +9,7 @@ pub mod audition;
 pub mod banners;
 pub mod bounce;
 pub mod bounce_commands;
+pub mod close_prompts;
 pub mod commands;
 pub mod dawproject;
 pub mod document;

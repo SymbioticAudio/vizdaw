@@ -362,6 +362,46 @@ fn closing_an_edited_window_asks_first(cx: &mut TestAppContext) {
     assert_eq!(left, (0, 0));
 }
 
+/// Swift `ClosePrompts.sheetText(savePending:)`: a Save made while
+/// recording is owed, so the close question offers no Don't Save (that
+/// would drop a save the user asked for) and says the take and the
+/// changes will be saved; Cancel keeps the window and the owed save.
+#[gpui::test]
+fn closing_while_a_save_is_owed_offers_no_dont_save(cx: &mut TestAppContext) {
+    use vizdaw_app::close_prompts::SAVE_PENDING_INFORMATIVE;
+    let fake = demo_fake();
+    let mut lane = vizdaw_app::testing::lane_row(30, "Vocal", false);
+    lane.arm = true;
+    lane.input = Some(vizdaw_ffi::edit::LaneInputRow::Audio {
+        first: 0,
+        stereo: true,
+        return_of: None,
+    });
+    fake.set_lanes(3, vec![lane]);
+    fake.set_path(Some("/tmp/Owed.vizdaw"));
+    let mut s = setup(cx, fake);
+    let doc = s.window_doc();
+    s.app.update(&mut s.cx, |a, _| {
+        a.store.with_document(doc, |d, _| {
+            d.select(Some(3));
+            d.toggle_record().unwrap();
+            assert_eq!(d.save(), vizdaw_app::SaveAction::Saved);
+        });
+    });
+    s.fake.set_dirty(true);
+    s.cx.dispatch_action(vizdaw_gpui::CloseWindow);
+    s.cx.run_until_parked();
+    let (_, detail) = s.cx.pending_prompt().expect("the close question");
+    assert_eq!(detail, SAVE_PENDING_INFORMATIVE);
+    // The second button is Cancel now, not Don't Save.
+    s.cx.simulate_prompt_answer("Cancel");
+    s.cx.run_until_parked();
+    s.cx.cx.update(|_| {});
+    assert_eq!(s.app.read_with(&s.cx, |a, _| a.windows().len()), 1);
+    assert_eq!(s.fake.count("cancel_save_after_pass"), 0);
+    assert_eq!(s.fake.count("close"), 0);
+}
+
 #[gpui::test]
 fn quit_asks_when_only_the_session_knows_it_is_unsaved(cx: &mut TestAppContext) {
     let fake = demo_fake();

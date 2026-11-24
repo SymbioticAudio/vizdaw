@@ -190,16 +190,28 @@ pub fn quit(cx: &mut App) {
 fn quit_or_ask(cx: &mut App) {
     commit_renames(cx);
     let app = AppState::global(cx);
-    let (dirty, front) = {
+    let (dirty, front, waiting) = {
         let s = app.read(cx);
         let dirty = s.windows().iter().any(|w| s.has_unsaved_changes(w.doc));
+        // The songs whose Save waits for their recording pass: Discard
+        // Changes still saves them (their close lands the pass).
+        let mut waiting: Vec<String> = vec![];
+        for w in s.windows() {
+            if let Some(d) = s.store.document(w.doc)
+                && s.has_unsaved_changes(w.doc)
+                && d.save_after_pass_pending()
+                && !waiting.contains(&d.snapshot().title)
+            {
+                waiting.push(d.snapshot().title.clone());
+            }
+        }
         let front = s
             .store
             .front()
             .and_then(|d| s.window_of(d))
             .or_else(|| s.windows().first())
             .map(|w| w.handle);
-        (dirty, front)
+        (dirty, front, waiting)
     };
     if !dirty {
         quit_now(cx);
@@ -216,7 +228,7 @@ fn quit_or_ask(cx: &mut App) {
         sheet_host::Ask::with_labels(
             PromptLevel::Warning,
             "Quit without saving?",
-            Some("Some documents have unsaved changes."),
+            Some(&vizdaw_app::close_prompts::quit_detail(&waiting)),
             &["Discard Changes and Quit", "Cancel"],
         ),
         cx,

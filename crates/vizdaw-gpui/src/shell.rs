@@ -1190,11 +1190,13 @@ impl DocumentWindow {
             return true;
         }
         let doc = self.doc;
-        let (dirty, title) = {
+        let (dirty, title, pending) = {
             let s = self.app.read(cx);
+            let d = s.store.document(doc);
             (
                 s.has_unsaved_changes(doc),
-                s.store.document(doc).map(|d| d.snapshot().title.clone()),
+                d.map(|d| d.snapshot().title.clone()),
+                d.is_some_and(DocumentModel::save_after_pass_pending),
             )
         };
         if !dirty {
@@ -1204,17 +1206,17 @@ impl DocumentWindow {
             return false;
         }
         self.prompting = true;
-        let message = format!(
-            "Save changes to \u{201c}{}\u{201d}?",
-            title.unwrap_or_default()
-        );
+        // A Save made while recording is owed: no Don't Save (it would
+        // drop the save the user asked for).
+        let prompt = vizdaw_app::close_prompts::close_prompt(&title.unwrap_or_default(), pending);
+        let buttons = prompt.buttons.clone();
         let answer = crate::alerts::ask(
             window.window_handle(),
             crate::sheet_host::Ask::with_labels(
                 PromptLevel::Warning,
-                &message,
-                Some("Your changes are lost if you don't save them."),
-                &["Save", "Don't Save", "Cancel"],
+                &prompt.message,
+                Some(prompt.detail),
+                &prompt.buttons,
             ),
             cx,
         );
@@ -1222,9 +1224,10 @@ impl DocumentWindow {
             let answer = answer.await;
             this.update_in(cx, |this, window, cx| {
                 this.prompting = false;
-                match answer {
-                    Ok(0) => this.save_then_close(true, window, cx),
-                    Ok(1) => {
+                use vizdaw_app::close_prompts::{DONT_SAVE, SAVE};
+                match answer.ok().and_then(|i| buttons.get(i).copied()) {
+                    Some(SAVE) => this.save_then_close(true, window, cx),
+                    Some(DONT_SAVE) => {
                         // A close never saves a pass nobody asked to save.
                         let doc = this.doc;
                         this.app.update(cx, |s, _| s.cancel_save_after_pass(doc));
