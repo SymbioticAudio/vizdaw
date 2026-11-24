@@ -71,6 +71,9 @@ pub struct SheetButton {
     /// The button's help (Swift `.help`): its tooltip, and its `value` in
     /// the tree.
     pub help: Option<String>,
+    /// Its accessibility label when it is not the title (Swift
+    /// `.accessibilityLabel`): its label in the tree.
+    pub a11y: Option<String>,
 }
 
 impl SheetButton {
@@ -80,7 +83,14 @@ impl SheetButton {
             role,
             enabled: true,
             help: None,
+            a11y: None,
         }
+    }
+
+    /// The same button with `label` as its accessibility label.
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.a11y = Some(label.into());
+        self
     }
 
     /// The same button with `help` as its tooltip.
@@ -340,11 +350,13 @@ impl DocumentWindow {
         let editing =
             self.sheet.focus.contains_focused(window, cx) && !self.sheet.focus.is_focused(window);
         self.set_sheet_editing(editing, cx);
-        let label = sheet.label();
         let width = sheet.width();
         let buttons = sheet.buttons(cx);
         let mut card_scope = scope.container();
         let body = sheet.render(&mut card_scope.container(), window, cx);
+        // After the body: a sheet's title can follow what it drew (the
+        // report sheet's).
+        let label = sheet.label();
         let mut row_scope = card_scope.container();
         let row = buttons_row(&buttons, &mut row_scope, |i, b| {
             b.on_click(cx.listener(move |this, _, window, cx| {
@@ -413,7 +425,7 @@ fn buttons_row(
         .children(buttons.iter().enumerate().map(|(i, b)| {
             let face = button_face(i, b).child(scope.control_with(
                 "button",
-                &b.label,
+                b.a11y.as_deref().unwrap_or(&b.label),
                 b.enabled,
                 b.help.as_deref(),
                 false,

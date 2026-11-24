@@ -488,6 +488,17 @@ impl DocumentModel {
                         && let Some(report) = &r.report
                     {
                         self.last_report = Some(report.clone());
+                        self.report_written = if matches!(
+                            r.kind,
+                            JobKindRow::ExportMidi
+                                | JobKindRow::ExportProject
+                                | JobKindRow::ExportDawproject
+                                | JobKindRow::ExportAaf
+                        ) {
+                            r.written.clone()
+                        } else {
+                            vec![]
+                        };
                         self.report_shown = true;
                     }
                     // The file is in: the project stays whatever happens next.

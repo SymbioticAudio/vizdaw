@@ -102,6 +102,10 @@ pub struct DocumentModel {
     pub(crate) last_report: Option<vizdaw_ffi::ReportRow>,
     /// That report waits to be shown (Swift `reportShown`).
     pub(crate) report_shown: bool,
+    /// What the export that made `last_report` wrote (Swift `written`:
+    /// the report sheet's Show in Finder); empty for an import or a
+    /// report the session kept from before.
+    pub(crate) report_written: Vec<String>,
     /// A DAWproject merge is held, waiting to be confirmed (Swift
     /// `DocumentModel.mergeHeld`; the merge sheet sets it, slice 7c).
     pub(crate) merge_held: bool,
@@ -221,6 +225,7 @@ impl DocumentModel {
             bounce: crate::bounce::Bounce::default(),
             last_report: None,
             report_shown: false,
+            report_written: vec![],
             merge_held: false,
             media_rows: Mutex::new(None),
             copies_read: Mutex::new(None),

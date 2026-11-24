@@ -343,6 +343,42 @@ impl DocumentModel {
     pub fn hide_report(&mut self) {
         self.report_shown = false;
     }
+
+    /// What the export that made the report wrote (the report sheet's
+    /// Show in Finder; empty for an import's or an older report).
+    pub fn report_written(&self) -> &[String] {
+        &self.report_written
+    }
+
+    /// File › Last Import or Export Report… (Swift `showLastReport`): the
+    /// session's last report (it may be one the channel made), else the
+    /// UI's own; with none, the status line says so. A report other than
+    /// the one kept wrote nothing this sheet can show.
+    pub fn show_last_report(&mut self) {
+        let last = self
+            .session
+            .interchange_report()
+            .ok()
+            .flatten()
+            .or_else(|| self.last_report.clone());
+        let Some(last) = last else {
+            self.status = Some(crate::report_text::NO_REPORT_YET.into());
+            return;
+        };
+        if self.last_report.as_ref() != Some(&last) {
+            self.report_written.clear();
+        }
+        self.last_report = Some(last);
+        self.report_shown = true;
+    }
+
+    /// A merge's report (Swift `InterchangeModel.show`): shown as an
+    /// import's is, with nothing written.
+    pub fn show_report(&mut self, report: ReportRow) {
+        self.last_report = Some(report);
+        self.report_written.clear();
+        self.report_shown = true;
+    }
 }
 
 // ---------------------------------------------------------------------

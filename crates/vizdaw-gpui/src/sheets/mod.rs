@@ -6,3 +6,4 @@ pub mod export_midi;
 pub mod import_midi;
 pub mod project_settings;
 pub mod relink;
+pub mod report;
