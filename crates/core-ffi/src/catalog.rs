@@ -136,6 +136,14 @@ pub struct CatalogConfig {
     pub include_au: bool,
     /// Time each scan may take, in ms (`None`: 10 s, AU v3 30 s).
     pub timeout_ms: Option<u64>,
+    /// Also find VST3 bundles (off for the app until VST3 plug-ins can
+    /// load, host track H1).
+    #[uniffi(default = false)]
+    pub include_vst3: bool,
+    /// Folders searched for VST3 bundles when `include_vst3` (empty: the
+    /// standard ones).
+    #[uniffi(default)]
+    pub vst3_dirs: Vec<String>,
 }
 
 /// Where a scan stands.
@@ -217,6 +225,18 @@ impl PluginCatalog {
             .iter()
             .map(|p| Source::clap_bundle(p))
             .collect();
+        if self.config.include_vst3 {
+            let dirs: Vec<PathBuf> = if self.config.vst3_dirs.is_empty() {
+                core_host::vst3::search_paths()
+            } else {
+                self.config.vst3_dirs.iter().map(PathBuf::from).collect()
+            };
+            found.extend(
+                core_host::vst3::find_bundles(&dirs)
+                    .iter()
+                    .map(|p| Source::vst3_bundle(p)),
+            );
+        }
         #[cfg(target_os = "macos")]
         if self.config.include_au {
             found.extend(platform_macos::au::sources());
@@ -478,13 +498,13 @@ impl PluginCatalog {
         })
     }
 
-    /// The bundle to reveal in Finder (CLAP); `None` for Audio Units,
-    /// which live in the component registry.
+    /// The bundle to reveal in Finder (CLAP, VST3); `None` for Audio
+    /// Units, which live in the component registry.
     pub fn reveal_path(&self, plugin: PluginKey) -> Result<Option<String>, VizError> {
         ffi_guard(|| {
             Ok(with(|c| {
                 c.get(plugin.format.into(), &plugin.id)
-                    .filter(|e| e.source.format == PluginFormat::Clap)
+                    .filter(|e| matches!(e.source.format, PluginFormat::Clap | PluginFormat::Vst3))
                     .map(|e| e.source.path.to_string_lossy().into_owned())
             }))
         })

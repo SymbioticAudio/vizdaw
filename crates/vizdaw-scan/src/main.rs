@@ -5,11 +5,16 @@
 //! vizdaw-scan --format clap --path <bundle> --id <plugin id>
 //! vizdaw-scan --format au --path au:<type/subtype/manufacturer> --list
 //! vizdaw-scan --format au --id <type/subtype/manufacturer>
+//! vizdaw-scan --format vst3 --path <bundle> --list
+//! vizdaw-scan --format vst3 --path <bundle> --id <class ID>
 //! ```
 //!
 //! `--list` prints the plugins of the bundle; `--id` loads the plugin,
 //! activates it at 48 kHz / 512 frames, processes one silent block,
-//! deactivates it and prints its `PluginInfo`. The reply is one JSON line
+//! deactivates it and prints its `PluginInfo`. A VST3 `--id` loads the
+//! module and creates and releases the class's component, and replies
+//! "not validated": the plug-in is checked fully when first loaded, until
+//! the VST3 instance can be exercised here. The reply is one JSON line
 //! on stdout ([`core_host::scan::ScanReply`]); failures print a message on
 //! stderr and exit with status 2. A crash or a hang is the caller's to
 //! detect.
@@ -39,6 +44,7 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
                 format = Some(match it.next().as_deref() {
                     Some("clap") => Format::Clap,
                     Some("au") => Format::Au,
+                    Some("vst3") => Format::Vst3,
                     other => return Err(format!("unknown format {other:?}")),
                 })
             }
@@ -123,8 +129,14 @@ fn scan(args: &Args) -> Result<ScanReply, String> {
             Ok(ScanReply::Scanned(inst.info().clone()))
         }
         (Format::Au, _) => au::scan(args),
-        // `--format vst3` is not parsed yet (host track H1 Task 2).
-        (Format::Vst3, _) => Err("VST3 scanning is not available in this build".into()),
+        (Format::Vst3, None) => core_host::vst3::list_bundle(&args.path)
+            .map(ScanReply::Listed)
+            .map_err(|e| e.to_string()),
+        (Format::Vst3, Some(id)) => core_host::vst3::check_class(&args.path, id)
+            .map(|()| {
+                ScanReply::NotValidated("created; checked in full when first loaded (VST3)".into())
+            })
+            .map_err(|e| e.to_string()),
     }
 }
 

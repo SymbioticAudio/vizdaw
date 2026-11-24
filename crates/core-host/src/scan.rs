@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Time a CLAP or AU v2 scan may take (spec §8).
+/// Time a CLAP, VST3 or AU v2 scan may take (spec §8).
 pub const TIMEOUT: Duration = Duration::from_secs(10);
 /// Time an AU v3 scan may take.
 pub const TIMEOUT_AU_V3: Duration = Duration::from_secs(30);
@@ -62,7 +62,7 @@ impl ScanOutcome {
 pub struct ScanRequest {
     /// Format.
     pub format: PluginFormat,
-    /// Source path (CLAP bundle; ignored for AU).
+    /// Source path (CLAP or VST3 bundle; ignored for AU).
     pub path: PathBuf,
     /// The plugin to scan, or `None` to list the source.
     pub id: Option<String>,
@@ -343,6 +343,14 @@ pub fn discover_clap() -> Vec<Source> {
     crate::clap::find_bundles(&crate::clap::search_paths())
         .iter()
         .map(|p| Source::clap_bundle(p))
+        .collect()
+}
+
+/// Every VST3 bundle in the standard folders, as sources.
+pub fn discover_vst3() -> Vec<Source> {
+    crate::vst3::find_bundles(&crate::vst3::search_paths())
+        .iter()
+        .map(|p| Source::vst3_bundle(p))
         .collect()
 }
 
