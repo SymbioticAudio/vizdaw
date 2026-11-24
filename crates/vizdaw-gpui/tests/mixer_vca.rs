@@ -410,7 +410,7 @@ fn a_click_into_the_rename_popover_keeps_the_rename(cx: &mut TestAppContext) {
     s.click_at(point(field.left() + px(2.), field.bottom() + px(4.)));
     assert!(s.find("textfield", VcaStripLabels::RENAME_FIELD).is_some());
     s.click("textfield", VcaStripLabels::RENAME_FIELD);
-    s.cx.simulate_keystrokes("cmd-a");
+    s.cx.simulate_keystrokes("secondary-a");
     s.cx.simulate_input("Kit");
     s.cx.simulate_keystrokes("enter");
     s.cx.run_until_parked();
