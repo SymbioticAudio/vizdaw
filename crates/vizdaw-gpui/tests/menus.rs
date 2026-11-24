@@ -60,6 +60,7 @@ fn the_menu_model_follows_the_swift_order() {
                 "Editors",
                 "Track",
                 "Transport",
+                "Step",
                 "Automation",
                 "Mixer",
                 "Window"
@@ -129,7 +130,34 @@ fn the_menu_model_follows_the_swift_order() {
             Some("ui.toggle_right"),
         ]
     );
-    assert_eq!(ids(9), [Some("window.mixer")]);
+    assert_eq!(ids(10), [Some("window.mixer")]);
+    // Swift `AppCommands.swift:354-365`.
+    assert_eq!(
+        ids(7),
+        [
+            Some("step.entry"),
+            None,
+            Some("step.whole"),
+            Some("step.half"),
+            Some("step.quarter"),
+            Some("step.eighth"),
+            Some("step.sixteenth"),
+            Some("step.thirty_second"),
+            None,
+            Some("step.dot"),
+            Some("step.triplet"),
+            Some("step.tie"),
+            Some("step.rest"),
+            Some("step.delete_last"),
+        ]
+    );
+    assert!(
+        m.menus[7]
+            .items
+            .iter()
+            .all(|i| matches!(i, ItemSpec::Command { .. } | ItemSpec::Separator)),
+        "dividers only"
+    );
     assert_eq!(
         ids(4),
         [
@@ -1577,4 +1605,154 @@ mod file_flows {
         click(&mut s, "menuitem", "DAWproject\u{2026}");
         assert_eq!(s.panels.rows(), ["11"]);
     }
+}
+
+/// The Transport menu checks Overdub and Punch as the layout says and
+/// Click as the transport read says (Swift `commandToggle`).
+#[test]
+fn the_transport_menu_checks_overdub_punch_and_click() {
+    use vizdaw_ffi::ClickRow;
+    use vizdaw_ffi::session::click::ClickModeRow;
+    let keymap = Keymap::default();
+    let f = Arc::new(demo_fake());
+    let mut doc = DocumentModel::new(f.clone()).expect("a document");
+    // A new layout overdubs (Swift's default), no punch, no click.
+    let m = menu_model(Some(&doc), &keymap);
+    assert_eq!(checked(&m, "Transport", "Overdub"), Some(true));
+    assert_eq!(checked(&m, "Transport", "Punch"), Some(false));
+    assert_eq!(checked(&m, "Transport", "Click"), Some(false));
+    assert_eq!(checked(&m, "Transport", "Record"), None, "not a toggle");
+    doc.update_layout(|l| {
+        l.transport.overdub = false;
+        l.transport.punch = true;
+    });
+    let m = menu_model(Some(&doc), &keymap);
+    assert_eq!(checked(&m, "Transport", "Overdub"), Some(false));
+    assert_eq!(checked(&m, "Transport", "Punch"), Some(true));
+    assert_eq!(checked(&m, "Transport", "Click"), Some(false));
+    f.set_transport(|t| {
+        t.click = Some(ClickRow {
+            on: true,
+            level_db: -6.0,
+            mode: ClickModeRow::PlayAndRecord,
+        })
+    });
+    doc.poll_transport().unwrap();
+    let m = menu_model(Some(&doc), &keymap);
+    assert_eq!(checked(&m, "Transport", "Click"), Some(true));
+    // No document: nothing checked.
+    let none = menu_model(None, &keymap);
+    assert_eq!(checked(&none, "Transport", "Overdub"), Some(false));
+}
+
+const STEP_TITLES: [&str; 12] = [
+    "Step Entry",
+    "Whole Note",
+    "Half Note",
+    "Quarter Note",
+    "Eighth Note",
+    "Sixteenth Note",
+    "Thirty-Second Note",
+    "Dotted",
+    "Triplet",
+    "Tie",
+    "Rest",
+    "Delete Last Step",
+];
+
+fn step_enabled(m: &MenuModel) -> Vec<bool> {
+    STEP_TITLES.iter().map(|t| item(m, "Step", t).3).collect()
+}
+
+/// The Step menu's titles and keys come from the registry; its checks
+/// are step entry, the step value, dot and triplet (`step_is_on`).
+#[test]
+fn the_step_menu_takes_the_registry_and_checks_the_step_state() {
+    let keymap = Keymap::default();
+    let mut doc = demo_doc();
+    doc.select(Some(1));
+    let m = menu_model(Some(&doc), &keymap);
+    for (t, id) in STEP_TITLES
+        .iter()
+        .zip(vizdaw_app::step_entry::STEP_COMMANDS)
+    {
+        let (got, _, keys, _) = item(&m, "Step", t);
+        assert_eq!(got, *id);
+        let c = registry::find(id).unwrap();
+        assert_eq!(c.title, *t);
+        let want = c.shortcut.map(|s| Chord::parse(s).unwrap().text());
+        assert_eq!(keys.map(String::from), want, "{id}");
+    }
+    let checks = |m: &MenuModel| -> Vec<Option<bool>> {
+        STEP_TITLES.iter().map(|t| checked(m, "Step", t)).collect()
+    };
+    let (f, n) = (Some(false), None);
+    assert_eq!(checks(&m), [f, f, f, f, f, f, f, f, f, n, n, n]);
+    commands::perform_from_menu("step.entry", &mut doc).unwrap();
+    assert!(doc.step_entry_on());
+    let t = Some(true);
+    let m = menu_model(Some(&doc), &keymap);
+    // Step entry starts on quarter notes.
+    assert_eq!(checks(&m), [t, f, f, t, f, f, f, f, f, n, n, n]);
+    for id in ["step.half", "step.dot", "step.triplet"] {
+        commands::perform_from_menu(id, &mut doc).unwrap();
+    }
+    let m = menu_model(Some(&doc), &keymap);
+    assert_eq!(checks(&m), [t, f, t, f, f, f, f, t, t, n, n, n]);
+}
+
+/// Swift `StepEntry.swift:187-191`: nothing while a text field has the
+/// keyboard; Step Entry when on, or with a track and stopped; the rest
+/// when on and stopped.
+#[test]
+fn the_step_menu_enables_as_step_entry_runs() {
+    let keymap = Keymap::default();
+    let f = Arc::new(demo_fake());
+    let mut doc = DocumentModel::new(f.clone()).expect("a document");
+    let none = menu_model(None, &keymap);
+    assert_eq!(step_enabled(&none), [false; 12], "no document");
+    doc.select(None);
+    let off = [
+        true, false, false, false, false, false, false, false, false, false, false, false,
+    ];
+    assert_eq!(
+        step_enabled(&menu_model(Some(&doc), &keymap)),
+        [false; 12],
+        "no track"
+    );
+    doc.select(Some(1));
+    assert!(doc.step_lane().is_some());
+    assert_eq!(step_enabled(&menu_model(Some(&doc), &keymap)), off, "off");
+    f.set_playing(true);
+    doc.poll_transport().unwrap();
+    assert_eq!(
+        step_enabled(&menu_model(Some(&doc), &keymap)),
+        [false; 12],
+        "off and playing"
+    );
+    f.set_playing(false);
+    doc.poll_transport().unwrap();
+    commands::perform_from_menu("step.entry", &mut doc).unwrap();
+    assert_eq!(
+        step_enabled(&menu_model(Some(&doc), &keymap)),
+        [true; 12],
+        "on and stopped"
+    );
+    f.set_playing(true);
+    doc.poll_transport().unwrap();
+    assert_eq!(
+        step_enabled(&menu_model(Some(&doc), &keymap)),
+        off,
+        "on and playing: only Step Entry, to turn it off"
+    );
+    f.set_playing(false);
+    doc.poll_transport().unwrap();
+    doc.begin_text_editing("track-rename");
+    assert_eq!(
+        step_enabled(&menu_model(Some(&doc), &keymap)),
+        [false; 12],
+        "a text field has the keyboard"
+    );
+    doc.end_text_editing("track-rename");
+    assert_eq!(step_enabled(&menu_model(Some(&doc), &keymap)), [true; 12]);
 }

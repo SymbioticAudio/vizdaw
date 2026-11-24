@@ -630,13 +630,17 @@ impl DocumentWindow {
 
     /// A step entry key: runs its command, except that a held key repeats
     /// only rest, tie and Delete Last Step (Swift `KeyDispatch.repeating`).
+    /// A Step menu item is not a key: it always runs and leaves the held
+    /// key as it was.
     pub fn step_key(&mut self, action: &StepKey, window: &mut Window, cx: &mut Context<Self>) {
-        if self.step_key_down.as_ref() == Some(&action.id)
-            && !vizdaw_app::step_entry::repeats(&action.id)
-        {
-            return;
+        if !action.from_menu {
+            if self.step_key_down.as_ref() == Some(&action.id)
+                && !vizdaw_app::step_entry::repeats(&action.id)
+            {
+                return;
+            }
+            self.step_key_down = Some(action.id.clone());
         }
-        self.step_key_down = Some(action.id.clone());
         self.run_command(&RunCommand::new(action.id.clone()), window, cx);
         // A step moves the transport: the readouts read it now.
         self.after_transport(window, cx);

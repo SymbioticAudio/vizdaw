@@ -447,3 +447,113 @@ fn only_rest_tie_and_delete_last_repeat(cx: &mut TestAppContext) {
     s.cx.run_until_parked();
     assert!(!s.step_on());
 }
+
+/// The Step menu's items, as built for the platform menus.
+fn step_menu(s: &mut Setup) -> Vec<vizdaw_gpui::menus::ItemSpec> {
+    s.cx.update(|_, cx| vizdaw_gpui::menus::shown(cx))
+        .expect("the menus are shown")
+        .menus
+        .into_iter()
+        .find(|m| m.title == "Step")
+        .expect("a Step menu")
+        .items
+}
+
+/// Runs menu item `id` as its platform menu item does.
+fn menu_item(s: &mut Setup, id: &str) {
+    s.cx.update(|window, cx| window.dispatch_action(vizdaw_gpui::menus::action_for(id), cx));
+    s.cx.run_until_parked();
+}
+
+/// With the Step menu built, its keys are still step entry's only: off,
+/// `2` is locator 2 and `.` Next Marker; on, Half Note and Dotted. The
+/// menu items carry the keys' own action (macOS shows a key equivalent
+/// only for an action it finds bound) and bind nothing more.
+#[gpui::test]
+fn the_step_menu_leaves_the_keys_to_step_entry(cx: &mut TestAppContext) {
+    use vizdaw_gpui::menus::ItemSpec;
+    let mut s = setup(cx, demo_fake());
+    s.fake.set_marker_ticks(vec![BAR]);
+    let items = step_menu(&mut s);
+    let enabled: Vec<(&str, bool)> = items
+        .iter()
+        .filter_map(|i| match i {
+            ItemSpec::Command { id, enabled, .. } => Some((*id, *enabled)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(enabled[0], ("step.entry", true));
+    assert!(enabled[1..].iter().all(|(_, e)| !e), "{enabled:?}");
+    // Each item's action is the one its key is bound to, and only there.
+    for id in ["step.entry", "step.half", "step.dot", "step.delete_last"] {
+        let action = vizdaw_gpui::menus::action_for(id);
+        // As macOS looks it up for the menu item: in the whole keymap.
+        let bound: Vec<gpui::KeyBinding> = s.cx.update(|_, cx| {
+            cx.key_bindings()
+                .borrow()
+                .bindings_for_action(action.as_ref())
+                .cloned()
+                .collect()
+        });
+        assert!(!bound.is_empty(), "{id} shows its key");
+        assert!(
+            bound.iter().all(|b| b.action().name() == "vizdaw::StepKey"),
+            "{id}"
+        );
+    }
+
+    s.set_tick(2 * BAR);
+    s.keys("alt-2");
+    s.set_tick(0);
+    s.keys(".");
+    assert_eq!(s.tick(), BAR, ". is Next Marker");
+    s.keys("2");
+    assert_eq!(s.tick(), 2 * BAR, "2 is locator 2");
+    assert!(s.step_inputs().is_empty());
+
+    s.set_tick(0);
+    menu_item(&mut s, "step.entry");
+    assert!(s.step_on(), "Step › Step Entry turns it on");
+    assert!(step_menu(&mut s).iter().all(|i| match i {
+        ItemSpec::Command { enabled, .. } => *enabled,
+        _ => true,
+    }));
+    s.keys("2 .");
+    assert_eq!(
+        s.step_inputs(),
+        [
+            StepInputRow::Value {
+                value: NoteValueRow::Half
+            },
+            StepInputRow::Dot
+        ]
+    );
+    assert_eq!(s.tick(), 0, "neither the locator nor Next Marker");
+}
+
+/// A menu item is not a held key: Dotted chosen twice runs twice, and
+/// the `.` pressed after it still runs.
+#[gpui::test]
+fn step_menu_items_run_every_time(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    s.keys("t");
+    assert!(s.step_on());
+    menu_item(&mut s, "step.dot");
+    menu_item(&mut s, "step.dot");
+    assert_eq!(s.step_inputs(), [StepInputRow::Dot, StepInputRow::Dot]);
+    s.cx.simulate_keystrokes(".");
+    s.cx.run_until_parked();
+    assert_eq!(s.step_inputs().len(), 3, "the key after the menu item");
+    // The key is still down: a repeat of it does not run again.
+    s.held(".");
+    assert_eq!(s.step_inputs().len(), 3, "held, not repeated");
+    menu_item(&mut s, "step.dot");
+    assert_eq!(
+        s.step_inputs().len(),
+        4,
+        "the menu item while the key is down"
+    );
+    s.up(".");
+    s.keys(".");
+    assert_eq!(s.step_inputs().len(), 5);
+}

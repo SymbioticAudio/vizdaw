@@ -67,11 +67,43 @@ impl RunCommand {
 /// A step entry key (`step.*`, T among them): runs as [`RunCommand`],
 /// but a held key runs it again only for rest, tie and Delete Last Step
 /// (the document window tells a repeat by the key not having come up).
-#[derive(Clone, Debug, PartialEq, Eq, gpui::Action)]
+///
+/// The Step menu's items dispatch it too, with `from_menu` set: a menu
+/// item is never a held key. Equality ignores `from_menu`, so macOS finds
+/// the item's key among the step key bindings and shows it, with no
+/// second binding of its own ([`step_bindings`] stay the only ones).
+#[derive(Clone, Debug, gpui::Action)]
 #[action(namespace = vizdaw, no_json)]
 pub struct StepKey {
     pub id: SharedString,
+    pub from_menu: bool,
 }
+
+impl StepKey {
+    /// The key's action, as [`step_bindings`] binds it.
+    pub fn key(id: impl Into<SharedString>) -> Self {
+        StepKey {
+            id: id.into(),
+            from_menu: false,
+        }
+    }
+
+    /// The Step menu item's action.
+    pub fn menu(id: impl Into<SharedString>) -> Self {
+        StepKey {
+            id: id.into(),
+            from_menu: true,
+        }
+    }
+}
+
+impl PartialEq for StepKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for StepKey {}
 
 /// A File menu item on the window's document (Swift `AppCommands`):
 /// Import Audio…, Import MIDI File…, Open Co-Producer Copy…, Project
@@ -328,7 +360,7 @@ const FILE_BOUND: &[&str] = &["file.open_copy", "media.import", "media.relink"];
 
 /// The action a menu item's `id` dispatches: the slice 1 action for a
 /// slice 1 item, [`AppFileCommand`] or [`FileCommand`] for the other
-/// File items, else [`RunCommand`].
+/// File items, [`StepKey`] for the Step items, else [`RunCommand`].
 pub fn action_for(id: &str) -> Box<dyn Action> {
     match id {
         APP_QUIT => Box::new(Quit),
@@ -350,6 +382,9 @@ pub fn action_for(id: &str) -> Box<dyn Action> {
         id if commands::FILE_COMMANDS.contains(&id) => Box::new(FileCommand {
             id: SharedString::new(id),
         }),
+        id if vizdaw_app::step_entry::STEP_COMMANDS.contains(&id) => {
+            Box::new(StepKey::menu(SharedString::new(id)))
+        }
         id => Box::new(RunCommand::new(SharedString::new(id))),
     }
 }
@@ -514,6 +549,18 @@ fn command(id: &'static str, front: Option<&DocumentModel>, keymap: &Keymap) -> 
             | "ui.toggle_left"
             | "ui.toggle_bottom"
             | "ui.toggle_right"
+            | "transport.overdub"
+            | "transport.punch"
+            | "transport.click"
+            | "step.entry"
+            | "step.whole"
+            | "step.half"
+            | "step.quarter"
+            | "step.eighth"
+            | "step.sixteenth"
+            | "step.thirty_second"
+            | "step.dot"
+            | "step.triplet"
     )
     .then(|| front.is_some_and(|d| commands::is_on(id, d)));
     ItemSpec::Command {
@@ -599,6 +646,26 @@ pub fn menu_model(front: Option<&DocumentModel>, keymap: &Keymap) -> MenuModel {
                 ],
             ),
             menu("Transport", transport_items(front, keymap)),
+            // Swift `AppCommands.swift:354-365`.
+            menu(
+                "Step",
+                vec![
+                    cmd("step.entry"),
+                    ItemSpec::Separator,
+                    cmd("step.whole"),
+                    cmd("step.half"),
+                    cmd("step.quarter"),
+                    cmd("step.eighth"),
+                    cmd("step.sixteenth"),
+                    cmd("step.thirty_second"),
+                    ItemSpec::Separator,
+                    cmd("step.dot"),
+                    cmd("step.triplet"),
+                    cmd("step.tie"),
+                    cmd("step.rest"),
+                    cmd("step.delete_last"),
+                ],
+            ),
             menu(
                 "Automation",
                 vec![
@@ -880,9 +947,7 @@ fn step_bindings(keymap: &Keymap) -> Vec<KeyBinding> {
                 continue;
             }
             let Some(k) = keystroke(&chord) else { continue };
-            let step = || StepKey {
-                id: SharedString::new_static(id),
-            };
+            let step = || StepKey::key(SharedString::new_static(id));
             let bare = chord.mods & (COMMAND | CONTROL) == 0;
             let context = match (global, bare) {
                 (true, true) => UNMODIFIED_KEYS.to_owned(),
