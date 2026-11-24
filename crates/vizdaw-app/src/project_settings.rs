@@ -160,6 +160,8 @@ pub fn note(media: &[MediaRow]) -> String {
 pub struct ProjectSettings {
     loaded_song: SongText,
     loaded_format: ProjectFormatRow,
+    song_read: bool,
+    format_read: bool,
     pub rate: u32,
     pub depth: BitDepthRow,
     pub song: SongText,
@@ -169,22 +171,34 @@ pub struct ProjectSettings {
 
 impl ProjectSettings {
     /// Reads the project's format, song info and media (File › Project
-    /// Settings…). A failed read is the alert "Project Settings Failed"
-    /// on `d`, the sheet then starting at 48 kHz / 24-bit and no texts.
+    /// Settings…). Each is read on its own and what was read is kept; a
+    /// failed read is the alert "Project Settings Failed" on `d`, and OK
+    /// then sends nothing for that part (the format shows 48 kHz /
+    /// 24-bit, the texts empty).
     pub fn load(d: &mut DocumentModel) -> Self {
         let media_note = note(&d.media_rows());
-        let read = d
-            .session()
-            .project_info()
-            .and_then(|i| Ok((i.format, d.session().song_info()?)));
-        let (loaded_format, loaded_song) = match read {
-            Ok((f, s)) => (f, SongText::from_row(&s)),
+        let mut failed = None;
+        let format = d.session().project_info().map(|i| i.format);
+        let song = d.session().song_info();
+        let format_read = format.is_ok();
+        let song_read = song.is_ok();
+        let loaded_format = format.unwrap_or_else(|e| {
+            failed = Some(e);
+            FALLBACK_FORMAT
+        });
+        let loaded_song = match song {
+            Ok(s) => SongText::from_row(&s),
             Err(e) => {
-                d.alert = Some(AlertItem::from_error(&e, FAILED));
-                (FALLBACK_FORMAT, SongText::default())
+                failed.get_or_insert(e);
+                SongText::default()
             }
         };
+        if let Some(e) = failed {
+            d.alert = Some(AlertItem::from_error(&e, FAILED));
+        }
         ProjectSettings {
+            song_read,
+            format_read,
             rate: loaded_format.sample_rate,
             depth: loaded_format.depth,
             song: loaded_song.clone(),
@@ -192,6 +206,17 @@ impl ProjectSettings {
             loaded_format,
             media_note,
         }
+    }
+
+    /// The song info was read: OK may send it (texts never read would
+    /// overwrite the stored ones with empties).
+    pub fn song_read(&self) -> bool {
+        self.song_read
+    }
+
+    /// The format was read: OK may change it.
+    pub fn format_read(&self) -> bool {
+        self.format_read
     }
 
     /// The format chosen now.
@@ -205,15 +230,15 @@ impl ProjectSettings {
     /// The format changed while a DAWproject merge is held: the core
     /// refuses the conversion beside it, so OK waits.
     pub fn format_blocked(&self, d: &DocumentModel) -> bool {
-        self.format() != self.loaded_format && d.merge_held()
+        self.format_read && self.format() != self.loaded_format && d.merge_held()
     }
 
     /// OK: one `set_song_info` when any text changed, the format job
     /// when the format changed; nothing when nothing changed. A failure
     /// is the alert "Project Settings Failed" and keeps that change to
-    /// send.
+    /// send. A part that could not be read is never sent.
     pub fn apply(&mut self, d: &mut DocumentModel) {
-        if self.song != self.loaded_song {
+        if self.song_read && self.song != self.loaded_song {
             match d.session().set_song_info(self.song.row()) {
                 Ok(s) => {
                     d.apply(s);
@@ -223,7 +248,7 @@ impl ProjectSettings {
             }
         }
         let format = self.format();
-        if format != self.loaded_format && d.change_format(format) {
+        if self.format_read && format != self.loaded_format && d.change_format(format) {
             self.loaded_format = format;
         }
     }

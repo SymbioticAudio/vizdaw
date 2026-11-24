@@ -300,3 +300,57 @@ fn song_text_round_trips_and_the_sheet_uses_swifts_strings() {
         ("Project Settings", "Format", "Song info", "Comment")
     );
 }
+
+/// Review fix: a failed song-info read keeps the format that was read,
+/// and OK never sends song texts it did not read (they would overwrite
+/// the stored ones with empties).
+#[test]
+fn a_failed_song_read_sends_no_song_info_and_keeps_the_format() {
+    let f = fake();
+    f.set_song(SongInfoRow {
+        title: Some("Kept".into()),
+        artist: Some("Kept too".into()),
+        ..SongInfoRow::default()
+    });
+    f.set_project_info(ProjectInfoRow {
+        format: format(44_100, BitDepthRow::Int24),
+        mismatched: 0,
+        rate_mismatch: false,
+        device_rate: 0.0,
+    });
+    let mut m = doc(&f);
+    f.fail_next("song_info", refusal());
+    let mut p = ProjectSettings::load(&mut m);
+    assert_eq!(m.alert.take().unwrap().title, "Project Settings Failed");
+    assert!(!p.song_read());
+    assert_eq!(
+        p.format(),
+        format(44_100, BitDepthRow::Int24),
+        "the read format"
+    );
+    p.song.year = "1999".into();
+    p.depth = BitDepthRow::Int16;
+    p.apply(&mut m);
+    assert_eq!(f.count("set_song_info"), 0);
+    assert_eq!(f.song().title.as_deref(), Some("Kept"));
+    // A depth-only change keeps the read rate.
+    assert_eq!(formats_started(&f), [format(44_100, BitDepthRow::Int16)]);
+}
+
+/// Review fix: a failed format read sends no format change; the song
+/// info that was read still applies.
+#[test]
+fn a_failed_format_read_sends_no_format_change() {
+    let f = fake();
+    let mut m = doc(&f);
+    f.fail_next("project_info", refusal());
+    let mut p = ProjectSettings::load(&mut m);
+    assert_eq!(m.alert.take().unwrap().title, "Project Settings Failed");
+    assert!(!p.format_read());
+    p.rate = 96_000;
+    p.song.genre = "Jazz".into();
+    p.apply(&mut m);
+    assert!(formats_started(&f).is_empty());
+    assert!(!p.format_blocked(&m) || !m.merge_held());
+    assert_eq!(f.song().genre.as_deref(), Some("Jazz"));
+}

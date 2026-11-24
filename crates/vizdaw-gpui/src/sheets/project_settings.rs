@@ -159,6 +159,7 @@ impl Sheet for ProjectSettingsSheet {
             .iter()
             .map(|f| (f.label, f.accessibility))
             .chain(std::iter::once((COMMENT_LABEL, COMMENT_LABEL)));
+        let readable = self.settings.song_read();
         let rows: Vec<_> =
             labels
                 .zip(&self.fields)
@@ -168,7 +169,13 @@ impl Sheet for ProjectSettingsSheet {
                     row(
                         label,
                         div().relative().flex_1().child(field.clone()).child(
-                            song_scope.control_with("textfield", a11y, true, Some(&text), focused),
+                            song_scope.control_with(
+                                "textfield",
+                                a11y,
+                                readable,
+                                Some(&text),
+                                focused,
+                            ),
                         ),
                     )
                 })
@@ -228,6 +235,10 @@ impl Sheet for ProjectSettingsSheet {
     }
 
     fn focus_order(&self, cx: &App) -> Vec<FocusHandle> {
+        // Song info that could not be read is not edited.
+        if !self.settings.song_read() {
+            return vec![];
+        }
         self.fields.iter().map(|f| f.focus_handle(cx)).collect()
     }
 

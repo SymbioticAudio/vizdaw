@@ -388,3 +388,60 @@ fn a_failed_import_is_the_import_failed_alert(cx: &mut TestAppContext) {
         "prompt {prompt:?}, sheet {sheet:?}"
     );
 }
+
+/// Review fix: a pasted line break — CRLF, CR or LF — is one space in a
+/// single-line field; no stray CR is stored.
+#[gpui::test]
+fn a_pasted_line_break_is_one_space(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    s.open_settings();
+    s.cx.simulate_keystrokes("tab tab");
+    s.cx.write_to_clipboard(gpui::ClipboardItem::new_string("a\r\nb\rc\nd".into()));
+    s.cx.simulate_keystrokes("secondary-v");
+    s.cx.run_until_parked();
+    assert_eq!(s.expect("textfield", "Artist")["value"], "a b c d");
+    s.cx.simulate_keystrokes("enter");
+    s.cx.run_until_parked();
+    assert_eq!(s.fake.song().artist.as_deref(), Some("a b c d"));
+}
+
+/// Typing at the end of a loaded multi-line Comment keeps its line break.
+#[gpui::test]
+fn editing_the_comment_keeps_its_line_break(cx: &mut TestAppContext) {
+    let mut s = setup(cx, song_fake());
+    s.open_settings();
+    // Comment is the 13th field.
+    s.cx.simulate_keystrokes("shift-tab");
+    s.cx.simulate_keystrokes("end");
+    s.cx.simulate_input("!");
+    s.cx.run_until_parked();
+    s.cx.simulate_keystrokes("enter");
+    s.cx.run_until_parked();
+    assert_eq!(
+        s.fake.song().comment.as_deref(),
+        Some("line one\nline two!")
+    );
+    assert_eq!(s.fake.song().title.as_deref(), Some("Song"));
+}
+
+/// Review fix: with the song info unread the fields are off and OK sends
+/// none of it.
+#[gpui::test]
+fn unread_song_info_is_off_and_never_sent(cx: &mut TestAppContext) {
+    let f = song_fake();
+    let mut s = setup(cx, f);
+    s.fake.fail_next(
+        "song_info",
+        vizdaw_ffi::VizError::Model {
+            message: "no".into(),
+        },
+    );
+    s.open_settings();
+    assert_eq!(s.expect("textfield", "Song title")["enabled"], false);
+    s.cx.simulate_keystrokes("tab");
+    s.cx.simulate_input("X");
+    s.cx.simulate_keystrokes("enter");
+    s.cx.run_until_parked();
+    assert_eq!(s.fake.count("set_song_info"), 0);
+    assert_eq!(s.fake.song().title.as_deref(), Some("Song"));
+}
