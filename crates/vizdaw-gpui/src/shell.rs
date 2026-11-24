@@ -320,6 +320,14 @@ impl DocumentWindow {
                 }
             }),
         ];
+        // A keyboard layout change redraws the window, whose key context
+        // says whether the layout is a US one.
+        let me = cx.entity().downgrade();
+        subscriptions.push(cx.on_keyboard_layout_change(move |cx| {
+            if let Some(me) = me.upgrade() {
+                me.update(cx, |_, cx| cx.notify());
+            }
+        }));
         let state = app.clone();
         subscriptions.push(cx.on_release(move |this: &mut Self, cx| {
             this._hold = None;
@@ -1519,14 +1527,17 @@ impl Focusable for DocumentWindow {
 
 impl DocumentWindow {
     /// The root's key context: step entry on adds [`menus::STEP_CONTEXT`],
-    /// "reserve number row" [`menus::RESERVE_CONTEXT`].
+    /// "reserve number row" [`menus::RESERVE_CONTEXT`], a US keyboard
+    /// layout [`menus::US_LAYOUT_CONTEXT`] (read each render; a layout
+    /// change redraws the window).
     fn key_context(&self, cx: &App) -> String {
         let s = self.app.read(cx);
         let step = s
             .store
             .document(self.doc)
             .is_some_and(DocumentModel::step_entry_on);
-        menus::window_context(step, s.prefs.reserve_number_row())
+        let us = menus::us_layout(&s.keyboard_layout_id(cx));
+        menus::window_context(step, s.prefs.reserve_number_row(), us)
     }
 
     /// The window's root: its key context, focus, key handlers and

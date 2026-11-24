@@ -187,6 +187,15 @@ impl Setup {
         self.cx.run_until_parked();
     }
 
+    /// The keyboard layout the windows see (`None`: the platform's).
+    fn set_layout(&mut self, id: Option<&str>) {
+        self.app.update(&mut self.cx, |a, cx| {
+            a.keyboard_layout_override = id.map(String::from);
+            cx.notify();
+        });
+        self.cx.run_until_parked();
+    }
+
     fn set_reserve(&mut self, on: bool) {
         self.app.update(&mut self.cx, |a, cx| {
             a.prefs.set_reserve_number_row(on).unwrap();
@@ -210,7 +219,8 @@ fn the_locator_keys_go_set_and_clear(cx: &mut TestAppContext) {
     assert_eq!(s.tick(), BAR, "2 goes to locator 2");
     s.keys("alt-shift-2");
     assert_eq!(s.locator(2), None, "⌥⇧2 clears locator 2");
-    // As the platforms report ⌥⇧2: the shifted character.
+    // As the platforms report ⌥⇧2 on a US layout: the shifted character.
+    s.set_layout(Some("com.apple.keylayout.US"));
     s.set_tick(2 * BAR);
     s.keys("alt-2");
     assert_eq!(s.locator(2), Some(2 * BAR));
@@ -236,6 +246,40 @@ fn the_locator_keys_go_set_and_clear(cx: &mut TestAppContext) {
     s.set_tick(0);
     s.keys("0");
     assert_eq!(s.tick(), 2 * BAR, "0 goes to locator 0");
+}
+
+/// On any other layout the shifted character is another key (German
+/// ⌥⇧6 arrives as `alt-&`, US ⌥⇧7; French ⌥ on the 1 key too), so the
+/// US aliases are not bound: `alt-&` clears nothing. The named chord
+/// still works.
+#[gpui::test]
+fn shifted_characters_clear_nothing_off_a_us_layout(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    s.set_tick(BAR);
+    s.set_layout(Some("com.apple.keylayout.German"));
+    s.keys("alt-7");
+    s.alt_shifted("&");
+    assert_eq!(s.locator(7), Some(BAR), "alt-& is not ⌥⇧7 here");
+    s.set_layout(None);
+    s.alt_shifted("&");
+    assert_eq!(s.locator(7), Some(BAR), "nor on the test platform's layout");
+    s.keys("alt-shift-7");
+    assert_eq!(s.locator(7), None, "the named chord clears it");
+    for (id, us) in [
+        ("com.apple.keylayout.US", true),
+        ("com.apple.keylayout.ABC", true),
+        ("com.apple.keylayout.USExtended", true),
+        ("English (US)", true),
+        ("com.apple.keylayout.German", false),
+        ("com.apple.keylayout.French", false),
+        ("com.apple.keylayout.British", false),
+        ("English (UK)", false),
+        ("English (US, intl., with dead keys)", false),
+        ("unknown", false),
+        ("", false),
+    ] {
+        assert_eq!(vizdaw_gpui::menus::us_layout(id), us, "{id}");
+    }
 }
 
 /// Off, `.` is Next Marker, `2` locator 2 and Delete deletes the selected

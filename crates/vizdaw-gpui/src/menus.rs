@@ -165,10 +165,32 @@ pub const STEP_KEYS: &str = "DocumentWindow && StepEntry && !TextInput";
 /// is reserved for the locators.
 pub const STEP_NUMBER_KEYS: &str = "DocumentWindow && StepEntry && !ReserveNumberRow && !TextInput";
 
+/// The identifier while the keyboard layout is a US one: only there is
+/// ⌥⇧`digit` delivered as the US shifted character ([`delivered`]).
+pub const US_LAYOUT_CONTEXT: &str = "UsLayout";
+
+/// Whether keyboard layout `id` (GPUI's `keyboard_layout().id()`) is a US
+/// layout, whose shifted digits are `!@#$%^&*()`: macOS's U.S., ABC and
+/// U.S. Extended input sources, Linux's "English (US)". Conservative:
+/// any other id, international US variants among them, is not.
+pub fn us_layout(id: &str) -> bool {
+    matches!(
+        id,
+        "com.apple.keylayout.US"
+            | "com.apple.keylayout.ABC"
+            | "com.apple.keylayout.USExtended"
+            | "English (US)"
+    )
+}
+
 /// The key context of the document window's root: step entry on, the
-/// number row reserved.
-pub fn window_context(step_entry: bool, reserve_numbers: bool) -> String {
+/// number row reserved, a US layout.
+pub fn window_context(step_entry: bool, reserve_numbers: bool, us: bool) -> String {
     let mut c = WINDOW_CONTEXT.to_owned();
+    if us {
+        c.push(' ');
+        c.push_str(US_LAYOUT_CONTEXT);
+    }
     if step_entry {
         c.push(' ');
         c.push_str(STEP_CONTEXT);
@@ -186,8 +208,9 @@ pub fn window_context(step_entry: bool, reserve_numbers: bool) -> String {
 const STEP_OVER: &[&str] = &[crate::piano_roll::CONTEXT, crate::list_editor::CONTEXT];
 
 /// ⇧`digit` as macOS and Linux report it on a US layout: the shifted
-/// character with ⇧ folded in (⌥⇧2 arrives as `alt-@`). Other layouts
-/// shift the digits to other characters and are not covered.
+/// character with ⇧ folded in (⌥⇧2 arrives as `alt-@`). Bound only where
+/// [`US_LAYOUT_CONTEXT`] holds: on another layout the character is another
+/// key's (German ⌥⇧6 is `alt-&`), so there ⌥⇧`digit` has no key.
 fn us_shifted_digit(key: &str) -> Option<&'static str> {
     Some(match key {
         "1" => "!",
@@ -825,10 +848,11 @@ pub fn bindings(keymap: &Keymap) -> Vec<KeyBinding> {
                 WINDOW_CONTEXT
             };
             if let Some(alias) = delivered(&k, &chord) {
+                let us = format!("{context} && {US_LAYOUT_CONTEXT}");
                 keys.push(KeyBinding::new(
                     interned(alias),
                     RunCommand::new(id),
-                    Some(context),
+                    Some(&us),
                 ));
             }
             keys.push(KeyBinding::new(
