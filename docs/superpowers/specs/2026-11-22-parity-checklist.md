@@ -187,13 +187,13 @@ item (false: keys, the Keys settings and the control channel only).
 
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
-| automation.mode.off | Automation | Off |  | true | | |
-| automation.mode.read | Automation | Read |  | true | | |
-| automation.mode.touch | Automation | Touch |  | true | | |
-| automation.mode.latch | Automation | Latch |  | true | | |
-| automation.mode.write | Automation | Write |  | true | | |
-| automation.mode.trim | Automation | Trim |  | true | | |
-| automation.suspend | Automation | Suspend Automation |  | true | | |
+| automation.mode.off | Automation | Off |  | true | S6b | S6b |
+| automation.mode.read | Automation | Read |  | true | S6b | S6b |
+| automation.mode.touch | Automation | Touch |  | true | S6b | S6b |
+| automation.mode.latch | Automation | Latch |  | true | S6b | S6b |
+| automation.mode.write | Automation | Write |  | true | S6b | S6b |
+| automation.mode.trim | Automation | Trim |  | true | S6b | S6b |
+| automation.suspend | Automation | Suspend Automation |  | true | S6b | S6b |
 
 ### Window
 
@@ -236,33 +236,33 @@ item (false: keys, the Keys settings and the control channel only).
 | automation.write | Mixer | Write Automation |  | false | | |
 | mixer.new_bus | Mixer | New Bus |  | false | S6a | S6a |
 | mixer.make_mine | Mixer | Make Mine |  | false | | |
-| mixer.set_colour | Mixer | Colour |  | false | | |
-| mixer.set_strip | Mixer | Set Strip |  | false | | |
-| mixer.set_output | Mixer | Set Strip Output |  | false | | |
-| mixer.add_send | Mixer | Add Send |  | false | | |
-| mixer.set_send | Mixer | Set Send |  | false | | |
-| mixer.remove_send | Mixer | Remove Send |  | false | | |
+| mixer.set_colour | Mixer | Colour |  | false | S6b | S6b |
+| mixer.set_strip | Mixer | Set Strip |  | false | S6b | S6b |
+| mixer.set_output | Mixer | Set Strip Output |  | false | S6b | S6b |
+| mixer.add_send | Mixer | Add Send |  | false | S6b | S6b |
+| mixer.set_send | Mixer | Set Send |  | false | S6b | S6b |
+| mixer.remove_send | Mixer | Remove Send |  | false | S6b | S6b |
 | mixer.add_insert | Mixer | Add Insert |  | false | | |
 | mixer.remove_insert | Mixer | Remove Insert |  | false | | |
 | mixer.move_insert | Mixer | Move Insert |  | false | | |
 | mixer.set_bypass | Mixer | Bypass Insert |  | false | | |
 | mixer.set_eq | Mixer | Set EQ |  | false | | |
 | mixer.set_param | Mixer | Set Plug-in Parameter |  | false | | |
-| mixer.remove_bus | Mixer | Remove Bus |  | false | | |
-| mixer.new_group | Mixer | Group |  | true | | |
-| mixer.rename_group | Mixer | Rename Group |  | false | | |
-| mixer.set_group_colour | Mixer | Group Colour |  | false | | |
-| mixer.add_to_group | Mixer | Add to Group |  | false | | |
-| mixer.remove_from_group | Mixer | Remove from Group |  | false | | |
-| mixer.set_group_links | Mixer | Group Links |  | false | | |
-| mixer.delete_group | Mixer | Ungroup |  | true | | |
-| mixer.new_vca | Mixer | New VCA |  | true | | |
-| mixer.rename_vca | Mixer | Rename VCA |  | false | | |
-| mixer.set_vca_colour | Mixer | VCA Colour |  | false | | |
-| mixer.assign_vca | Mixer | Assign to VCA |  | false | | |
-| mixer.unassign_vca | Mixer | Remove from VCA |  | false | | |
-| mixer.set_vca | Mixer | Set VCA |  | false | | |
-| mixer.delete_vca | Mixer | Delete VCA |  | false | | |
+| mixer.remove_bus | Mixer | Remove Bus |  | false | S6b | S6b |
+| mixer.new_group | Mixer | Group |  | true | S6b | S6b |
+| mixer.rename_group | Mixer | Rename Group |  | false | S6b | S6b |
+| mixer.set_group_colour | Mixer | Group Colour |  | false | S6b | S6b |
+| mixer.add_to_group | Mixer | Add to Group |  | false | S6b | S6b |
+| mixer.remove_from_group | Mixer | Remove from Group |  | false | S6b | S6b |
+| mixer.set_group_links | Mixer | Group Links |  | false | S6b | S6b |
+| mixer.delete_group | Mixer | Ungroup |  | true | S6b | S6b |
+| mixer.new_vca | Mixer | New VCA |  | true | S6b | S6b |
+| mixer.rename_vca | Mixer | Rename VCA |  | false | S6b | S6b |
+| mixer.set_vca_colour | Mixer | VCA Colour |  | false | S6b | S6b |
+| mixer.assign_vca | Mixer | Assign to VCA |  | false | S6b | S6b |
+| mixer.unassign_vca | Mixer | Remove from VCA |  | false | S6b | S6b |
+| mixer.set_vca | Mixer | Set VCA |  | false | S6b | S6b |
+| mixer.delete_vca | Mixer | Delete VCA |  | false | S6b | S6b |
 
 ### Locators
 
@@ -387,7 +387,7 @@ editors). The record popover is a popover, not a window.
 | Plug-in editor window (one per insert or instrument slot) | `PluginWindows.show`, AppKit `NSWindow` (`PluginWindows.swift`) | | |
 | Built-in Synth window | `BuiltinSynthWindow.swift`, AppKit `NSWindow` | | |
 | Modify panel (floating, one per document) | `ModifyPanels.show`, AppKit `NSPanel` (`ModifyPanel.swift`) | | |
-| Mixer | `mixer` | S6a (strips, master, buses, meters; sends/groups/VCAs/slots 6b) | S6a (same) |
+| Mixer | `mixer` | S6a + S6b (strips, master, buses, meters, sends, groups, VCAs, slots without editors, MIDI strips) | S6a + S6b (same) |
 | Media Pool | `media-pool` | | |
 | Plugin Manager | `plugins` | | |
 | Song Notes | `window.song_notes` (opens the notes file in the system's editor, not a window of its own) | | |
@@ -560,7 +560,7 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 | new_project_tracks_over_the_channel | S3 (passed with the screen locked once the channel draws a fresh frame) | S2 |
 | loop_wraps_at_the_end | S3 | S3 |
 | arpeggiates_an_injected_chord_while_recording | | |
-| midi_mix_reaches_state_get | | |
+| midi_mix_reaches_state_get | S6b | S6b |
 | records_mpe_as_per_note_expression | | |
 | midi_files_round_trip_over_the_channel | | |
 | exports_for_another_daw_over_the_channel | | |
@@ -569,7 +569,7 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 | aaf_round_trip_over_the_channel | | |
 | dawproject_merge_over_the_channel | | |
 | multiq_install_and_switch_over_the_channel | | |
-| default_eq_and_new_bus_over_the_channel | | |
+| default_eq_and_new_bus_over_the_channel | S6b (New Bus part; the EQ install needs the plug-in catalogue) | S6b (New Bus part; the EQ install needs the plug-in catalogue) |
 | takes_and_layered_midi_loop_over_the_channel | | |
 | co_producer_over_mcp | | |
 | co_producer_librarian_over_mcp | | |
@@ -582,7 +582,7 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 | co_producer_import_midi_is_refused | | |
 | control_close_of_a_dirty_song_does_not_prompt | S2 | S2 |
 | app_quit_refuses_while_a_song_is_unsaved | S2 | S2 |
-| groups_vcas_and_transport_bar_over_the_channel | partial S6a (transport bar and strips; groups/VCAs 6b; command: bar items later) | partial S6a |
+| groups_vcas_and_transport_bar_over_the_channel | partial S6a + S6b (transport bar, strips, groups and VCAs; command: bar items later) | partial S6a |
 
 ## Linux gaps
 

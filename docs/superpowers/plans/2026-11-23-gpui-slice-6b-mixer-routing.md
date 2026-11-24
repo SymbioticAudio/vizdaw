@@ -69,3 +69,34 @@
 **Files:** `crates/vizctl/tests/e2e_gpui.rs`.
 **Produces:** GPUI ports of `groups_vcas_and_transport_bar_over_the_channel` (groups and VCA steps; the `command:` bar item stays a noted gap), `midi_mix_reaches_state_get`, `default_eq_and_new_bus_over_the_channel` (the New Bus part; the EQ install part needs the catalogue — noted), the left-pane steps of `window_views_and_panes_over_the_channel`.
 - [ ] Write the tests (`#[ignore]`); controller runs them on the Mac and Linux, does the visual checks and ticks the checklist; commit `e2e: mixer routing, groups and VCAs`.
+
+## Outcome (2026-11-23)
+
+All seven tasks done (commits 02e879a3..a49befc4 on `next`). Evidence: `cargo test -p vizdaw-app -p vizdaw-gpui` 929 passed; GPUI e2e 20/20 on the Mac and on Linux (XWayland); controller on-screen checks of the Mix view (strip fit with group tags, VCA columns and offset rows, with and without the status line) and the left-pane strip; final whole-branch review: ready to merge, its one wrong-target finding fixed.
+
+### Rulings
+
+- Task 1: Ruling: automation.suspend app-wide (APP_COMMANDS); automation.mode.* use the selection; mixer.make_mine left not_yet — Swift parity / Co-Producer out — none
+- Task 1: Ruling: selected strips that vanish are dropped on apply (Swift) — parity — none
+- Task 2: Ruling (revises plan Review Focus 3): a VCA member's fader shows its own level as in Swift; the VCA offset shows on the offset row/mark; member_level_db (core heard_db) available for Task 5 — Swift parity — none
+- Task 3: Ruling: DocSession::idle returns IdleNews { snapshot, slots_changed } so the mixer rereads slots (Swift slotsVersion) — needed — two implementors updated
+- Task 4: Ruling: Automation and Mixer menus after Transport as Swift AppCommands declares (brief said between Track and Transport — brief was wrong) — Swift parity — one-line move
+- Task 4: Ruling: a lost mouse-up during an insert drag cancels (nothing moves) — no surprise data move — the user redoes the drag
+- Task 5: Ruling: the shared controls drag listener moved to capture phase with mouse-down lifting any open press — one pattern for every drag (strip, send, pan, VCA, MIDI) — a capture-phase mouse-down could cut a gesture another element relies on (review checks double-click reset and number-box edits)
+- Task 5: Ruling (implementer, fix round 1): layout from this frame's bounds (panes::place_in; prepaint-time fit::fitted for the mixer) instead of passing frames.centre (which is last frame's measure too) — removes the one-frame lag at its source — none
+- Task 6: Ruling: the left-pane placement exists only while a track is focused (opening a document doesn't read its mixer) — matches placement appeared/disappeared — none
+- Task 6: Ruling: no left-pane destination menu (the session cannot set a track's destination) and no synthFocus (instrument menu out of slice) — backlog — the pane can't change a track's destination yet
+- Task 7: Ruling: Task 7 (tests only, green on both platforms) is reviewed inside the final whole-branch review instead of a separate task review — saves a seat — the final reviewer must check the e2e assertions
+- Final: Ruling: declined-to-judge items stand — CI Swift removal (owner), core refusing structural edits during touches (pre-6b core behaviour; the send case is fixed app-side), out-of-slice plug-in UI, left-pane destination menu (backlog), insert-move channel commands (gap noted) — cost: an insert move is untested end to end
+- Final: Ruling: residual — the core's single release for a shifted send is keyed by index and flushes the sampler's last value into the send now at that index (one value, undoable, needs ⌘Z or a channel edit mid-drag) — parked to the backlog for a core fix (touch release by send identity) — cost: one stray value in a rare case
+
+### Deferred minors (in docs/feature-backlog.md)
+
+- Task 1: minor (deferred): suspend test resets the global only on success (drop guard); add_send master guard not in Swift; set_colour arg-before-gesture order untested; control_args duplicated in tests; app_wide doc comment stale
+- Task 2: minor (deferred): duplicated test helpers (tests/support); awkward double mixer() call in one assertion
+- Task 3: minor (deferred): refetch held_slots error raises Mixer Unavailable (Swift same); nudge at limit previews then commits nothing; prune cancel preview during refetch; bypass toggle from snapshot; long comment line
+- Task 4: minor (deferred): sidechain ✓ in title vs checked; suspend unchecked with no document; submenu ▸ strip; instrument slot recorded as enabled button
+- Task 5: minor (deferred): right-click during a left drag ends it; lost-up then quick press may count as a double-click reset; missing tests (VCA blur cancel, VCA/MIDI double-click reset, 20 ms throttle via view); duplicated header constants in vca_strip/midi_strip; mixer_view.rs ~2,700 lines (split mixer_menu.rs later)
+- Task 5: minor (deferred): pane dividers and pane-drag start still use last-frame frames (a 1 pt divider up to 28 pt off for one frame when the status line toggles; self-corrects)
+- Task 6: minor (deferred): no GPUI test for the MIDI selected edge
+- Final: minor (deferred): member_level_db unused; Built-in Synth hint/help mention disabled click/double-click (no-new-strings rule; backlog with the slot actions); DocumentModel::apply reads the mixer per version change while strips are selected; lost-up then quick press may reset as a double-click; split mixer_view.rs next slice; left-pane drag / armed fallback e2e
