@@ -350,17 +350,23 @@ fn reads_the_hand_other_file() {
     assert_eq!(buses(&a), ["Band", "Room"]);
     has(r, ItemKind::Changed, FOLDERS);
 
-    // "Bass" plays the built-in synth (its instrument is VST3), "Gtr" is an
-    // audio track; both output to the folder's bus.
+    // "Bass" plays its VST3 plug-in (the class ID in upper case), "Gtr" is
+    // an audio track; both output to the folder's bus.
     let band = bus(&a, "Band");
     let bass = lane(&a, "Bass");
     let synth = midi_strip(&a, &bass);
-    assert_eq!(synth.kind, StripKind::BuiltinSynth);
+    assert_eq!(synth.kind, StripKind::Instrument(bass.midi_dest.unwrap()));
     assert_eq!(synth.output, Output::Bus(band));
-    assert_eq!(
-        a.h.doc().instruments()[&bass.midi_dest.unwrap()].name,
-        "Built-in Synth (ch 1)"
-    );
+    let bass_inst = &a.h.doc().instruments()[&bass.midi_dest.unwrap()];
+    assert_eq!(bass_inst.name, "Bass VST");
+    let core_model::document::DestKind::PluginInstrument { slot } = &bass_inst.kind else {
+        panic!("Bass plays a plug-in")
+    };
+    assert_eq!(slot.plugin.format, PluginFormat::Vst3);
+    assert_eq!(slot.plugin.id, "0123456789ABCDEF0123456789ABCDEF");
+    assert_eq!(slot.plugin.vendor, "Example");
+    assert_eq!(slot.plugin.version, "1.0");
+    assert_eq!(slot.state, None);
     let gtr = lane(&a, "Gtr");
     assert!(gtr.midi_dest.is_none());
     let gtr_strip = audio_strip(&a, &gtr);
@@ -370,7 +376,7 @@ fn reads_the_hand_other_file() {
         Output::Master
     );
 
-    has_detail(r, ItemKind::LeftOut, VST, "Bass VST");
+    lacks(r, VST);
     let eq = item(r, ItemKind::LeftOut, BUILTIN_EFFECTS).expect("EQ line");
     assert_eq!(eq.count, 1);
     assert_eq!(eq.details.len(), 2, "{:?}", eq.details);
@@ -537,6 +543,48 @@ fn plugins_map_or_wait() {
     lacks_detail(&a.report, PLUGIN_SETTINGS, "Lead");
     // No metadata.xml: the title is the file's stem.
     assert_eq!(a.h.doc().sequence(a.seq).unwrap().name, "NoDelayState");
+}
+
+/// Host track H1 Task 1: a `Vst3Plugin` insert maps to a VST3 slot with its
+/// `.vstpreset` state as is, asked about as installed by its upper-case
+/// class ID; a `Vst2Plugin` is still left out.
+#[test]
+fn vst3_inserts_map_to_slots() {
+    const VST3_STATE: &[u8] = b"VST3 preset bytes";
+    let dir = tempfile::tempdir().unwrap();
+    let project = project_xml(
+        r#"<Track id="t" name="Gtr" contentType="audio"><Channel id="tc" role="regular" destination="mc"><Devices><Vst3Plugin id="tv" deviceID="fedcba9876543210fedcba9876543210" deviceName="Delay 3" deviceRole="audioFX" deviceVendor="Example" pluginVersion="2.0"><Enabled value="false"/><State path="plugins/x.vstpreset"/></Vst3Plugin><Vst2Plugin id="t2" deviceID="1234" deviceName="Old Comp" deviceRole="audioFX"/></Devices></Channel></Track>"#,
+        "",
+    );
+    let path = package(
+        dir.path(),
+        "Vst3",
+        &[
+            ("project.xml", project.as_bytes()),
+            ("plugins/x.vstpreset", VST3_STATE),
+        ],
+    );
+    let asked = std::cell::RefCell::new(Vec::new());
+    let installed = |f: PluginFormat, id: &str| {
+        asked.borrow_mut().push((f, id.to_owned()));
+        false
+    };
+    let a = imported(&open_ok(&path), &installed);
+    let gtr = audio_strip(&a, &lane(&a, "Gtr"));
+    assert_eq!(gtr.inserts.len(), 1, "{:?}", a.report);
+    let slot = &gtr.inserts[0];
+    assert_eq!(slot.plugin.format, PluginFormat::Vst3);
+    assert_eq!(slot.plugin.id, "FEDCBA9876543210FEDCBA9876543210");
+    assert_eq!(slot.plugin.name, "Delay 3");
+    assert!(slot.bypass);
+    assert_eq!(state_of(&a, slot.id), Some(VST3_STATE.to_vec()));
+    assert!(asked.borrow().contains(&(
+        PluginFormat::Vst3,
+        "FEDCBA9876543210FEDCBA9876543210".to_owned()
+    )));
+    has_detail(&a.report, ItemKind::Note, NOT_INSTALLED, "Delay 3");
+    has_detail(&a.report, ItemKind::LeftOut, VST, "Old Comp");
+    lacks_detail(&a.report, VST, "Delay 3");
 }
 
 #[test]
@@ -1514,11 +1562,23 @@ fn golden_of(pkg: &DpPackage) -> serde_json::Value {
 }
 
 /// The import of each golden case is the one 6d made (generated at 2d89a24),
-/// apart from the new tags line.
+/// apart from the new tags line and the VST3 instrument, which host track
+/// H1 maps to a slot: in `hand_other`, "Bass" plays "Bass VST" rather than
+/// the built-in synth, and the VST line is gone.
 #[test]
 fn untagged_behaviour_matches_6d() {
-    let want: serde_json::Value =
+    let mut want: serde_json::Value =
         serde_json::from_slice(&fixture("import_6d_golden.json")).expect("the golden file");
+    let other = &mut want["hand_other"];
+    let bass = &mut other["projection"]["strips"][0];
+    assert_eq!(bass["name"], "Built-in Synth");
+    bass["name"] = "Bass VST".into();
+    bass["devices"] =
+        serde_json::json!([["vst3", "0123456789ABCDEF0123456789ABCDEF", false, null]]);
+    let lines = other["report"].as_array_mut().expect("report lines");
+    let before = lines.len();
+    lines.retain(|l| l != "LeftOut VST plug-ins x1 [\"Bass VST\"]");
+    assert_eq!(lines.len(), before - 1);
     let dir = tempfile::tempdir().unwrap();
     for (name, pkg) in golden_cases(dir.path()) {
         let mut got = golden_of(&pkg);

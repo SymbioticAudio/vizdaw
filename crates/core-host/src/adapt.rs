@@ -265,6 +265,8 @@ impl Core {
             transport: info,
         };
         let status = proc.process(&mut ctx);
+        // Every value taken from the queue has reached the plug-in.
+        self.params.block_done();
         self.gestures.send_all(self.out.as_slice());
         status
     }

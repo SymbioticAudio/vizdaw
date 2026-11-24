@@ -14,6 +14,7 @@ use crate::instance::{
 use crate::process::ParamEvent;
 use crate::queue::{GestureReceiver, ParamSender, param_queues};
 use crate::shelf::{Ready, Shelf, ShelfFactory};
+use crate::vst3::Vst3Format;
 use core_engine::EngineError;
 use core_engine::engine::Engine;
 use core_engine::schedule::CompileReport;
@@ -355,7 +356,7 @@ impl std::fmt::Debug for PluginHost {
 }
 
 impl PluginHost {
-    /// A host with the CLAP format, activating plugins at `sample_rate`
+    /// A host with the CLAP and VST3 formats, activating plugins at `sample_rate`
     /// for blocks of up to `max_frames`; starts the loader thread.
     pub fn new(sample_rate: f64, max_frames: u32) -> Result<PluginHost, HostError> {
         let (jobs, job_rx) = channel::<Job>();
@@ -376,7 +377,7 @@ impl PluginHost {
             .map_err(|e| HostError::LoadFailed(format!("cannot start the loader: {e}")))?;
         let (back_tx, back_rx) = channel();
         Ok(PluginHost {
-            formats: vec![Box::new(ClapFormat::new())],
+            formats: vec![Box::new(ClapFormat::new()), Box::new(Vst3Format::new())],
             paths: BTreeMap::new(),
             unavailable: BTreeMap::new(),
             disabled: BTreeSet::new(),
@@ -1081,6 +1082,9 @@ impl PluginHost {
         if let Some(a) = answer {
             self.offline_states.insert(id, a);
         }
+        // What the last processor was sent and never got: the plugin does
+        // not hold it, so it stays undelivered in the new queue.
+        let lost: BTreeSet<ParamId> = live.params.undelivered().into_iter().collect();
         let ((params, gestures), audio) = param_queues();
         live.params = params;
         live.gestures = gestures;
@@ -1121,6 +1125,21 @@ impl PluginHost {
             if skip_held && live.inst.param_value(k).is_some_and(|h| holds(h, v)) {
                 continue;
             }
+            if lost.contains(&k) {
+                live.params.send(k, v);
+            } else {
+                live.params.send_held(k, v);
+            }
+        }
+        // A base value queued when an overlay entry went away, which the
+        // last processor never got: the plug-in still holds the removed
+        // value, so it is sent again (and counted until delivered).
+        let back: Vec<(ParamId, f64)> = lost
+            .iter()
+            .filter(|p| !live.sent.contains_key(p))
+            .filter_map(|p| live.base.get(p).map(|v| (*p, *v)))
+            .collect();
+        for (k, v) in back {
             live.params.send(k, v);
         }
         Ok(())
@@ -1456,9 +1475,18 @@ impl PluginHost {
         let State::Live(live) = state else {
             return Err(HostError::NotFound(format!("instance {id} is not loaded")));
         };
+        // Asked before the state is taken: what it will not hold. That is
+        // what the instance says (a VST3's values before its first block)
+        // and what the host queued to a processor that no processed block
+        // has carried (the engine stopped, no device, a quick save). Also
+        // while inactive: an instance parked after a refused load still
+        // has the queue its last processor never drained; while inactive,
+        // values go through `set_params` and never touch it.
+        let mut unsaved: BTreeSet<ParamId> = live.inst.unsaved_params().into_iter().collect();
+        unsaved.extend(live.params.undelivered());
         let bytes = live.inst.save_state()?;
         let overlay = history.doc().plugin_slot(id).map(|s| &s.params);
-        let keep: BTreeMap<ParamId, f64> = automated
+        let mut keep: BTreeMap<ParamId, f64> = automated
             .iter()
             .copied()
             .filter_map(|p| {
@@ -1468,6 +1496,20 @@ impl PluginHost {
             })
             .filter(|(_, v)| v.is_finite())
             .collect();
+        // A value the plugin was given but its state does not hold yet
+        // stays in the overlay too: the value the host sent (overlay,
+        // `set_param` or gesture values are in `sent`), else the base it
+        // went back to when an overlay entry went away. Never the
+        // plugin's own reading, which may be a value since removed.
+        for p in unsaved {
+            if keep.contains_key(&p) {
+                continue;
+            }
+            let v = live.sent.get(&p).or_else(|| live.base.get(&p)).copied();
+            if let Some(v) = v.filter(|v| v.is_finite()) {
+                keep.insert(p, v);
+            }
+        }
         let blob = history
             .capture_state_keeping(id, &bytes, &keep)
             .map_err(|e| HostError::StateRejected(e.to_string()))?;

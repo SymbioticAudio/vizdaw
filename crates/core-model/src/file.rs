@@ -1,6 +1,6 @@
 //! The `.vizdaw` package: `project.json`, `Media/` and `Autosave/`.
 //!
-//! `project.json` is `{ "format": "vizdaw-project", "version": 11,
+//! `project.json` is `{ "format": "vizdaw-project", "version": 12,
 //! "document": { … } }`. Loading migrates older versions step by step,
 //! refuses newer ones, rejects unknown fields and runs every integrity
 //! check. Saving writes a temporary file, syncs it, renames it over the old
@@ -28,7 +28,7 @@ use std::sync::Arc;
 /// The `format` tag.
 pub const FORMAT: &str = "vizdaw-project";
 /// The version this build writes.
-pub const VERSION: u64 = 11;
+pub const VERSION: u64 = 12;
 /// The oldest version this build can migrate from.
 pub const FIRST_VERSION: u64 = 1;
 /// The project file name inside a package.
@@ -49,6 +49,7 @@ pub const MIGRATIONS: &[Migration] = &[
     migrate_v8_to_v9,
     migrate_v9_to_v10,
     migrate_v10_to_v11,
+    migrate_v11_to_v12,
 ];
 
 /// The project rate a migrated project gets (5a Ruling 2): the most
@@ -73,6 +74,18 @@ fn fade_frames(tempo: &TempoMap, start: i64, ticks: i64, rate: f64) -> u64 {
     let e = tempo.tick_to_seconds(Tick(start.saturating_add(ticks.max(0))));
     // Float-to-int `as` saturates (and maps NaN to 0).
     ((e - s) * rate).round().max(0.0) as u64
+}
+
+/// Version 11 → 12 (host track H1 Task 1, owner ruling 2026-11-23): a
+/// plug-in reference may have the format `vst3`, whose ID is the VST3
+/// class ID. A version-11 file has none, so the document is unchanged.
+/// Every song is written as version 12, with or without a VST3 slot
+/// (writing the older version for songs without one would make the writer
+/// track what each later version adds); the bump makes an older build
+/// refuse a version-12 song with its `NewerFormat` message rather than an
+/// unknown-variant error.
+pub fn migrate_v11_to_v12(v: Value) -> Result<Value> {
+    Ok(v)
 }
 
 /// Version 10 → 11 (plan groups-vcas Ruling 1): the mixer gains optional

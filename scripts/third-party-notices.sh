@@ -17,6 +17,10 @@
 #     vizdaw-scan and vizdaw-mcp (vizctl is not bundled). Proc-macro crates
 #     run in the compiler only, and are left out with their own dependencies;
 #   - the vendored DAWproject XSDs and the AAF MetaDictionary tables;
+#   - the VST 3 SDK, whose interface headers the vst3 crate's bindings are
+#     generated from (MIT; the text is kept in scripts/licence-texts/vst3sdk,
+#     copied from the SDK tag v3.8.0_build_66, the version those bindings
+#     follow);
 #   - the Swift packages in app/Package.resolved.
 # It reads the registry sources only (cargo metadata --offline) and fails if
 # a crate has no licence text and is not in EXCEPTIONS below.
@@ -59,6 +63,10 @@ OBJC2 = "objc2"
 OBJC2_MIT = (OBJC2, ["LICENSE-MIT.txt"])  # objc2, block2, objc2-foundation, objc2-encode: MIT only
 OBJC2_TRIO = (OBJC2, ["LICENSE-ZLIB.txt", "LICENSE-APACHE.txt", "LICENSE-MIT.txt"])  # the rest: Zlib OR Apache-2.0 OR MIT
 UNIFFI = ("uniffi-rs", ["LICENSE"])  # MPL-2.0; source: https://github.com/mozilla/uniffi-rs
+# com-scrape-types lives in the vst3-rs repository (its `repository` field);
+# the texts are the ones the vst3 0.3.0 package ships from that repository
+# (copied 2026-11-23). MIT OR Apache-2.0.
+VST3_RS = ("vst3-rs", ["LICENSE-MIT", "LICENSE-APACHE"])
 EXCEPTIONS = {
     "block2": OBJC2_MIT,
     "objc2": OBJC2_MIT,
@@ -76,6 +84,7 @@ EXCEPTIONS = {
     "uniffi_meta": UNIFFI,
     "uniffi_pipeline": UNIFFI,
     "uniffi_udl": UNIFFI,
+    "com-scrape-types": VST3_RS,
 }
 VENDORED = os.path.join(root, "scripts/licence-texts")
 
@@ -211,6 +220,29 @@ for pkg in crates:
 if failures:
     sys.exit("third-party-notices: no licence text in " + ", ".join(failures)
              + " (add the text's source to EXCEPTIONS in scripts/third-party-notices.sh)")
+
+if any(p["name"] == "vst3" for p in crates):
+    rule("=")
+    lines.append("VST 3 SDK")
+    rule("=")
+    lines.append("")
+    rule()
+    lines.append("VST 3 SDK 3.8.0 (the vst3 crate's bindings are generated from its interface headers)")
+    lines.append("Licence: MIT")
+    pins = {}
+    with open(os.path.join(VENDORED, "vst3sdk", "SOURCE")) as f:
+        for line in f:
+            key, sep, value = line.strip().partition("=")
+            if sep and not key.startswith("#"):
+                pins[key] = value
+    if not pins.get("url") or not pins.get("tag"):
+        sys.exit("third-party-notices: scripts/licence-texts/vst3sdk/SOURCE lacks url or tag")
+    lines.append(f"Source: {pins['url']} (tag {pins['tag']})")
+    rule()
+    sdk = os.path.join(VENDORED, "vst3sdk", "LICENSE.txt")
+    if not os.path.isfile(sdk):
+        sys.exit(f"third-party-notices: missing {sdk}")
+    texts("the VST 3 SDK", [("LICENSE.txt", sdk)])
 
 rule("=")
 lines.append("Data files")

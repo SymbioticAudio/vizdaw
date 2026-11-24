@@ -139,6 +139,14 @@ pub trait PluginInstance {
     fn is_active(&self) -> bool;
     /// The plugin's full state.
     fn save_state(&mut self) -> Result<Vec<u8>, HostError>;
+    /// Parameters whose latest value [`PluginInstance::save_state`] does
+    /// not hold yet. A VST3 component takes values only in a processed
+    /// block, so values set before its first block are in its controller
+    /// but not in its state. A capture keeps these in the document's
+    /// overlay, so a saved song still has them. None by default.
+    fn unsaved_params(&mut self) -> Vec<ParamId> {
+        Vec::new()
+    }
     /// Restores a state from [`PluginInstance::save_state`].
     fn load_state(&mut self, data: &[u8]) -> Result<(), HostError>;
     /// Sets parameters while inactive (load: state first, then the

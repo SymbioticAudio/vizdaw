@@ -209,7 +209,7 @@ fn learn_maps_round_trip_and_are_absent_when_empty() {
     // effects (Ruling 18); version 6 is plan 5g-1b's MIDI mix; version 7
     // is plan 5g-2's MPE settings; version 8 is plan 6a's song info, region names and project ID;
     // version 9 is plan 6c's crossfade flag.
-    assert_eq!(core_model::file::VERSION, 11);
+    assert_eq!(core_model::file::VERSION, 12);
     let bare = serde_json::to_string(&m)
         .unwrap()
         .replace(",\"pickup\":true", "");

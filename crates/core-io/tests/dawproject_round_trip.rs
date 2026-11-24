@@ -1476,3 +1476,79 @@ fn vca_channels_round_trip() {
         0
     );
 }
+
+/// Host track H1 Task 1: a VST3 instrument and a VST3 insert are written as
+/// `Vst3Plugin` devices with their states as `.vstpreset` entries and come
+/// back as VST3 slots with the same class IDs and states.
+#[test]
+fn vst3_devices_round_trip() {
+    use core_model::mixer::{PluginRef, StripKind};
+    let vst3 = |id: &str, name: &str| PluginRef {
+        format: PluginFormat::Vst3,
+        id: id.into(),
+        name: name.into(),
+        vendor: "Example".into(),
+        version: "1.0".into(),
+    };
+    let synth_id = "0123456789ABCDEF0123456789ABCDEF";
+    let delay_id = "FEDCBA9876543210FEDCBA9876543210";
+    let mut b = Builder::new();
+    let (dest, synth) = b.plugin_dest("Synth", vst3(synth_id, "Synth")).unwrap();
+    let (seq, lane) = b.sequence("Song", "Lead", Some(dest)).unwrap();
+    b.notes(seq, lane, &[(0, 60, 0x8000, Q)]).unwrap();
+    let master = b.strip_of(StripKind::Master).unwrap();
+    let delay = b.insert(master, vst3(delay_id, "Delay")).unwrap();
+    let b = capture(b, synth, b"synth vst3 state");
+    let b = capture(b, delay, b"delay vst3 state");
+    let doc = b.finish();
+    let t = trip(&doc, &options(seq, RegionGain::Apply));
+    let mut entries: Vec<&str> = t.x.states.iter().map(|(p, _)| p.as_str()).collect();
+    entries.sort_unstable();
+    assert_eq!(entries, ["plugins/001.vstpreset", "plugins/002.vstpreset"]);
+    assert!(
+        t.x.project_xml.contains("<Vst3Plugin"),
+        "{}",
+        t.x.project_xml
+    );
+    assert_eq!(
+        count(
+            &t.import,
+            ItemKind::LeftOut,
+            core_io::dawproject::import::VST
+        ),
+        0,
+        "{:?}",
+        t.import
+    );
+
+    let l = t.doc.sequence(t.seq).unwrap();
+    let l = l.lanes.iter().find(|l| l.name == "Lead").unwrap();
+    let inst = &t.doc.instruments()[&l.midi_dest.expect("a destination")];
+    let core_model::document::DestKind::PluginInstrument { slot } = &inst.kind else {
+        panic!("a plug-in instrument")
+    };
+    assert_eq!(slot.plugin.format, PluginFormat::Vst3);
+    assert_eq!(slot.plugin.id, synth_id);
+    assert_eq!(
+        slot.state,
+        Some(core_model::state::blob_id(b"synth vst3 state"))
+    );
+    let m = t.doc.mixer();
+    let ins = &m.strip(m.master()).unwrap().inserts;
+    assert_eq!(ins.len(), 1);
+    assert_eq!(ins[0].plugin.format, PluginFormat::Vst3);
+    assert_eq!(ins[0].plugin.id, delay_id);
+    assert_eq!(
+        ins[0].state,
+        Some(core_model::state::blob_id(b"delay vst3 state"))
+    );
+    let (pa, pb) = projections(&doc, seq, &t);
+    let devices = |p: &Projection| {
+        p.strips
+            .iter()
+            .map(|s| s.devices.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(devices(&pb), devices(&pa));
+    assert!(devices(&pa).iter().flatten().all(|d| d.0 == "vst3"));
+}

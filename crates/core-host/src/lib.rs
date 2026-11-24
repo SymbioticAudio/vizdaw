@@ -3,8 +3,9 @@
 //! [`AudioProcessor`] it hands out when activated (Plan Ruling 1);
 //! [`adapt`] wraps processors as the engine's inserts and instruments.
 //!
-//! `unsafe` blocks and impls live only in `clap/ffi.rs`, with a
-//! `// SAFETY:` comment each. The one `unsafe fn` elsewhere,
+//! `unsafe` blocks and impls live only in `clap/ffi.rs`, `vst3/ffi.rs` and
+//! `vst3/process_ffi.rs` (the VST3 processor's), with a `// SAFETY:`
+//! comment each. The one `unsafe fn` elsewhere,
 //! [`ParentView::new`], only declares a contract (its `# Safety` section)
 //! and contains no `unsafe` code. Everything marked `// RT` must not
 //! allocate, lock or block.
@@ -32,6 +33,7 @@ pub mod queue;
 pub mod run_loop;
 pub mod scan;
 pub mod shelf;
+pub mod vst3;
 
 pub use error::HostError;
 pub use host::{GESTURE_TIMEOUT, Gesture, IdleReport, PluginHost, SlotState};

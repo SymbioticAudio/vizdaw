@@ -132,6 +132,7 @@ public final class PluginSettings {
         switch f {
         case .au: "au"
         case .clap: "clap"
+        case .vst3: "vst3"
         }
     }
 

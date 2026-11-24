@@ -1079,7 +1079,7 @@ impl Ctx<'_, '_> {
         };
         let data = match (self.doc.state_blob(id), slot.plugin.format) {
             (None, _) => Err("its saved settings are missing from the project".to_owned()),
-            (Some(b), PluginFormat::Clap) => Ok(b.to_vec()),
+            (Some(b), PluginFormat::Clap | PluginFormat::Vst3) => Ok(b.to_vec()),
             (Some(b), PluginFormat::Au) => self.plist.to_xml(b),
         };
         match data {
@@ -1149,6 +1149,7 @@ impl Ctx<'_, '_> {
             kind: match p.format {
                 PluginFormat::Au => DpDeviceKind::Au,
                 PluginFormat::Clap => DpDeviceKind::Clap,
+                PluginFormat::Vst3 => DpDeviceKind::Vst3,
             },
             named: DpNamed {
                 id: Some(id.clone()),

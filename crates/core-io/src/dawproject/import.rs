@@ -68,7 +68,7 @@ use core_model::ids::{AnyId, DestId, EventId, LaneId, PluginInstanceId, SeqId, S
 use core_model::meter::{KeySig, Meter, MeterEntry, MeterMap};
 use core_model::mixer::{
     AuxSend, BUILTIN_SYNTH_REF, GAIN_FLOOR_DB, GAIN_MAX_DB, Output, ParamId, PluginFormat,
-    PluginRef, PluginSlot, StripKind, Swatch,
+    PluginRef, PluginSlot, StripKind, Swatch, vst3_class_id,
 };
 use core_model::rules::MAX_TICKS;
 use core_model::selection::ViewFilter;
@@ -129,7 +129,7 @@ pub struct Origins {
     /// Each new plug-in slot: its `vz:d` / `vz:q` instance there.
     pub slots: BTreeMap<PluginInstanceId, u64>,
     /// Each new strip whose file channel named effects VizDAW cannot host
-    /// here (VST plug-ins, or ones not installed): their names, with the
+    /// here (VST2 plug-ins, or ones not installed): their names, with the
     /// plug-in ID of one not installed (plan 6e Ruling 10).
     pub unhosted: BTreeMap<StripId, Vec<(String, Option<String>)>>,
     /// Each new audio track's output-path strip: the file's channel name
@@ -319,8 +319,8 @@ pub const MASTER_PAN_SOLO: &str = "Pan and solo on the master";
 /// Note: plug-ins that are not installed here (by name).
 pub const NOT_INSTALLED: &str =
     "Plug-ins that are not installed; they keep their settings until they are";
-/// Left out: VST plug-ins (by name).
-pub const VST: &str = "VST plug-ins";
+/// Left out: VST2 plug-ins (by name); VST3 ones map to slots.
+pub const VST: &str = "VST2 plug-ins";
 /// Left out: plug-ins the file gives no ID for (by name).
 pub const NO_PLUGIN_ID: &str = "Plug-ins with no plug-in ID";
 /// Note: note tracks with no instrument VizDAW can play (by track).
@@ -1538,11 +1538,11 @@ impl<'a, 'p> Cx<'a, 'p> {
     fn instrument(&mut self, d: &DpDevice, track: &str) -> Result<Midi, IoError> {
         let name = d.device_name.clone();
         Ok(match d.kind {
-            DpDeviceKind::Au | DpDeviceKind::Clap => match self.slot(d)? {
+            DpDeviceKind::Au | DpDeviceKind::Clap | DpDeviceKind::Vst3 => match self.slot(d)? {
                 Some(s) => Midi::Plugin(s),
                 None => Midi::Builtin,
             },
-            DpDeviceKind::Vst2 | DpDeviceKind::Vst3 => {
+            DpDeviceKind::Vst2 => {
                 self.add(ItemKind::LeftOut, VST, Some(name));
                 Midi::Builtin
             }
@@ -1590,7 +1590,8 @@ impl<'a, 'p> Cx<'a, 'p> {
                 Err(IoError::Cancelled) => return Err(IoError::Cancelled),
                 Err(e) => Err(e.to_string()),
                 Ok(raw) => match format {
-                    PluginFormat::Clap => Ok(raw),
+                    // A `.vstpreset` is carried as is (host track H1).
+                    PluginFormat::Clap | PluginFormat::Vst3 => Ok(raw),
                     PluginFormat::Au => {
                         let bin = self.env.plist.to_binary(&raw);
                         drop(raw);
@@ -1612,12 +1613,14 @@ impl<'a, 'p> Cx<'a, 'p> {
         Ok(got)
     }
 
-    /// An AU or CLAP device as a slot, with its state.
+    /// An AU, CLAP or VST3 device as a slot, with its state. A VST3 class
+    /// ID of 32 hexadecimal digits is kept in upper case.
     fn slot(&mut self, d: &DpDevice) -> Result<Option<SlotPlan>, IoError> {
         let name = d.device_name.clone();
         let format = match d.kind {
             DpDeviceKind::Au => PluginFormat::Au,
             DpDeviceKind::Clap => PluginFormat::Clap,
+            DpDeviceKind::Vst3 => PluginFormat::Vst3,
             _ => return Ok(None),
         };
         self.comment(d.named.comment.as_deref(), || format!("plug-in '{name}'"));
@@ -1625,6 +1628,10 @@ impl<'a, 'p> Cx<'a, 'p> {
             self.add(ItemKind::LeftOut, NO_PLUGIN_ID, Some(name));
             return Ok(None);
         };
+        let class_id = (format == PluginFormat::Vst3)
+            .then(|| vst3_class_id(id))
+            .flatten();
+        let id = class_id.as_deref().unwrap_or(id);
         if !(self.env.installed)(format, id) {
             self.add(ItemKind::Note, NOT_INSTALLED, Some(name.clone()));
         }
@@ -1828,7 +1835,10 @@ impl<'a, 'p> Cx<'a, 'p> {
         let tagged_eq = c.devices.iter().enumerate().any(|(i, d)| {
             Some(i) != skip
                 && d.role == DpDeviceRole::AudioFx
-                && matches!(d.kind, DpDeviceKind::Au | DpDeviceKind::Clap)
+                && matches!(
+                    d.kind,
+                    DpDeviceKind::Au | DpDeviceKind::Clap | DpDeviceKind::Vst3
+                )
                 && is_eq_tagged(d)
         });
         for (i, d) in c.devices.iter().enumerate() {
@@ -1845,7 +1855,7 @@ impl<'a, 'p> Cx<'a, 'p> {
                 DpDeviceRole::NoteFx => self.add(ItemKind::LeftOut, NOTE_EFFECTS, Some(name)),
                 DpDeviceRole::Analyzer => self.add(ItemKind::LeftOut, ANALYZERS, Some(name)),
                 DpDeviceRole::AudioFx => match d.kind {
-                    DpDeviceKind::Au | DpDeviceKind::Clap => {
+                    DpDeviceKind::Au | DpDeviceKind::Clap | DpDeviceKind::Vst3 => {
                         let eq_tag = is_eq_tagged(d);
                         if let Some(slot) = self.slot(d)? {
                             if !(self.env.installed)(slot.plugin.format, &slot.plugin.id) {
@@ -1864,7 +1874,7 @@ impl<'a, 'p> Cx<'a, 'p> {
                             }
                         }
                     }
-                    DpDeviceKind::Vst2 | DpDeviceKind::Vst3 => {
+                    DpDeviceKind::Vst2 => {
                         mix.unhosted.push((name.clone(), None));
                         self.add(ItemKind::LeftOut, VST, Some(name));
                     }

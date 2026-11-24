@@ -4238,3 +4238,17 @@ fn customize_transport_only_ever_needs_its_dialog() {
         );
     }
 }
+
+/// Host track H1 Task 1: a plug-in reference may be `vst3:<class ID>`.
+#[test]
+fn plugin_refs_take_vst3_class_ids() {
+    use core_control::registry::plugin_ref;
+    for instrument in [false, true] {
+        assert_eq!(
+            plugin_ref("vst3:0123456789ABCDEF0123456789ABCDEF", instrument),
+            Ok(())
+        );
+        let why = plugin_ref("vst3:", instrument).unwrap_err();
+        assert!(why.contains("vst3:<class ID>"), "{why}");
+    }
+}

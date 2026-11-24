@@ -16,3 +16,4 @@ platform-macos = { path = "../platform-macos" }
 
 [dev-dependencies]
 test-plugins = { path = "../test-plugins" }
+tempfile = "3"

@@ -1,6 +1,7 @@
-//! Builds `VizDAW Test.clap` for tests: runs `cargo build -p test-plugins`
-//! into its own target directory (so it never waits on the outer build's
-//! lock) and wraps the library in a bundle (macOS) or copies it (elsewhere).
+//! Builds `VizDAW Test.clap` and `VizDAW Test.vst3` for tests: runs
+//! `cargo build -p test-plugins` into its own target directory (so it never
+//! waits on the outer build's lock) and wraps the library in a bundle
+//! (macOS, and VST3 everywhere) or copies it (a CLAP elsewhere).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -8,6 +9,8 @@ use std::sync::OnceLock;
 
 /// The bundle's file name.
 pub const BUNDLE_NAME: &str = "VizDAW Test.clap";
+/// The VST3 bundle's file name (the same library).
+pub const VST3_BUNDLE_NAME: &str = "VizDAW Test.vst3";
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -16,39 +19,76 @@ fn workspace_root() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
 }
 
+/// Builds the library once per test process; returns its path.
+fn build_lib() -> Result<PathBuf, String> {
+    static LIB: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    LIB.get_or_init(|| {
+        let root = workspace_root();
+        let target = root.join("target").join("test-plugins");
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        let status = Command::new(cargo)
+            .current_dir(&root)
+            .args([
+                "build",
+                "--quiet",
+                "-p",
+                "test-plugins",
+                "--lib",
+                "--target-dir",
+            ])
+            .arg(&target)
+            .status()
+            .map_err(|e| format!("cannot run cargo: {e}"))?;
+        if !status.success() {
+            return Err(format!("building test-plugins failed: {status}"));
+        }
+        Ok(target.join("debug").join(if cfg!(target_os = "macos") {
+            "libtest_plugins.dylib"
+        } else if cfg!(windows) {
+            "test_plugins.dll"
+        } else {
+            "libtest_plugins.so"
+        }))
+    })
+    .clone()
+}
+
+/// Where the library goes inside a bundle named `name`, relative to it
+/// (`None`: the bundle is the library itself).
+type Layout = fn() -> Option<PathBuf>;
+
+/// A `.clap`: a bundle on macOS, the library itself elsewhere.
+fn clap_layout() -> Option<PathBuf> {
+    cfg!(target_os = "macos").then(|| Path::new("Contents").join("MacOS").join("VizDAW Test"))
+}
+
+/// A `.vst3`: always a bundle folder; `Contents/MacOS/<name>` on macOS,
+/// `Contents/<arch>-linux/<name>.so` on Linux (VST3 module layout).
+fn vst3_layout() -> Option<PathBuf> {
+    let contents = Path::new("Contents");
+    Some(if cfg!(target_os = "macos") {
+        contents.join("MacOS").join("VizDAW Test")
+    } else {
+        contents
+            .join(format!("{}-linux", std::env::consts::ARCH))
+            .join("VizDAW Test.so")
+    })
+}
+
 fn build() -> Result<PathBuf, String> {
-    let root = workspace_root();
-    let target = root.join("target").join("test-plugins");
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    let status = Command::new(cargo)
-        .current_dir(&root)
-        .args([
-            "build",
-            "--quiet",
-            "-p",
-            "test-plugins",
-            "--lib",
-            "--target-dir",
-        ])
-        .arg(&target)
-        .status()
-        .map_err(|e| format!("cannot run cargo: {e}"))?;
-    if !status.success() {
-        return Err(format!("building test-plugins failed: {status}"));
-    }
-    let lib = target.join("debug").join(if cfg!(target_os = "macos") {
-        "libtest_plugins.dylib"
-    } else if cfg!(windows) {
-        "test_plugins.dll"
-    } else {
-        "libtest_plugins.so"
-    });
-    let bundle = target.join(BUNDLE_NAME);
-    let installed = if cfg!(target_os = "macos") {
-        bundle.join("Contents").join("MacOS").join("VizDAW Test")
-    } else {
-        bundle.clone()
-    };
+    install(BUNDLE_NAME, clap_layout, INFO_PLIST)
+}
+
+fn build_vst3() -> Result<PathBuf, String> {
+    install(VST3_BUNDLE_NAME, vst3_layout, VST3_INFO_PLIST)
+}
+
+/// Builds the library and installs it as bundle `name` beside it.
+fn install(name: &str, layout: Layout, plist: &str) -> Result<PathBuf, String> {
+    let lib = build_lib()?;
+    let target = workspace_root().join("target").join("test-plugins");
+    let bundle = target.join(name);
+    let installed = layout().map_or_else(|| bundle.clone(), |rel| bundle.join(rel));
     // An identical bundle is left alone: another process may have just
     // returned it and be about to load it.
     if same_bytes(&lib, &installed) {
@@ -60,17 +100,24 @@ fn build() -> Result<PathBuf, String> {
         return Ok(bundle);
     }
     // Build the new bundle beside the old one, then swap it in.
-    let tmp = target.join(format!("{BUNDLE_NAME}.{}", std::process::id()));
+    let tmp = target.join(format!("{name}.{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     let _ = std::fs::remove_file(&tmp);
-    if cfg!(target_os = "macos") {
-        let macos = tmp.join("Contents").join("MacOS");
-        std::fs::create_dir_all(&macos).map_err(|e| e.to_string())?;
-        std::fs::copy(&lib, macos.join("VizDAW Test")).map_err(|e| e.to_string())?;
-        std::fs::write(tmp.join("Contents").join("Info.plist"), INFO_PLIST)
-            .map_err(|e| e.to_string())?;
-    } else {
-        std::fs::copy(&lib, &tmp).map_err(|e| e.to_string())?;
+    match layout() {
+        Some(rel) => {
+            let bin = tmp.join(rel);
+            if let Some(dir) = bin.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            }
+            std::fs::copy(&lib, &bin).map_err(|e| e.to_string())?;
+            if cfg!(target_os = "macos") {
+                std::fs::write(tmp.join("Contents").join("Info.plist"), plist)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        None => {
+            std::fs::copy(&lib, &tmp).map_err(|e| e.to_string())?;
+        }
     }
     let _ = std::fs::remove_dir_all(&bundle);
     let _ = std::fs::remove_file(&bundle);
@@ -151,6 +198,35 @@ pub fn bundle() -> PathBuf {
     }
 }
 
+/// The path of `VizDAW Test.vst3` (the same library as [`bundle`], in a
+/// VST3 bundle), built once per test process. Panics (test helper) when
+/// the build fails.
+pub fn vst3_bundle() -> PathBuf {
+    static PATH: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    match PATH.get_or_init(build_vst3) {
+        Ok(p) => p.clone(),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+/// Copies the VST3 test bundle to `to` (test helper; panics on I/O errors).
+/// On Linux a bundle's binary is named after the bundle folder, so the
+/// copy's `.so` is renamed to `to`'s stem (macOS names it in `Info.plist`).
+pub fn copy_vst3_bundle(to: &Path) {
+    copy_tree(&vst3_bundle(), to);
+    if cfg!(target_os = "macos") {
+        return;
+    }
+    let dir = to
+        .join("Contents")
+        .join(format!("{}-linux", std::env::consts::ARCH));
+    let stem = to.file_stem().unwrap().to_string_lossy().into_owned();
+    let new = dir.join(format!("{stem}.so"));
+    if !new.exists() {
+        std::fs::rename(dir.join("VizDAW Test.so"), new).unwrap();
+    }
+}
+
 /// The `vizdaw-scan` binary, built once per test process into the same
 /// separate target directory (for tests of programs that run it).
 pub fn scanner() -> PathBuf {
@@ -182,6 +258,20 @@ const INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <dict>
   <key>CFBundleExecutable</key><string>VizDAW Test</string>
   <key>CFBundleIdentifier</key><string>org.vizdaw.test-plugins</string>
+  <key>CFBundleName</key><string>VizDAW Test</string>
+  <key>CFBundlePackageType</key><string>BNDL</string>
+  <key>CFBundleShortVersionString</key><string>1.0.0</string>
+  <key>CFBundleVersion</key><string>1.0.0</string>
+</dict>
+</plist>
+"#;
+
+const VST3_INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key><string>VizDAW Test</string>
+  <key>CFBundleIdentifier</key><string>org.vizdaw.test-plugins.vst3</string>
   <key>CFBundleName</key><string>VizDAW Test</string>
   <key>CFBundlePackageType</key><string>BNDL</string>
   <key>CFBundleShortVersionString</key><string>1.0.0</string>

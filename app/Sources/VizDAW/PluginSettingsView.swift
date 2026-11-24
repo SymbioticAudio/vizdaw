@@ -28,6 +28,7 @@ struct PluginSettingsView: View {
         switch f {
         case .au: "AU"
         case .clap: "CLAP"
+        case .vst3: "VST3"
         }
     }
 

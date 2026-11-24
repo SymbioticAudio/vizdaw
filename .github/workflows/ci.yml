@@ -25,6 +25,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev libfontconfig-dev libfreetype-dev xvfb mesa-vulkan-drivers libgl1-mesa-dri
+      - name: VST3 SDK sample build packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y ninja-build libx11-dev libx11-xcb-dev libxcb-util-dev libxcb-cursor-dev libxcb-keysyms1-dev libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libcairo2-dev libfreetype6-dev libpango1.0-dev libwayland-dev wayland-protocols libglib2.0-dev
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all -- --check
@@ -46,8 +50,22 @@ jobs:
       - name: Build Multi-Q
         if: runner.os == 'macOS'
         run: scripts/build-multiq.sh
+      - name: VST3 SDK samples (cached)
+        uses: actions/cache@v4
+        with:
+          path: target/vst3sdk/out
+          key: vst3sdk-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-vst3-samples.sh', 'scripts/licence-texts/vst3sdk/SOURCE') }}
+      - name: Ninja (macOS)
+        if: runner.os == 'macOS'
+        run: command -v ninja || brew install ninja
+      - name: Build the VST3 SDK samples
+        run: scripts/build-vst3-samples.sh
       - name: Test
         run: cargo test --workspace
+        env:
+          # The VST3 host tests load the SDK samples; here a missing one is
+          # a failure, not a skip.
+          VIZDAW_REQUIRE_VST3_SAMPLES: "1"
       - name: CLAP X11 editors (Linux, virtual X server)
         if: runner.os == 'Linux'
         timeout-minutes: 10
@@ -112,3 +130,5 @@ jobs:
           CARGO_NET_OFFLINE=true scripts/third-party-notices.sh target/third-party/THIRD-PARTY.txt
           grep -q '^quick-xml ' target/third-party/THIRD-PARTY.txt
           grep -q '^cfb ' target/third-party/THIRD-PARTY.txt
+          grep -q '^vst3 ' target/third-party/THIRD-PARTY.txt
+          grep -q '^VST 3 SDK 3.8.0 ' target/third-party/THIRD-PARTY.txt
