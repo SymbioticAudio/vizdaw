@@ -802,6 +802,8 @@ fn live_catalog() -> Result<Arc<vizdaw_ffi::PluginCatalog>, VizError> {
         clap_dirs: vec![],
         include_au: cfg!(target_os = "macos"),
         timeout_ms: None,
+        include_vst3: true,
+        vst3_dirs: vec![],
     })?;
     *c = Some(opened.clone());
     Ok(opened)
