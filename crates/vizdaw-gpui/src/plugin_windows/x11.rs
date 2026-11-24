@@ -9,7 +9,7 @@
 
 use std::cell::OnceCell;
 
-use x11rb::connection::Connection as _;
+use x11rb::connection::Connection;
 use x11rb::properties::WmSizeHints;
 use x11rb::protocol::xproto::{
     AtomEnum, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, PropMode, WindowClass,
@@ -100,19 +100,32 @@ pub fn set_frame(window: u32, x: i32, y: i32, width: u32, height: u32) -> Result
 }
 
 /// Takes `window` out of its parent (to the root) and hides it: it
-/// survives its old parent's destruction.
+/// survives its old parent's destruction. Synchronous: GPUI destroys the
+/// old parent on its own connection right after, and the server must have
+/// done the reparent first (else it destroys the container with its
+/// parent while the plug-in still draws in it: the BadWindow exit).
 pub fn park(window: u32) -> Result<(), String> {
-    with(|c, screen| {
-        c.unmap_window(window).map_err(msg)?;
-        c.reparent_window(window, screen.root, 0, 0).map_err(msg)?;
-        Ok(())
-    })
+    with(|c, screen| park_on(c, screen.root, window))
 }
 
-/// Destroys `window` (and whatever is still inside it).
+/// [`park`] on connection `c`: returns once the server has done it.
+fn park_on(c: &impl Connection, root: u32, window: u32) -> Result<(), String> {
+    c.unmap_window(window).map_err(msg)?;
+    c.reparent_window(window, root, 0, 0)
+        .map_err(msg)?
+        .check()
+        .map_err(msg)?;
+    Ok(())
+}
+
+/// Destroys `window` (and whatever is still inside it). Synchronous, as
+/// [`park`]: the container is gone before GPUI destroys its window.
 pub fn destroy(window: u32) -> Result<(), String> {
     with(|c, _| {
-        c.destroy_window(window).map_err(msg)?;
+        c.destroy_window(window)
+            .map_err(msg)?
+            .check()
+            .map_err(msg)?;
         Ok(())
     })
 }
@@ -151,4 +164,82 @@ pub fn set_size_hints(
         hints.set_normal_hints(c, window).map_err(msg)?;
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{ConnectionExt as _, CreateWindowAux, WindowClass};
+
+    /// A display to test on: `None` (skipped) without one, unless
+    /// `VIZDAW_REQUIRE_DISPLAY` is set.
+    fn connect() -> Option<(x11rb::rust_connection::RustConnection, usize)> {
+        match x11rb::connect(None) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                assert!(
+                    std::env::var_os("VIZDAW_REQUIRE_DISPLAY").is_none(),
+                    "VIZDAW_REQUIRE_DISPLAY is set but there is no X display: {e}"
+                );
+                None
+            }
+        }
+    }
+
+    /// GPUI's side: a parent window on a connection of its own, destroyed
+    /// right after the park with no wait. The parked container survives it
+    /// (the park was done by the server before `park_on` returned).
+    #[test]
+    fn a_parked_container_survives_its_parent_destroyed_on_another_connection() {
+        let Some((ours, n)) = connect() else {
+            return;
+        };
+        let Some((gpui, _)) = connect() else {
+            return;
+        };
+        let screen = &ours.setup().roots[n];
+        let root = screen.root;
+        let parent = gpui.generate_id().unwrap();
+        gpui.create_window(
+            screen.root_depth,
+            parent,
+            root,
+            0,
+            0,
+            200,
+            200,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            screen.root_visual,
+            &CreateWindowAux::new(),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+        let container = ours.generate_id().unwrap();
+        ours.create_window(
+            screen.root_depth,
+            container,
+            parent,
+            0,
+            37,
+            100,
+            100,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            screen.root_visual,
+            &CreateWindowAux::new(),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+        super::park_on(&ours, root, container).unwrap();
+        gpui.destroy_window(parent).unwrap();
+        gpui.flush().unwrap();
+        // GPUI's destroy has been processed once its round trip returns.
+        gpui.get_input_focus().unwrap().reply().unwrap();
+        let tree = ours.query_tree(container).unwrap().reply();
+        assert_eq!(tree.expect("the container is alive").parent, root);
+        ours.destroy_window(container).unwrap().check().unwrap();
+    }
 }
