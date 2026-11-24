@@ -27,9 +27,15 @@
 //! The latency and tail every component reports are set through the
 //! probe ([`crate::Vst3Probe::set_timing`]).
 //!
-//! The Gain component's state is [`VST3_COMPONENT_GAIN`] (a normalised
-//! value, 8 bytes little-endian); a controller given it through
-//! `setComponentState` takes it as its Gain value. When connected, the
+//! A component's state is its gain (a normalised value, 8 bytes
+//! little-endian; [`VST3_COMPONENT_GAIN`] until the processor is given
+//! another); a controller given it through `setComponentState` takes it
+//! as its Gain value. A controller's own state (`getState`/`setState`) is
+//! a tag and its memo, a controller-only value that no parameter and no
+//! component state carries (set for new controllers through
+//! [`crate::Vst3Probe::set_memo`]), so a round trip of both proves both
+//! streams. Both `setState`s refuse anything else and then change
+//! nothing. When connected, the
 //! component sends the controller a message (made through the host's
 //! `IHostApplication::createInstance`) that the controller counts.
 //!
@@ -56,6 +62,7 @@ use vst3::Steinberg as sdk;
 use vst3::com_scrape_types::Unknown;
 use vst3::{Class, ComPtr, ComRef, ComWrapper, Interface, uid};
 
+use sdk::IBStream_::IStreamSeekMode_;
 use sdk::PClassInfo_::ClassCardinality_;
 use sdk::PFactoryInfo_::FactoryFlags_;
 use sdk::Vst::BusInfo_::BusFlags_;
@@ -373,7 +380,13 @@ mod ix {
     pub const LAST_CONTEXT_RATE: usize = 68;
     pub const SIDECHAIN_ON: usize = 69;
     pub const LAST_ARRANGEMENT: usize = 70;
-    pub const N: usize = 71;
+    pub const COMPONENT_SET_STATES: usize = 71;
+    pub const LAST_COMPONENT_SET_STATE: usize = 72;
+    pub const LAST_STATE_SYNC: usize = 73;
+    pub const CONTROLLER_SET_STATES: usize = 74;
+    pub const LAST_CONTROLLER_SET_STATE: usize = 75;
+    pub const LAST_MEMO: usize = 76;
+    pub const N: usize = 77;
 }
 
 static COUNTERS: [AtomicU64; ix::N] = [const { AtomicU64::new(0) }; ix::N];
@@ -446,6 +459,16 @@ pub extern "C" fn vizdaw_test_vst3_counters(out: *mut u64, len: usize) {
     unsafe { std::ptr::copy_nonoverlapping(v.as_ptr(), out, len.min(v.len())) };
 }
 
+/// The controller-only value ("memo") controllers made from now on start
+/// with (see the module docs).
+static NEXT_MEMO: AtomicU64 = AtomicU64::new(0);
+
+/// Sets the memo controllers made from now on start with.
+#[unsafe(no_mangle)]
+pub extern "C" fn vizdaw_test_vst3_set_memo(memo: u64) {
+    NEXT_MEMO.store(memo, Ordering::SeqCst);
+}
+
 /// Sets the mode (see [`crate::Vst3Mode`]).
 #[unsafe(no_mangle)]
 pub extern "C" fn vizdaw_test_vst3_set_mode(mode: u32) {
@@ -459,6 +482,9 @@ const MODE_CONTROLLER_INIT_FAILS: u32 = 4;
 const MODE_OFFLINE_REFUSED: u32 = 5;
 const MODE_REALTIME_REFUSED: u32 = 6;
 const MODE_NAN_OUTPUT: u32 = 7;
+const MODE_COMPONENT_STATE_REFUSED: u32 = 8;
+const MODE_CONTROLLER_STATE_REFUSED: u32 = 9;
+const MODE_STATE_SEEKS_PAST_END: u32 = 10;
 
 /// The component handler the latest controller was given.
 struct Handler(ComPtr<IComponentHandler>);
@@ -691,6 +717,9 @@ fn bus_info(
 /// that made it (every call should come on that thread).
 struct Ctl {
     values: [AtomicU64; VST3_PARAMS.len()],
+    /// A controller-only value (no parameter, not in the component's
+    /// state): only the controller's own state carries it.
+    memo: AtomicU64,
     handler: Mutex<Option<ComPtr<IComponentHandler>>>,
     creator: ThreadId,
 }
@@ -699,6 +728,7 @@ impl Ctl {
     fn new() -> Ctl {
         Ctl {
             values: VST3_PARAMS.map(|p| AtomicU64::new(p.default.to_bits())),
+            memo: AtomicU64::new(NEXT_MEMO.load(Ordering::SeqCst)),
             handler: Mutex::new(None),
             creator: std::thread::current().id(),
         }
@@ -761,9 +791,60 @@ impl Ctl {
             return kResultFalse;
         }
         bump(ix::STATE_SYNCS);
+        stamp(ix::LAST_STATE_SYNC);
         self.set(VST3_PARAM_GAIN, f64::from_le_bytes(b))
     }
+
+    /// The controller's own state: [`CONTROLLER_STATE_TAG`] and the memo
+    /// (8 bytes little-endian).
+    fn get_state(&self, state: *mut IBStream) -> tresult {
+        // SAFETY: the host's stream, for this call.
+        let Some(s) = (unsafe { ComRef::from_raw(state) }) else {
+            return kInvalidArgument;
+        };
+        let mut b = [0u8; 12];
+        b[..4].copy_from_slice(CONTROLLER_STATE_TAG);
+        b[4..].copy_from_slice(&self.memo.load(Ordering::SeqCst).to_le_bytes());
+        let mut n: int32 = 0;
+        // SAFETY: `b` holds 12 bytes.
+        let r = unsafe { s.write(b.as_mut_ptr() as *mut c_void, 12, &mut n) };
+        if r == kResultOk && n == 12 {
+            kResultOk
+        } else {
+            kResultFalse
+        }
+    }
+
+    /// Takes the controller's own state ([`Ctl::get_state`]); anything
+    /// else is refused and changes nothing.
+    fn set_state(&self, state: *mut IBStream) -> tresult {
+        bump(ix::CONTROLLER_SET_STATES);
+        stamp(ix::LAST_CONTROLLER_SET_STATE);
+        if mode() == MODE_CONTROLLER_STATE_REFUSED {
+            return kResultFalse;
+        }
+        // SAFETY: the host's stream, for this call.
+        let Some(s) = (unsafe { ComRef::from_raw(state) }) else {
+            return kInvalidArgument;
+        };
+        let mut b = [0u8; 12];
+        let mut n: int32 = 0;
+        // SAFETY: `b` has room for 12 bytes.
+        let r = unsafe { s.read(b.as_mut_ptr() as *mut c_void, 12, &mut n) };
+        if r != kResultOk || n != 12 || &b[..4] != CONTROLLER_STATE_TAG {
+            return kResultFalse;
+        }
+        let memo = u64::from_le_bytes(b[4..].try_into().unwrap_or_default());
+        self.memo.store(memo, Ordering::SeqCst);
+        store(ix::LAST_MEMO, memo);
+        kResultOk
+    }
 }
+
+/// The first bytes of a controller's own state.
+const CONTROLLER_STATE_TAG: &[u8; 4] = b"VZC1";
+/// What [`Vst3Mode::StateSeeksPastEnd`] writes after the gap.
+const SEEK_TAG: &[u8; 4] = b"VZND";
 
 /// Implements `IEditController` over a `ctl: Ctl` field.
 macro_rules! edit_controller {
@@ -774,14 +855,14 @@ macro_rules! edit_controller {
                 self.ctl.take_component_state(state)
             }
 
-            unsafe fn setState(&self, _state: *mut IBStream) -> tresult {
+            unsafe fn setState(&self, state: *mut IBStream) -> tresult {
                 self.ctl.check();
-                kResultOk
+                self.ctl.set_state(state)
             }
 
-            unsafe fn getState(&self, _state: *mut IBStream) -> tresult {
+            unsafe fn getState(&self, state: *mut IBStream) -> tresult {
                 self.ctl.check();
-                kResultOk
+                self.ctl.get_state(state)
             }
 
             unsafe fn getParameterCount(&self) -> int32 {
@@ -933,6 +1014,83 @@ impl Proc {
             stamp(ix::LAST_SET_ACTIVE_OFF);
             self.notes.store(0, Ordering::SeqCst);
         }
+        kResultOk
+    }
+
+    /// The component's state: its gain, normalised (8 bytes
+    /// little-endian); under [`Vst3Mode::StateSeeksPastEnd`] then a seek
+    /// 4 bytes past the end and [`SEEK_TAG`] (16 bytes, a zero gap).
+    fn get_state(&self, state: *mut IBStream) -> tresult {
+        // SAFETY: the host's stream, for this call.
+        let Some(s) = (unsafe { ComRef::from_raw(state) }) else {
+            return kInvalidArgument;
+        };
+        let mut b = f64::from_bits(self.gain.load(Ordering::SeqCst)).to_le_bytes();
+        let mut n: int32 = 0;
+        // SAFETY: `b` holds 8 bytes.
+        let r = unsafe { s.write(b.as_mut_ptr() as *mut c_void, 8, &mut n) };
+        if r != kResultOk || n != 8 {
+            return kResultFalse;
+        }
+        if mode() == MODE_STATE_SEEKS_PAST_END {
+            let mut at = 0;
+            let mut tag = *SEEK_TAG;
+            // SAFETY: plain calls on the host's stream; `tag` holds 4 bytes.
+            let ok = unsafe {
+                s.seek(4, IStreamSeekMode_::kIBSeekCur as int32, &mut at) == kResultOk
+                    && at == 12
+                    && s.write(tag.as_mut_ptr() as *mut c_void, 4, &mut n) == kResultOk
+                    && n == 4
+            };
+            if !ok {
+                return kResultFalse;
+            }
+        }
+        kResultOk
+    }
+
+    /// Takes a state [`Proc::get_state`] wrote; anything else (short, not
+    /// a normalised value) is refused and changes nothing. Under
+    /// [`Vst3Mode::StateSeeksPastEnd`] it also reads the gap and the tag,
+    /// reads past the end (0 bytes) and seeks past it (to the end).
+    fn set_state(&self, state: *mut IBStream) -> tresult {
+        bump(ix::COMPONENT_SET_STATES);
+        stamp(ix::LAST_COMPONENT_SET_STATE);
+        if mode() == MODE_COMPONENT_STATE_REFUSED {
+            return kResultFalse;
+        }
+        // SAFETY: the host's stream, for this call.
+        let Some(s) = (unsafe { ComRef::from_raw(state) }) else {
+            return kInvalidArgument;
+        };
+        let mut b = [0u8; 8];
+        let mut n: int32 = 0;
+        // SAFETY: `b` has room for 8 bytes.
+        let r = unsafe { s.read(b.as_mut_ptr() as *mut c_void, 8, &mut n) };
+        let gain = f64::from_le_bytes(b);
+        if r != kResultOk || n != 8 || !(0.0..=1.0).contains(&gain) {
+            return kResultFalse;
+        }
+        if mode() == MODE_STATE_SEEKS_PAST_END {
+            let mut rest = [0u8; 12];
+            let mut at = 0;
+            // SAFETY: plain calls on the host's stream; `rest` has room
+            // for 12 bytes.
+            let ok = unsafe {
+                s.read(rest.as_mut_ptr() as *mut c_void, 12, &mut n) == kResultOk
+                    && n == 8
+                    && rest[..4] == [0; 4]
+                    && &rest[4..8] == SEEK_TAG
+                    && s.read(rest.as_mut_ptr() as *mut c_void, 4, &mut n) == kResultOk
+                    && n == 0
+                    && s.seek(100, IStreamSeekMode_::kIBSeekEnd as int32, &mut at) == kResultOk
+                    && at == 16
+            };
+            if !ok {
+                return kResultFalse;
+            }
+        }
+        self.gain.store(gain.to_bits(), Ordering::SeqCst);
         kResultOk
     }
 
@@ -1228,8 +1386,12 @@ macro_rules! component_common {
             self.proc.set_active(state)
         }
 
-        unsafe fn setState(&self, _state: *mut IBStream) -> tresult {
-            kResultOk
+        unsafe fn setState(&self, state: *mut IBStream) -> tresult {
+            self.proc.set_state(state)
+        }
+
+        unsafe fn getState(&self, state: *mut IBStream) -> tresult {
+            self.proc.get_state(state)
         }
     };
 }
@@ -1337,22 +1499,6 @@ impl IComponentTrait for Component {
             kResultOk
         } else {
             kInvalidArgument
-        }
-    }
-
-    unsafe fn getState(&self, state: *mut IBStream) -> tresult {
-        // SAFETY: the host's stream, for this call.
-        let Some(s) = (unsafe { ComRef::from_raw(state) }) else {
-            return kInvalidArgument;
-        };
-        let mut b = VST3_COMPONENT_GAIN.to_le_bytes();
-        let mut n: int32 = 0;
-        // SAFETY: `b` holds 8 bytes.
-        let r = unsafe { s.write(b.as_mut_ptr() as *mut c_void, 8, &mut n) };
-        if r == kResultOk && n == 8 {
-            kResultOk
-        } else {
-            kResultFalse
         }
     }
 
@@ -1586,10 +1732,6 @@ impl IComponentTrait for Synth {
         }
     }
 
-    unsafe fn getState(&self, _state: *mut IBStream) -> tresult {
-        kResultOk
-    }
-
     component_common!();
 }
 
@@ -1804,6 +1946,15 @@ pub enum Vst3Mode {
     /// `process` reports NaN for Meter and Secret in its output
     /// parameter changes.
     NanOutput = 7,
+    /// Components refuse `setState` (and change nothing).
+    ComponentStateRefused = 8,
+    /// Controllers refuse `setState` (and change nothing).
+    ControllerStateRefused = 9,
+    /// Components write their state with a seek past the end (a 4-byte
+    /// gap, then a tag) and, reading it, read the gap and the tag, read
+    /// past the end and seek past it, refusing a stream that does not
+    /// behave as the SDK's streams do.
+    StateSeeksPastEnd = 10,
 }
 
 /// A component-handler call the probe makes the latest controller do.
@@ -1972,6 +2123,18 @@ pub struct Vst3Counters {
     pub clap_inits: u64,
     /// CLAP entry `deinit` calls.
     pub clap_deinits: u64,
+    /// Component `setState` calls (also refused ones).
+    pub component_set_states: u64,
+    /// When the latest component `setState` came.
+    pub last_component_set_state: u64,
+    /// When the latest `setComponentState` read the component's state.
+    pub last_state_sync: u64,
+    /// Controller `setState` calls (also refused ones).
+    pub controller_set_states: u64,
+    /// When the latest controller `setState` came.
+    pub last_controller_set_state: u64,
+    /// The memo the latest controller `setState` took.
+    pub last_memo: u64,
 }
 
 impl Vst3Counters {
@@ -2109,7 +2272,25 @@ impl Vst3Probe {
             sidechain_on: v[ix::SIDECHAIN_ON],
             clap_inits: v[ix::CLAP_INITS],
             clap_deinits: v[ix::CLAP_DEINITS],
+            component_set_states: v[ix::COMPONENT_SET_STATES],
+            last_component_set_state: v[ix::LAST_COMPONENT_SET_STATE],
+            last_state_sync: v[ix::LAST_STATE_SYNC],
+            controller_set_states: v[ix::CONTROLLER_SET_STATES],
+            last_controller_set_state: v[ix::LAST_CONTROLLER_SET_STATE],
+            last_memo: v[ix::LAST_MEMO],
         }
+    }
+
+    /// Sets the memo (a controller-only value, carried only by the
+    /// controller's own state) controllers made from now on start with.
+    pub fn set_memo(&self, memo: u64) {
+        // SAFETY: the exported function takes a `u64`.
+        let f = unsafe {
+            self.0
+                .get::<extern "C" fn(u64)>(b"vizdaw_test_vst3_set_memo\0")
+        }
+        .unwrap();
+        f(memo);
     }
 
     /// Sets the latency and tail (frames; `u32::MAX` is an infinite tail)

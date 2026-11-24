@@ -42,9 +42,9 @@ use sdk::Vst::{
 use sdk::{
     FIDString, FUnknown, IBStream, IBStreamTrait, IPluginBaseTrait, IPluginFactory,
     IPluginFactory2, IPluginFactory2Trait, IPluginFactory3, IPluginFactory3Trait,
-    IPluginFactoryTrait, PClassInfo, PClassInfo2, PClassInfoW, PFactoryInfo, TBool, TUID, int32,
-    int64, kInvalidArgument, kNoInterface, kNotImplemented, kResultFalse, kResultOk, tresult,
-    uint32,
+    IPluginFactoryTrait, ISizeableStream, ISizeableStreamTrait, PClassInfo, PClassInfo2,
+    PClassInfoW, PFactoryInfo, TBool, TUID, int32, int64, kInvalidArgument, kNoInterface,
+    kNotImplemented, kResultFalse, kResultOk, tresult, uint32,
 };
 
 /// Most classes read from one factory (a guard against a bogus count).
@@ -648,27 +648,67 @@ impl IAttributeListTrait for HostAttributes {
     }
 }
 
-/// An `IBStream` over bytes in memory.
+/// The largest stream a plug-in may write (a guard against a plug-in that
+/// seeks far past the end and writes there).
+pub(crate) const MAX_STREAM: usize = 1 << 30;
+
+/// An `IBStream` (and `ISizeableStream`) over bytes in memory, as the
+/// SDK's streams behave: a read past the end reads what is there (0 bytes
+/// at the end, still `kResultOk`); a seek before the start stops at the
+/// start. A writer ([`MemStream::default`], the SDK's `MemoryStream`)
+/// may seek past the end, and a write there fills the gap with zeros, up
+/// to [`MAX_STREAM`]; a reader ([`MemStream::reader`], the SDK's
+/// `ReadOnlyBStream` over one chunk of a preset) stops a seek at the end
+/// and refuses writes.
 #[derive(Default)]
 pub(crate) struct MemStream {
     inner: Mutex<(Vec<u8>, usize)>,
+    read_only: bool,
 }
 
 impl MemStream {
+    /// A read-only stream over `bytes`, at the start.
+    pub(crate) fn reader(bytes: &[u8]) -> MemStream {
+        MemStream {
+            inner: Mutex::new((bytes.to_vec(), 0)),
+            read_only: true,
+        }
+    }
+
     /// Moves the read and write position back to the start.
     pub(crate) fn rewind(&self) {
         if let Ok(mut g) = self.inner.lock() {
             g.1 = 0;
         }
     }
+
+    /// Takes the bytes written (the stream is empty afterwards).
+    pub(crate) fn take(&self) -> Vec<u8> {
+        self.inner
+            .lock()
+            .map(|mut g| {
+                g.1 = 0;
+                std::mem::take(&mut g.0)
+            })
+            .unwrap_or_default()
+    }
+
+    /// The farthest a seek may go.
+    fn limit(&self, len: usize) -> usize {
+        if self.read_only { len } else { MAX_STREAM }
+    }
 }
 
 impl Class for MemStream {
-    type Interfaces = (IBStream,);
+    type Interfaces = (IBStream, ISizeableStream);
 }
 
 impl IBStreamTrait for MemStream {
     unsafe fn read(&self, buffer: *mut c_void, n: int32, read: *mut int32) -> tresult {
+        // SAFETY: the caller's out value, or null.
+        if let Some(r) = unsafe { read.as_mut() } {
+            *r = 0;
+        }
         let Ok(mut g) = self.inner.lock() else {
             return kResultFalse;
         };
@@ -678,14 +718,14 @@ impl IBStreamTrait for MemStream {
         }
         let (data, pos) = &mut *g;
         let have = data.len().saturating_sub(*pos).min(want);
-        if have > 0 {
-            if let Some(src) = data.get(*pos..*pos + have) {
-                // SAFETY: the caller's buffer holds `n` bytes.
+        if let Some(src) = data.get(*pos..*pos + have) {
+            if have > 0 {
+                // SAFETY: the caller's buffer holds `n` bytes, `have <= n`.
                 unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), buffer as *mut u8, have) };
             }
         }
         *pos += have;
-        // SAFETY: the caller's out value, or null.
+        // SAFETY: as above.
         if let Some(r) = unsafe { read.as_mut() } {
             *r = int32::try_from(have).unwrap_or(0);
         }
@@ -693,6 +733,13 @@ impl IBStreamTrait for MemStream {
     }
 
     unsafe fn write(&self, buffer: *mut c_void, n: int32, written: *mut int32) -> tresult {
+        // SAFETY: the caller's out value, or null.
+        if let Some(w) = unsafe { written.as_mut() } {
+            *w = 0;
+        }
+        if self.read_only {
+            return kNotImplemented;
+        }
         let Ok(mut g) = self.inner.lock() else {
             return kResultFalse;
         };
@@ -702,10 +749,13 @@ impl IBStreamTrait for MemStream {
         }
         let (data, pos) = &mut *g;
         if n > 0 {
+            let Some(end) = pos.checked_add(n).filter(|e| *e <= MAX_STREAM) else {
+                return kResultFalse;
+            };
             // SAFETY: the caller's `n` bytes at `buffer`.
             let src = unsafe { std::slice::from_raw_parts(buffer as *const u8, n) };
-            let end = *pos + n;
             if data.len() < end {
+                // A seek past the end left a gap: zeros, as the SDK's.
                 data.resize(end, 0);
             }
             if let Some(dst) = data.get_mut(*pos..end) {
@@ -713,7 +763,7 @@ impl IBStreamTrait for MemStream {
             }
             *pos = end;
         }
-        // SAFETY: the caller's out value, or null.
+        // SAFETY: as above.
         if let Some(w) = unsafe { written.as_mut() } {
             *w = int32::try_from(n).unwrap_or(0);
         }
@@ -731,10 +781,10 @@ impl IBStreamTrait for MemStream {
             m if m == IStreamSeekMode_::kIBSeekEnd as int32 => data.len() as i64,
             _ => return kInvalidArgument,
         };
-        let Some(to) = base.checked_add(offset).filter(|t| *t >= 0) else {
-            return kResultFalse;
-        };
-        *pos = usize::try_from(to).unwrap_or(usize::MAX).min(data.len());
+        let to = base.saturating_add(offset).max(0);
+        *pos = usize::try_from(to)
+            .unwrap_or(usize::MAX)
+            .min(self.limit(data.len()));
         // SAFETY: the caller's out value, or null.
         if let Some(r) = unsafe { result.as_mut() } {
             *r = *pos as i64;
@@ -754,6 +804,36 @@ impl IBStreamTrait for MemStream {
             }
             None => kInvalidArgument,
         }
+    }
+}
+
+impl ISizeableStreamTrait for MemStream {
+    unsafe fn getStreamSize(&self, size: *mut int64) -> tresult {
+        let Ok(g) = self.inner.lock() else {
+            return kResultFalse;
+        };
+        // SAFETY: the caller's out value, or null.
+        match unsafe { size.as_mut() } {
+            Some(s) => {
+                *s = g.0.len() as i64;
+                kResultOk
+            }
+            None => kInvalidArgument,
+        }
+    }
+
+    unsafe fn setStreamSize(&self, size: int64) -> tresult {
+        if self.read_only {
+            return kNotImplemented;
+        }
+        let Some(n) = usize::try_from(size).ok().filter(|n| *n <= MAX_STREAM) else {
+            return kInvalidArgument;
+        };
+        let Ok(mut g) = self.inner.lock() else {
+            return kResultFalse;
+        };
+        g.0.resize(n, 0);
+        kResultOk
     }
 }
 
@@ -1241,6 +1321,79 @@ impl Plugin {
 
 /// The speaker arrangement of `channels` channels: mono, else the first
 /// `channels` speakers (stereo for 2).
+/// A state call's result that the SDK's preset files take as success
+/// (`vstpresetfile.cpp`'s `verify`): done, or nothing to do.
+fn state_ok(r: tresult) -> bool {
+    r == kResultOk || r == kNotImplemented
+}
+
+/// State (host track H1 Task 5): each call gets its own stream, a writer
+/// for a `getState` and a reader over exactly one chunk for a `setState`,
+/// as the SDK's `PresetFile` gives them. Main thread.
+impl Plugin {
+    /// Runs `get` with a fresh writer and returns what it wrote.
+    fn read_out(&self, get: impl FnOnce(*mut IBStream) -> tresult) -> Result<Vec<u8>, String> {
+        let stream = ComWrapper::new(MemStream::default());
+        let s = stream
+            .to_com_ptr::<IBStream>()
+            .ok_or_else(|| "no stream".to_string())?;
+        if !state_ok(get(s.as_ptr())) {
+            return Err("the plug-in did not save its state".into());
+        }
+        Ok(stream.take())
+    }
+
+    /// Runs `set` with a reader over `bytes`.
+    fn feed(&self, bytes: &[u8], set: impl FnOnce(*mut IBStream) -> tresult) -> bool {
+        let stream = ComWrapper::new(MemStream::reader(bytes));
+        stream
+            .to_com_ptr::<IBStream>()
+            .is_some_and(|s| state_ok(set(s.as_ptr())))
+    }
+
+    /// The component's state (`IComponent::getState`).
+    pub(crate) fn component_state(&self) -> Result<Vec<u8>, String> {
+        // SAFETY: the stream is live for the call.
+        self.read_out(|s| unsafe { self.component.getState(s) })
+    }
+
+    /// The controller's own state (`IEditController::getState`), or
+    /// `None` when there is no controller.
+    pub(crate) fn controller_state(&self) -> Result<Option<Vec<u8>>, String> {
+        let Some(c) = &self.controller else {
+            return Ok(None);
+        };
+        // SAFETY: as above.
+        self.read_out(|s| unsafe { c.getState(s) }).map(Some)
+    }
+
+    /// `IComponent::setState(bytes)`; whether the plug-in took it.
+    pub(crate) fn set_component_state(&self, bytes: &[u8]) -> bool {
+        // SAFETY: as above.
+        self.feed(bytes, |s| unsafe { self.component.setState(s) })
+    }
+
+    /// The controller's `setComponentState(bytes)` (the component's
+    /// state); true without a controller.
+    pub(crate) fn sync_controller(&self, bytes: &[u8]) -> bool {
+        let Some(c) = &self.controller else {
+            return true;
+        };
+        // SAFETY: as above.
+        self.feed(bytes, |s| unsafe { c.setComponentState(s) })
+    }
+
+    /// The controller's `setState(bytes)` (its own state); true without
+    /// a controller.
+    pub(crate) fn set_controller_state(&self, bytes: &[u8]) -> bool {
+        let Some(c) = &self.controller else {
+            return true;
+        };
+        // SAFETY: as above.
+        self.feed(bytes, |s| unsafe { c.setState(s) })
+    }
+}
+
 fn arrangement_of(channels: i32) -> SpeakerArrangement {
     match channels {
         c if c <= 1 => SpeakerArr::kMono,
@@ -1274,5 +1427,108 @@ impl Drop for Plugin {
         // Released here (the component when the field drops after).
         self.processor = None;
         self.controller = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SET: int32 = IStreamSeekMode_::kIBSeekSet as int32;
+    const CUR: int32 = IStreamSeekMode_::kIBSeekCur as int32;
+    const END: int32 = IStreamSeekMode_::kIBSeekEnd as int32;
+
+    fn read(s: &MemStream, n: int32) -> (tresult, Vec<u8>) {
+        let mut buf = vec![0xEEu8; usize::try_from(n.max(0)).unwrap()];
+        let mut got: int32 = -1;
+        // SAFETY: `buf` holds `n` bytes.
+        let r = unsafe { s.read(buf.as_mut_ptr() as *mut c_void, n, &mut got) };
+        buf.truncate(usize::try_from(got).unwrap());
+        (r, buf)
+    }
+
+    fn write(s: &MemStream, b: &[u8]) -> (tresult, int32) {
+        let mut put: int32 = -1;
+        // SAFETY: `b` holds its length; the stream only reads it.
+        let r = unsafe { s.write(b.as_ptr() as *mut c_void, b.len() as int32, &mut put) };
+        (r, put)
+    }
+
+    fn seek(s: &MemStream, to: int64, mode: int32) -> (tresult, int64) {
+        let mut at: int64 = -1;
+        // SAFETY: plain call.
+        let r = unsafe { s.seek(to, mode, &mut at) };
+        (r, at)
+    }
+
+    fn size(s: &MemStream) -> int64 {
+        let mut n: int64 = -1;
+        // SAFETY: plain call.
+        assert_eq!(unsafe { s.getStreamSize(&mut n) }, kResultOk);
+        n
+    }
+
+    #[test]
+    fn a_reader_reads_what_is_there_and_stops_at_its_ends() {
+        let s = MemStream::reader(b"abcdef");
+        assert_eq!(read(&s, 4), (kResultOk, b"abcd".to_vec()));
+        // Past the end: what is left, then 0 bytes, still a success.
+        assert_eq!(read(&s, 4), (kResultOk, b"ef".to_vec()));
+        assert_eq!(read(&s, 4), (kResultOk, Vec::new()));
+        assert_eq!(read(&s, 0), (kResultOk, Vec::new()));
+        assert_eq!(read(&s, -5), (kResultOk, Vec::new()));
+        // A seek stops at the end and at the start.
+        assert_eq!(seek(&s, 100, SET), (kResultOk, 6));
+        assert_eq!(seek(&s, 10, END), (kResultOk, 6));
+        assert_eq!(seek(&s, -100, CUR), (kResultOk, 0));
+        assert_eq!(seek(&s, i64::MIN, CUR), (kResultOk, 0));
+        assert_eq!(seek(&s, -2, END), (kResultOk, 4));
+        assert_eq!(read(&s, 9), (kResultOk, b"ef".to_vec()));
+        assert_eq!(seek(&s, 0, 7).0, kInvalidArgument);
+        // Read only.
+        assert_eq!(write(&s, b"x"), (kNotImplemented, 0));
+        // SAFETY: plain call.
+        assert_eq!(unsafe { s.setStreamSize(0) }, kNotImplemented);
+        assert_eq!(size(&s), 6);
+        let mut at: int64 = -1;
+        // SAFETY: plain call.
+        assert_eq!(unsafe { s.tell(&mut at) }, kResultOk);
+        assert_eq!(at, 6);
+        // A null buffer with bytes asked for is refused; with none, not.
+        let mut got: int32 = -1;
+        // SAFETY: the stream checks the null buffer.
+        unsafe {
+            assert_eq!(s.read(std::ptr::null_mut(), 1, &mut got), kInvalidArgument);
+            assert_eq!(got, 0);
+            assert_eq!(
+                s.read(std::ptr::null_mut(), 0, std::ptr::null_mut()),
+                kResultOk
+            );
+        }
+    }
+
+    #[test]
+    fn a_writer_may_seek_past_the_end_and_fills_the_gap_with_zeros() {
+        let s = MemStream::default();
+        assert_eq!(write(&s, b"ab"), (kResultOk, 2));
+        assert_eq!(seek(&s, 3, CUR), (kResultOk, 5));
+        assert_eq!(size(&s), 2, "a seek alone writes nothing");
+        assert_eq!(read(&s, 4), (kResultOk, Vec::new()), "past the end");
+        assert_eq!(write(&s, b"cd"), (kResultOk, 2));
+        assert_eq!(seek(&s, 1, SET), (kResultOk, 1));
+        assert_eq!(write(&s, b"B"), (kResultOk, 1));
+        assert_eq!(s.take(), b"aB\0\0\0cd");
+        assert_eq!(size(&s), 0);
+        // Not beyond the limit.
+        assert_eq!(seek(&s, i64::MAX, SET), (kResultOk, MAX_STREAM as i64));
+        assert_eq!(write(&s, b"x"), (kResultFalse, 0));
+        assert_eq!(size(&s), 0);
+        // SAFETY: plain calls.
+        unsafe {
+            assert_eq!(s.setStreamSize(3), kResultOk);
+            assert_eq!(s.setStreamSize(-1), kInvalidArgument);
+            assert_eq!(s.setStreamSize(MAX_STREAM as i64 + 1), kInvalidArgument);
+        }
+        assert_eq!(size(&s), 3);
     }
 }

@@ -8,13 +8,15 @@
 //! ([`class_id_hex`]). A loaded plug-in is a [`Vst3Instance`]; the
 //! [`Vst3Format`] makes them and shares one loaded module between the
 //! instances of a bundle. An active instance's real-time half is a
-//! [`Vst3Processor`].
+//! [`Vst3Processor`]. A plug-in's state is kept in the `.vstpreset`
+//! layout (`state.rs`).
 
 mod ffi;
 mod instance;
 mod module;
 mod process_ffi;
 mod processor;
+mod state;
 
 pub use instance::{Vst3Format, Vst3Instance};
 pub(crate) use module::bundle_version;

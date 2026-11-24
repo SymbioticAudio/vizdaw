@@ -30,7 +30,7 @@
 use super::ffi::{ComponentHandler, EDIT_QUEUE, Edit, Module, Plugin};
 use super::process_ffi::RtData;
 use super::processor::{ParamMap, ProcessorSetup, Vst3Processor};
-use super::{class_id_hex, module, parse_class_id};
+use super::{class_id_hex, module, parse_class_id, state};
 use crate::error::HostError;
 use crate::info::{AudioPortInfo, ParamInfo, PluginInfo, PluginKind, PortRole, Tail};
 use crate::instance::{
@@ -90,6 +90,8 @@ pub struct Vst3Instance {
     /// before the module it came from.
     plugin: Plugin,
     handler: ComWrapper<ComponentHandler>,
+    /// The plug-in's class ID (its state blobs carry it).
+    class_id: [u8; 16],
     info: PluginInfo,
     /// Set while the component is active (`setActive(true)` and a
     /// processor handed out).
@@ -140,6 +142,7 @@ impl Vst3Instance {
         let mut me = Vst3Instance {
             plugin,
             handler,
+            class_id: cid,
             info: PluginInfo {
                 plugin: plugin_ref,
                 kind,
@@ -378,16 +381,26 @@ impl PluginInstance for Vst3Instance {
         self.active.is_some()
     }
 
+    /// Both streams in the `.vstpreset` layout ([`state`]); active or
+    /// not, as the CLAP host saves.
     fn save_state(&mut self) -> Result<Vec<u8>, HostError> {
-        Err(HostError::StateRejected(
-            "VST3 state is not available yet".into(),
-        ))
+        self.reclaim();
+        state::save(&self.plugin, &self.class_id)
     }
 
-    fn load_state(&mut self, _data: &[u8]) -> Result<(), HostError> {
-        Err(HostError::StateRejected(
-            "VST3 state is not available yet".into(),
-        ))
+    /// Loads a blob from [`PluginInstance::save_state`] (or a
+    /// `.vstpreset` of this class); active or not, as the CLAP host
+    /// loads. Values set or edited before a load that the component has
+    /// not been sent are dropped: they would land on the loaded state.
+    fn load_state(&mut self, data: &[u8]) -> Result<(), HostError> {
+        self.reclaim();
+        state::load(&self.plugin, &self.class_id, data)?;
+        self.pending.clear();
+        if let Some(a) = &self.active {
+            while a.edits.pop().is_some() {}
+            while a.returned.pop().is_some() {}
+        }
+        Ok(())
     }
 
     fn set_params(&mut self, values: &[(ParamId, f64)]) -> Result<(), HostError> {

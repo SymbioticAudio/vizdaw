@@ -1344,6 +1344,7 @@ dependencies = [
  "clack-extensions",
  "clack-host",
  "core-engine",
+ "core-io",
  "core-model",
  "crossbeam-queue",
  "libc",

@@ -20,6 +20,8 @@ libloading = "0.8"
 
 [dev-dependencies]
 core-engine = { path = "../core-engine", features = ["fixtures"] }
+# `tests/vst3_dawproject.rs`: a VST3 state through a DAWproject package.
+core-io = { path = "../core-io" }
 test-plugins = { path = "../test-plugins" }
 tempfile = "3"
 
