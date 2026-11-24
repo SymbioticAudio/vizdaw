@@ -217,6 +217,11 @@ pub trait PanelBackend {
         done: oneshot::Sender<Chosen>,
         cx: &mut App,
     );
+
+    /// The panel's parent `window` is closing while the panel is up: end
+    /// it (as cancelled) before the window goes. The panel layer reads the
+    /// panel as cancelled either way.
+    fn end(&self, _window: AnyWindowHandle, _cx: &mut App) {}
 }
 
 /// GPUI's path prompts (the test platform's, answered by tests).
@@ -289,7 +294,8 @@ fn set_up(up: bool, cx: &mut App) {
 /// update) and answers through its completion, so GPUI keeps running
 /// while it is up. While it is up a second request answers `Ok(None)` at
 /// once. The panel-up flag is cleared when the panel answers, whether or
-/// not the caller still holds the returned task.
+/// not the caller still holds the returned task. When `window` closes
+/// first, the backend ends the panel and it reads as cancelled.
 pub fn choose(
     spec: &PanelSpec,
     place: PanelPlace,
@@ -304,9 +310,35 @@ pub fn choose(
     let (done, answered) = oneshot::channel::<Chosen>();
     let (out, answer) = oneshot::channel::<Chosen>();
     let spec = *spec;
+    // Its window closing ends the panel and reads as cancelled, so the
+    // panel-up flag clears even if the panel never answers.
+    let (closed, gone) = match window {
+        Some(w) => {
+            let backend = backend.clone();
+            let (tx, rx) = oneshot::channel::<()>();
+            let mut tx = Some(tx);
+            let sub = cx.on_window_closed(move |cx, id| {
+                if id == w.window_id()
+                    && let Some(tx) = tx.take()
+                {
+                    backend.end(w, cx);
+                    tx.send(()).ok();
+                }
+            });
+            (Some(sub), Some(rx))
+        }
+        None => (None, None),
+    };
     cx.defer(move |cx| backend.show(&spec, &place, window, done, cx));
     cx.spawn(async move |cx| {
-        let chosen = answered.await.unwrap_or(Ok(None));
+        let chosen = match gone {
+            Some(gone) => match futures::future::select(answered, gone).await {
+                futures::future::Either::Left((a, _)) => a.unwrap_or(Ok(None)),
+                futures::future::Either::Right(_) => Ok(None),
+            },
+            None => answered.await.unwrap_or(Ok(None)),
+        };
+        drop(closed);
         cx.update(|cx| set_up(false, cx));
         out.send(chosen).ok();
     })
@@ -414,6 +446,13 @@ impl PanelBackend for NativePanels {
         // the panel closed.
         let parent = window.and_then(|w| macos::ns_window(w, cx));
         macos::present(&mac_panel(spec, place), parent, done);
+    }
+
+    /// A sheet whose window closes is ended here: GPUI ends only its own
+    /// sheets when it drops a window.
+    #[cfg(target_os = "macos")]
+    fn end(&self, _window: AnyWindowHandle, _cx: &mut App) {
+        macos::end();
     }
 
     #[cfg(target_os = "linux")]

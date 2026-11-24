@@ -498,7 +498,15 @@ fn a_bounce_answered_after_its_window_closed_starts_nothing(cx: &mut TestAppCont
         .update(&mut mcx, |_, window, _| window.remove_window())
         .unwrap();
     mcx.run_until_parked();
-    s.panels.answer("/nowhere-vizdaw-test/Mix.wav");
+    // The window closing already read the panel as cancelled; a late
+    // answer from the panel goes nowhere.
+    let (_, _, done) = s.panels.shown.borrow_mut().remove(0);
+    assert!(
+        done.send(Ok(Some(vec![PathBuf::from(
+            "/nowhere-vizdaw-test/Mix.wav"
+        )])))
+        .is_err()
+    );
     s.cx.run_until_parked();
     assert!(
         s.app

@@ -14,17 +14,36 @@ use std::path::PathBuf;
 use block2::RcBlock;
 use futures::channel::oneshot;
 use gpui::{AnyWindowHandle, App};
-use objc2::MainThreadMarker;
 use objc2::rc::Retained;
+use objc2::{MainThreadMarker, Message};
 use objc2_app_kit::{
-    NSModalPanelWindowLevel, NSModalResponse, NSModalResponseOK, NSOpenPanel, NSSavePanel, NSView,
-    NSWindow,
+    NSModalPanelWindowLevel, NSModalResponse, NSModalResponseCancel, NSModalResponseOK,
+    NSOpenPanel, NSSavePanel, NSView, NSWindow,
 };
 use objc2_foundation::{NSArray, NSString, NSURL};
 use objc2_uniform_type_identifiers::UTType;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use super::{Chosen, MacPanel, MacType};
+
+thread_local! {
+    /// The panel shown as a sheet now, and the window it is on (one panel
+    /// at a time): [`end`] ends it when that window closes.
+    static SHEET: RefCell<Option<(Retained<NSWindow>, Retained<NSSavePanel>)>> =
+        const { RefCell::new(None) };
+}
+
+/// Ends the panel's sheet with Cancel (its completion answers `None`):
+/// its window is closing. GPUI ends only its own sheets when it drops a
+/// window, and a sheet left on a closed window never answers.
+pub(super) fn end() {
+    // Taken first: the completion may run inside `endSheet` and clears
+    // the slot itself.
+    let Some((parent, panel)) = SHEET.with(|s| s.borrow_mut().take()) else {
+        return;
+    };
+    parent.endSheet_returnCode(&panel, NSModalResponseCancel);
+}
 
 /// Off the main thread no panel can be shown.
 const NOT_MAIN: &str = "A file panel can only be shown from the main thread.";
@@ -67,6 +86,7 @@ pub(super) fn present(
     });
     let done = RefCell::new(Some(done));
     let answer = move |chosen: Option<Vec<PathBuf>>| {
+        SHEET.with(|s| s.borrow_mut().take());
         if let Some(tx) = done.borrow_mut().take() {
             tx.send(Ok(chosen)).ok();
         }
@@ -132,7 +152,10 @@ fn begin(
     handler: &block2::DynBlock<dyn Fn(NSModalResponse)>,
 ) {
     match parent {
-        Some(w) => panel.beginSheetModalForWindow_completionHandler(w, handler),
+        Some(w) => {
+            SHEET.with(|s| *s.borrow_mut() = Some((w.retain(), panel.retain())));
+            panel.beginSheetModalForWindow_completionHandler(w, handler);
+        }
         None => {
             panel.beginWithCompletionHandler(handler);
             panel.setLevel(NSModalPanelWindowLevel);

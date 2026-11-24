@@ -277,6 +277,8 @@ struct FakePanels {
     shown: RefCell<Vec<(&'static str, oneshot::Sender<Chosen>)>>,
     /// The parent window each panel was shown for.
     parents: RefCell<Vec<Option<AnyWindowHandle>>>,
+    /// The windows whose panel the backend was told to end.
+    ended: RefCell<Vec<AnyWindowHandle>>,
 }
 
 impl PanelBackend for FakePanels {
@@ -290,6 +292,10 @@ impl PanelBackend for FakePanels {
     ) {
         self.parents.borrow_mut().push(window);
         self.shown.borrow_mut().push((spec.row, done));
+    }
+
+    fn end(&self, window: AnyWindowHandle, _cx: &mut App) {
+        self.ended.borrow_mut().push(window);
     }
 }
 
@@ -408,4 +414,43 @@ fn the_backend_gets_the_asking_window_as_the_panels_parent(cx: &mut TestAppConte
     });
     s.cx.run_until_parked();
     assert_eq!(fake.parents.borrow()[1], None);
+}
+
+/// Re-review: a panel whose window closes while it is up is ended by the
+/// backend (macOS: the sheet would never answer) and reads as cancelled,
+/// so keys and menus come back even if the panel never answers.
+#[gpui::test]
+fn a_panel_whose_window_closes_is_ended_and_the_flag_clears(cx: &mut TestAppContext) {
+    let mut s = setup(cx);
+    let fake = fake_panels(&mut s);
+    let other =
+        s.cx.update(|_, cx| vizdaw_gpui::new_demo(cx).expect("a second window"));
+    s.cx.run_until_parked();
+    let got: Rc<RefCell<Option<Chosen>>> = Rc::default();
+    let slot = got.clone();
+    s.cx.update(|_, cx| {
+        let task = choose(
+            &panels::IMPORT_MIDI,
+            PanelPlace::default(),
+            Some(other.into()),
+            cx,
+        );
+        cx.spawn(async move |_| *slot.borrow_mut() = Some(task.await))
+            .detach();
+    });
+    s.cx.run_until_parked();
+    assert_eq!(fake.rows(), vec!["3"]);
+    assert!(s.cx.update(|_, cx| is_up(cx)));
+    other
+        .update(&mut s.cx, |_, window, _| window.remove_window())
+        .unwrap();
+    s.cx.run_until_parked();
+    let other: AnyWindowHandle = other.into();
+    assert_eq!(*fake.ended.borrow(), vec![other]);
+    assert!(!s.cx.update(|_, cx| is_up(cx)), "keys and menus are back");
+    assert_eq!(got.borrow_mut().take(), Some(Ok(None)), "read as cancelled");
+    // The fake never answered: its sender is still held.
+    assert_eq!(fake.rows(), vec!["3"]);
+    // Another window closing later ends nothing more.
+    assert_eq!(fake.ended.borrow().len(), 1);
 }

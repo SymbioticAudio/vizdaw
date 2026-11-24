@@ -90,3 +90,4 @@ either platform's panels.
 | macOS | Each panel opened from a window is attached to it as a sheet; one opened with no window open floats above every window | open |
 | macOS | Click into the document window (or another one) while a panel is up: the panel stays in front and the app doesn't look frozen | open |
 | macOS | Start playback, then open a panel: the playhead keeps moving behind it | open |
+| macOS | Close the panel's window (or its document) while the panel is up: the panel goes and keys and menus come back | open |
