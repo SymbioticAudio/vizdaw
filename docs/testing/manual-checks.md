@@ -161,3 +161,43 @@ screen control; **owner** rows need the owner's Linux desktop.
 | Linux | owner | Close and quit with editors open: no BadWindow exit (also after a Busy close) | open |
 | Linux | owner | No transparency or garbage in the editor area (the 24-bit container inside the 32-bit GPUI window) | open |
 | Linux | owner | A plug-in with no editor shows its parameter list, not a black box, and its sliders take the mouse; Loading… is visible while a reopened project's plug-ins load; a plug-in turned off shows its reason, not the old editor's black area | open |
+
+### Transport bar and recording views (GPUI slice 8b)
+
+A GPUI build from `next`. The bar's pieces, the Record Options popover, the
+» entries, the Faults popover and the Step and Transport menus are tested
+headless and by the control channel (`transport_jumps…` step 7 and
+`gpui_transport_bar_click_and_command_buttons`). What's left is how it looks
+and feels with the real font and a real keyboard. **Controller** rows Claude
+runs on the Mac with screen control; **owner** rows need the owner's Linux
+desktop or a real interface. Screenshots go to the owner only when the bar
+resembles the approved look.
+
+| Platform | Who | What | Status |
+|---|---|---|---|
+| macOS | controller | The Record button: red when armed to record, its label changes to Stop Recording while recording, and the readouts after it take their colours | open |
+| macOS | controller | The Record cluster's summary pill, the separator, the disabled » entries while recording, and the tooltips | open |
+| macOS | controller | The Record Options popover: anchored under the chevron at its width, layout, steppers, and every field disabled while recording; the caret stays in a field when Record is pressed (and the refused Record leaves the popover open) | open |
+| macOS | controller | Record pressed in the Mixer window while the document window's popover holds a draft records at the current punch, not the draft (Swift does the same) | open |
+| macOS | controller | The five field labels (Position, Edit In, Edit Out, Punch In, Punch Out) fit with the real font, and the measured widths leave no clipped or loose label | open |
+| macOS | controller | The standard bar at 1440 pt with the real Mac font: nothing folds except possibly Pane Toggles; at 1600 pt nothing folds | open |
+| macOS | controller | Punch In and Out fields: type a value, Tab through the five fields in order, U opens » at a folded field | open |
+| macOS | controller | The Click menu: check mark, Level › and Mode › (they open on a click here, not on hover; see the backlog), the bar and » forms agree | open |
+| macOS | controller | DSP Load digits change without moving the row, and the Audio Device text shows the device name and rate | open |
+| macOS | controller | Command button faces (Mixer, Piano Roll, List, Drum Grid, Loop, Record): label only, greyed when the app cannot run the command yet | open |
+| macOS | controller | The Faults ⚠ glyph and tint appear when a problem arrives and clear when dismissed; its popover lists the lines (a failed plug-in, an autosave failure) | open |
+| macOS | controller | The stop-reason line in Faults: unplug an interface mid-recording and read "Recording stopped: the audio device went away; what was recorded is kept." (README 136, at 1218) | open |
+| macOS | controller | Transport menu check marks: Overdub, Punch and Click show a mark when on, and the mark follows the bar | open |
+| macOS | controller | The native Step menu shows its keys (T, 1–6, ., /, =, 0, ⌫) | open |
+| macOS | controller | Step menu: disabled items show no key; no key fires twice (one press, one step) | open |
+| macOS | controller | With step entry off, `.` is Next Marker, `2` goes to locator 2 and Delete deletes the selection (not the Step commands) | open |
+| macOS | controller | ⌥⇧ and a digit clears that locator on a US layout (`alt-@` aliases ⌥⇧2); other layouts have no key (from slice 8a) | open |
+| macOS | controller | README 130–142: record and monitor, loopback calibration, a separate input device, a MIDI keyboard, loop passes, crash recovery, unplug mid-recording, `state record`, input only while needed, synth measure and record to the end, as far as the bar shows them | open |
+| macOS | controller | README 167: the record popover keys (open without the mouse, Esc drops the draft) | open |
+| macOS | controller | README 228: the five fields, typing, Tab order and the refusal texts | open |
+| macOS | controller | README 262: File › Export › MIDI File… with the bar's punch and edit fields in use | open |
+| macOS | controller | README 326–331: Overdub/Replace beside Record, the Record ⌄ popover, MIDI passes as takes, Takes rename and delete, two loop passes | open |
+| Linux | owner | The bar on the owner's desktop at 1440 and 1600 px: the Record button colours, the Faults tint, DSP and device text, no clipped label with the system font | open |
+| Linux | owner | The Record Options popover opens under its chevron, takes the keyboard, closes on a press outside and on Esc | open |
+| Linux | owner | The Step and Transport menus: check marks and keys shown as the platform writes them; Ctrl-digit and plain digit keys do what the Step menu says | open |
+| Linux | owner | Record with a real input device (needs host track H3; until then the offline device) and the stop-reason line in Faults | open |

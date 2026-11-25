@@ -143,7 +143,7 @@ item (false: keys, the Keys settings and the control channel only).
 | transport.play_selection | Transport | Play Selection | ⌥Space | true | S3 | S3 |
 | transport.play_from_selection | Transport | Play from Selection | ⇧Space | true | S3 | S3 |
 | transport.play_from_edit_in | Transport | Play from Edit-In | Y | true | S3 | S3 |
-| transport.record | Transport | Record | R | true | S8a (channel and R; the Record button is 8b) | S8a (channel and R; the Record button is 8b) |
+| transport.record | Transport | Record | R | true | S8a, S8b (R, channel and the Record button; look check open) | S8a, S8b (R, channel and the Record button; look check open) |
 | transport.scrub | Transport | Scrub | K | true | S3 | S3 |
 | transport.return_to_start | Transport | Return to Start | Return | true | S3 | S3 |
 | transport.rewind | Transport | Rewind | ⇧, | true | S3 (keypad key: gap, see below) | S3 (keypad key: gap) |
@@ -151,9 +151,9 @@ item (false: keys, the Keys settings and the control channel only).
 | transport.previous_marker | Transport | Previous Marker | , | true | S3 | S3 |
 | transport.next_marker | Transport | Next Marker | . | true | S3 | S3 |
 | transport.loop | Transport | Loop | L | true | S3 | S3 |
-| transport.overdub | Transport | Overdub | O | true | S8a (the check mark is 8b) | S8a (the check mark is 8b) |
-| transport.punch | Transport | Punch | I | true | S8a (the check mark is 8b) | S8a (the check mark is 8b) |
-| transport.click | Transport | Click |  | true | S8a (the check mark is 8b) | S8a (the check mark is 8b) |
+| transport.overdub | Transport | Overdub | O | true | S8a, S8b (the check mark) | S8a, S8b (the check mark) |
+| transport.punch | Transport | Punch | I | true | S8a, S8b (the check mark) | S8a, S8b (the check mark) |
+| transport.click | Transport | Click |  | true | S8a, S8b (the check mark) | S8a, S8b (the check mark) |
 | transport.set_click_level | Transport | Click Level |  | false | S8a | S8a |
 | transport.set_click_mode | Transport | Click Mode |  | false | S8a | S8a |
 | transport.go_position | Transport | Go to Position Field | P | true | S3 | S3 |
@@ -169,18 +169,18 @@ item (false: keys, the Keys settings and the control channel only).
 
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
-| step.entry | Step | Step Entry | T | true | S8a (key and channel; the Step menu is 8b) | S8a (key and channel; the Step menu is 8b) |
-| step.whole | Step | Whole Note | 1 | true | S8a (key and channel; the Step menu is 8b; keypad twin: gap) | S8a (key and channel; the Step menu is 8b; keypad twin: gap) |
-| step.half | Step | Half Note | 2 | true | S8a (key and channel; the Step menu is 8b; keypad twin: gap) | S8a (key and channel; the Step menu is 8b; keypad twin: gap) |
-| step.quarter | Step | Quarter Note | 3 | true | S8a (key and channel; the Step menu is 8b; keypad twin: gap) | S8a (key and channel; the Step menu is 8b; keypad twin: gap) |
-| step.eighth | Step | Eighth Note | 4 | true | S8a (key and channel; the Step menu is 8b; keypad twin: gap) | S8a (key and channel; the Step menu is 8b; keypad twin: gap) |
-| step.sixteenth | Step | Sixteenth Note | 5 | true | S8a (key and channel; the Step menu is 8b; keypad twin: gap) | S8a (key and channel; the Step menu is 8b; keypad twin: gap) |
-| step.thirty_second | Step | Thirty-Second Note | 6 | true | S8a (key and channel; the Step menu is 8b; keypad twin: gap) | S8a (key and channel; the Step menu is 8b; keypad twin: gap) |
-| step.dot | Step | Dotted | . | true | S8a (key and channel; the Step menu is 8b; keypad twin: gap) | S8a (key and channel; the Step menu is 8b; keypad twin: gap) |
-| step.triplet | Step | Triplet | / | true | S8a (key and channel; the Step menu is 8b; keypad twin: gap) | S8a (key and channel; the Step menu is 8b; keypad twin: gap) |
-| step.tie | Step | Tie | = | true | S8a (key and channel; the Step menu is 8b; keypad twin: gap) | S8a (key and channel; the Step menu is 8b; keypad twin: gap) |
-| step.rest | Step | Rest | 0 | true | S8a (key and channel; the Step menu is 8b; keypad twin: gap) | S8a (key and channel; the Step menu is 8b; keypad twin: gap) |
-| step.delete_last | Step | Delete Last Step | Delete | true | S8a (key and channel; the Step menu is 8b) | S8a (key and channel; the Step menu is 8b) |
+| step.entry | Step | Step Entry | T | true | S8a, S8b (key, channel and the Step menu) | S8a, S8b (key, channel and the Step menu) |
+| step.whole | Step | Whole Note | 1 | true | S8a, S8b (key, channel and the Step menu; keypad twin: gap) | S8a, S8b (key, channel and the Step menu; keypad twin: gap) |
+| step.half | Step | Half Note | 2 | true | S8a, S8b (key, channel and the Step menu; keypad twin: gap) | S8a, S8b (key, channel and the Step menu; keypad twin: gap) |
+| step.quarter | Step | Quarter Note | 3 | true | S8a, S8b (key, channel and the Step menu; keypad twin: gap) | S8a, S8b (key, channel and the Step menu; keypad twin: gap) |
+| step.eighth | Step | Eighth Note | 4 | true | S8a, S8b (key, channel and the Step menu; keypad twin: gap) | S8a, S8b (key, channel and the Step menu; keypad twin: gap) |
+| step.sixteenth | Step | Sixteenth Note | 5 | true | S8a, S8b (key, channel and the Step menu; keypad twin: gap) | S8a, S8b (key, channel and the Step menu; keypad twin: gap) |
+| step.thirty_second | Step | Thirty-Second Note | 6 | true | S8a, S8b (key, channel and the Step menu; keypad twin: gap) | S8a, S8b (key, channel and the Step menu; keypad twin: gap) |
+| step.dot | Step | Dotted | . | true | S8a, S8b (key, channel and the Step menu; keypad twin: gap) | S8a, S8b (key, channel and the Step menu; keypad twin: gap) |
+| step.triplet | Step | Triplet | / | true | S8a, S8b (key, channel and the Step menu; keypad twin: gap) | S8a, S8b (key, channel and the Step menu; keypad twin: gap) |
+| step.tie | Step | Tie | = | true | S8a, S8b (key, channel and the Step menu; keypad twin: gap) | S8a, S8b (key, channel and the Step menu; keypad twin: gap) |
+| step.rest | Step | Rest | 0 | true | S8a, S8b (key, channel and the Step menu; keypad twin: gap) | S8a, S8b (key, channel and the Step menu; keypad twin: gap) |
+| step.delete_last | Step | Delete Last Step | Delete | true | S8a, S8b (key, channel and the Step menu) | S8a, S8b (key, channel and the Step menu) |
 | step.notes | Step | Enter Notes |  | false | S8a | S8a |
 
 ### Automation
