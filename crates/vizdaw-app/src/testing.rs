@@ -94,6 +94,7 @@ struct State {
     /// Errors a call answers with once each, first, by call name.
     next_errors: HashMap<String, VecDeque<VizError>>,
     dests: Vec<DestRow>,
+    dest_reads: usize,
     lanes_reads: usize,
     event_reads: usize,
     auditions: Vec<(String, u8, u64, u16)>,
@@ -489,6 +490,7 @@ impl FakeSession {
             call_errors: HashMap::new(),
             next_errors: HashMap::new(),
             dests: vec![],
+            dest_reads: 0,
             lanes_reads: 0,
             event_reads: 0,
             auditions: vec![],
@@ -827,6 +829,11 @@ impl FakeSession {
     /// The instrument list `destinations` answers with.
     pub fn set_destinations(&self, rows: Vec<DestRow>) {
         self.st().dests = rows;
+    }
+
+    /// `destinations` calls.
+    pub fn destination_reads(&self) -> usize {
+        self.st().dest_reads
     }
 
     /// `lanes` calls.
@@ -2131,6 +2138,7 @@ impl DocSession for FakeSession {
     }
     fn destinations(&self) -> Result<Vec<DestRow>, VizError> {
         let mut s = self.st();
+        s.dest_reads += 1;
         Self::scripted(&mut s, "destinations")?;
         Ok(s.dests.clone())
     }

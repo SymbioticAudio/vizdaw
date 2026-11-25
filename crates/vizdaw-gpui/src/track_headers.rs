@@ -1,31 +1,47 @@
 //! The track header column beside the arrangement: one row per track of
-//! the shown sequence (kind icon, name, M, S, R) and the "+ Add Track" row
-//! under the last, below a band as tall as the arrangement's ruler. The
-//! rows scroll with the canvas (one shared vertical offset). The column
-//! records as a `group` "Track Headers"; each row is one `button` whose
-//! label names its kind, name and routing (the M/S/R toggles are not
-//! separate elements, as in the Swift app), and "Add Track" is the last
-//! child.
+//! the shown sequence (kind icon, name, the monitor button, M, S, R; the
+//! input row under them; the input meter with its clip mark along the
+//! bottom) and the "+ Add Track" row under the last, below a band as tall
+//! as the arrangement's ruler (Swift `LaneHeaderView`,
+//! `LaneHeaderLayout`). The rows scroll with the canvas (one shared
+//! vertical offset). The column records as a `group` "Track Headers";
+//! each row is one `button` whose label names its kind, name, routing,
+//! input and monitoring (the M/S/R toggles are not separate elements, as
+//! in the Swift app), and "Add Track" is the last child. A row's own
+//! children are its monitor `button` (labelled with its help, which is
+//! also its tooltip and its value), its input `menu` ("Input of <track>",
+//! the text it shows as its value) and, while it shows, its input meter
+//! (`level` "Input level of <track>").
 //!
-//! A click on a row's icon or name (or its empty space) selects the track
-//! (Shift or the secondary modifier adds or removes it); M, S and R set
-//! the flags and leave the selection. A control-channel click on a row
+//! A click on a row's icon, name, input row (which also opens the input
+//! picker) or empty space selects the track (Shift or the secondary
+//! modifier adds or removes it); the monitor button, M, S and R set their
+//! state and leave the selection. A control-channel click on a row
 //! toggles mute. A double-click on the name opens the rename field, which
 //! the document window owns (see [`DocumentWindow::begin_rename`]).
 
 use gpui::prelude::FluentBuilder;
+use std::rc::Rc;
+
 use gpui::{
     AnyElement, ClickEvent, Context, Entity, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, Subscription, Window, anchored, deferred, div, point, px,
     rgb, rgba,
 };
+use vizdaw_app::DocumentModel;
+use vizdaw_app::lane_inputs::{InputChoice, LaneInputs};
+use vizdaw_app::mixer::MixerMath;
+use vizdaw_ffi::edit::MonitorModeRow;
 use vizdaw_ffi::snapshot::LaneRow;
 use vizdaw_ffi::tracks::TrackKindRow;
 
 use crate::control;
+use crate::input_picker::{self, PickerRow};
 use crate::menus::RunCommand;
 use crate::registry::RegistryScope;
+use crate::sheet_host::with_help;
 use crate::shell::DocumentWindow;
+use crate::strip_palette::tokens;
 use crate::text_input::TextInput;
 use crate::transport_bar::colors;
 use vizdaw_app::arrangement::RULER_HEIGHT;
@@ -62,6 +78,8 @@ pub const ADD_TRACK_ITEMS: [(&str, &str); 3] = [
 pub struct TrackHeaders {
     pub(crate) rename: Option<Rename>,
     pub(crate) add_menu_open: bool,
+    /// The track whose input picker is open.
+    pub(crate) input_picker: Option<u64>,
 }
 
 /// An open rename field.
@@ -80,6 +98,103 @@ impl TrackHeaders {
     /// True while the Add Track menu is open.
     pub fn add_menu_open(&self) -> bool {
         self.add_menu_open
+    }
+
+    /// The track whose input picker is open.
+    pub fn input_picker(&self) -> Option<u64> {
+        self.input_picker
+    }
+
+    /// The open picker's rows for `d`'s track (`None`: none open, or its
+    /// track is gone).
+    pub(crate) fn picker_rows(&self, d: &DocumentModel) -> Option<(u64, Vec<PickerRow>)> {
+        let id = self.input_picker?;
+        let lane = d.lanes().iter().find(|l| l.id == id)?;
+        Some((
+            id,
+            input_picker::rows(d.inputs().groups(lane), lane.input.as_ref()),
+        ))
+    }
+}
+
+/// Whether a row this tall has room for the input meter under its
+/// controls (Swift `LaneHeaderLayout.showsMeter(laneHeight:)`).
+pub fn shows_meter(lane_height: f32) -> bool {
+    lane_height >= 46.
+}
+
+/// What a header shows of its track's input, read before drawing (held
+/// data only: no session call).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeaderInput {
+    /// The input row's text after its arrow: "[⇠ <synth> · ]<input>".
+    pub text: String,
+    /// The synth whose return the track records.
+    pub return_name: Option<String>,
+    /// The input meter, while the track shows one.
+    pub meter: Option<HeaderMeter>,
+    /// The input is opening while this track meters.
+    pub opening: bool,
+}
+
+/// A header's input meter as the poll left it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HeaderMeter {
+    /// 0…2, falling back slowly.
+    pub level: f32,
+    /// The clip mark is lit.
+    pub clipped: bool,
+    /// The input is still opening (the track is the mid colour, dimmed).
+    pub opening: bool,
+}
+
+impl HeaderInput {
+    /// Track `lane`'s input as `d` holds it.
+    pub fn of(d: &DocumentModel, lane: &LaneRow) -> Self {
+        let inputs = d.inputs();
+        let badge = d.input_badge(lane);
+        let title = LaneInputs::title_of(lane);
+        let text = match &badge {
+            Some(b) => format!("{b} \u{b7} {title}"),
+            None => title,
+        };
+        let metered = inputs.shows_meter(lane);
+        HeaderInput {
+            text,
+            return_name: d.input_return_name(lane),
+            meter: metered.then(|| HeaderMeter {
+                level: inputs.level(lane.id),
+                clipped: inputs.is_clipped(lane.id),
+                opening: inputs.opening(),
+            }),
+            opening: metered && inputs.opening(),
+        }
+    }
+
+    /// Every shown track's, in order.
+    pub fn all(d: &DocumentModel) -> Vec<HeaderInput> {
+        d.lanes().iter().map(|l| HeaderInput::of(d, l)).collect()
+    }
+
+    /// No input known (a track drawn before its input was read).
+    fn none(lane: &LaneRow) -> Self {
+        HeaderInput {
+            text: LaneInputs::title_of(lane),
+            return_name: None,
+            meter: None,
+            opening: false,
+        }
+    }
+}
+
+/// The input meter's value in the tree: its level, and ", clipped" while
+/// the clip mark is lit.
+pub fn meter_value(m: &HeaderMeter) -> String {
+    let level = format!("{:.2}", MixerMath::sanitized_peak(m.level));
+    if m.clipped {
+        format!("{level}, clipped")
+    } else {
+        level
     }
 }
 
@@ -103,9 +218,9 @@ pub fn name_text(lane: &LaneRow) -> String {
     lane.name.clone()
 }
 
-/// The header's words after its kind (Swift `ArrangementA11y.header`; the
-/// input and monitor words come with the input slice).
-pub fn header(lane: &LaneRow) -> String {
+/// The header's words after its kind (Swift `ArrangementA11y.header`).
+/// `return_of`: the synth whose return the track records (its badge).
+pub fn header(lane: &LaneRow, return_of: Option<&str>) -> String {
     // An audio track plays to an output path, not a MIDI destination.
     let routing = if lane.kind == TrackKindRow::Audio {
         format!(
@@ -127,12 +242,35 @@ pub fn header(lane: &LaneRow) -> String {
     if lane.arm {
         parts.push("armed".into());
     }
+    if lane.input.is_some() {
+        parts.push(format!("input {}", LaneInputs::title_of(lane)));
+    }
+    if let Some(r) = return_of {
+        parts.push(format!("recording the return of {r}"));
+    }
+    match lane.monitor {
+        MonitorModeRow::Auto => {}
+        MonitorModeRow::Input => parts.push("monitoring input".into()),
+        MonitorModeRow::Off => parts.push("monitoring off".into()),
+    }
     parts.join(", ")
 }
 
-/// A row's registry label: "<Kind> track, <header>".
-pub fn row_label(lane: &LaneRow) -> String {
-    format!("{}, {}", kind_name(lane.kind), header(lane))
+/// A row's registry label (Swift `LaneHeaderView.accessibilityChildren`):
+/// "<Kind> track, <header>", then ", input opening" while the input opens
+/// and the track meters.
+pub fn row_label(lane: &LaneRow, input: &HeaderInput) -> String {
+    let opening = if input.opening { ", input opening" } else { "" };
+    format!(
+        "{}, {}{opening}",
+        kind_name(lane.kind),
+        header(lane, input.return_name.as_deref())
+    )
+}
+
+/// The input row's text (Swift: "▾ [⇠ badge · ]<input>").
+pub fn input_text(input: &HeaderInput) -> String {
+    format!("\u{25BE} {}", input.text)
 }
 
 fn kind_glyph(kind: TrackKindRow) -> &'static str {
@@ -147,8 +285,49 @@ fn kind_glyph(kind: TrackKindRow) -> &'static str {
 pub struct HeadersState<'a> {
     pub lanes: &'a [LaneRow],
     pub selected: &'a [u64],
+    /// Each track's input, in `lanes`' order.
+    pub inputs: &'a [HeaderInput],
+    /// The open input picker: its track and rows.
+    pub picker: Option<(u64, Vec<PickerRow>)>,
     /// The rows' scroll, shared with the arrangement canvas.
     pub vertical_offset: f32,
+}
+
+/// A row's controls (Swift `LaneHeaderLayout.controls`): x, y from the
+/// row's top, width, height.
+mod place {
+    pub const KIND: (f32, f32, f32, f32) = (8., 5., 16., 16.);
+    pub const NAME: (f32, f32, f32, f32) = (28., 4., 81., 18.);
+    pub const MONITOR: (f32, f32, f32, f32) = (113., 4., 18., 18.);
+    pub const MUTE: (f32, f32, f32, f32) = (134., 4., 18., 18.);
+    pub const SOLO: (f32, f32, f32, f32) = (155., 4., 18., 18.);
+    pub const ARM: (f32, f32, f32, f32) = (176., 4., 18., 18.);
+    pub const INPUT: (f32, f32, f32, f32) = (104., 24., 90., 17.);
+
+    /// The input meter (3 high at 48 points and up, else 2 high a point
+    /// higher, clear of the separator).
+    pub fn meter(lane_height: f32) -> (f32, f32, f32, f32) {
+        if lane_height >= 48. {
+            (8., 43., 178., 3.)
+        } else {
+            (8., 42., 178., 2.)
+        }
+    }
+
+    /// The clip mark at the meter's end.
+    pub fn clip(lane_height: f32) -> (f32, f32, f32, f32) {
+        let (_, y, _, h) = meter(lane_height);
+        (189., y, 5., h)
+    }
+}
+
+fn at(r: (f32, f32, f32, f32)) -> gpui::Div {
+    div()
+        .absolute()
+        .left(px(r.0))
+        .top(px(r.1))
+        .w(px(r.2))
+        .h(px(r.3))
 }
 
 impl TrackHeaders {
@@ -173,9 +352,19 @@ impl TrackHeaders {
             .w_full()
             .flex()
             .flex_col();
-        for lane in state.lanes {
+        for (i, lane) in state.lanes.iter().enumerate() {
             let selected = state.selected.contains(&lane.id);
-            rows = rows.child(self.row(lane, selected, scope, cx));
+            let input = state
+                .inputs
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| HeaderInput::none(lane));
+            let picker = state
+                .picker
+                .as_ref()
+                .filter(|(id, _)| *id == lane.id)
+                .map(|(_, rows)| rows.clone());
+            rows = rows.child(self.row(lane, &input, picker, selected, scope, window, cx));
         }
         rows = rows.child(self.add_row(scope, window, cx));
         let column = div()
@@ -215,34 +404,43 @@ impl TrackHeaders {
             .into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn row(
         &self,
         lane: &LaneRow,
+        input: &HeaderInput,
+        picker: Option<Vec<PickerRow>>,
         selected: bool,
         scope: &mut RegistryScope,
+        window: &Window,
         cx: &mut Context<DocumentWindow>,
     ) -> AnyElement {
         let id = lane.id;
+        // The row is a container: its monitor button, input row and meter
+        // are its children in the tree.
+        let mut rs = scope.container();
         let renaming = self
             .rename
             .as_ref()
             .filter(|r| r.lane == id)
             .map(|r| r.field.clone());
+        let (nx, _, nw, _) = place::NAME;
         let name = match renaming {
-            Some(field) => div()
+            // The field, a little larger than the name (Swift
+            // `insetBy(dx: -2, dy: -2)`).
+            Some(field) => at((nx - 2., 2., nw + 4., 22.))
                 .id(("track-name", id))
-                .flex_1()
-                .min_w_0()
-                .h(px(ROW_HEIGHT - 8.))
                 .overflow_hidden()
                 .text_color(rgb(0x000000))
                 .child(field),
-            None => div()
+            None => at(place::NAME)
                 .id(("track-name", id))
-                .flex_1()
-                .min_w_0()
+                .flex()
+                .items_center()
                 .overflow_hidden()
                 .whitespace_nowrap()
+                .text_ellipsis()
+                .text_sm()
                 .child(name_text(lane))
                 .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
                     let m = e.modifiers();
@@ -253,12 +451,107 @@ impl TrackHeaders {
                     }
                 })),
         };
-        let toggles = div()
+        let help = LaneInputs::monitor_help(lane.monitor);
+        let monitor = with_help(
+            at(place::MONITOR)
+                .id(("monitor", id))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_sm()
+                .text_xs()
+                .cursor_pointer()
+                .bg(if lane.monitor == MonitorModeRow::Off {
+                    rgb(colors::BUTTON)
+                } else {
+                    tokens().monitor(lane.monitor)
+                })
+                .text_color(rgb(colors::TEXT))
+                .child(LaneInputs::monitor_label(lane.monitor))
+                .child(rs.control_with("button", help, true, Some(help), false))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    // The monitor button never changes the selection.
+                    cx.stop_propagation();
+                    this.cycle_monitor(id, cx);
+                })),
+            help,
+        );
+        let input_label = format!("Input of {}", lane.name);
+        let mut input_row = at(place::INPUT)
+            .id(("track-input", id))
             .flex()
-            .flex_row()
-            .gap(px(2.))
+            .items_center()
+            .cursor_pointer()
+            .text_xs()
+            .text_color(rgb(colors::DIM))
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis_middle()
+                    .child(input_text(input)),
+            )
+            .child(rs.control_with("menu", &input_label, true, Some(&input.text), false))
+            .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
+                // Swift: the press selects the track too, then the menu
+                // opens.
+                cx.stop_propagation();
+                if !control::is_channel_click() {
+                    let m = e.modifiers();
+                    let extend = m.shift || m.secondary(cx);
+                    this.select_track(id, extend, cx);
+                }
+                this.toggle_input_picker(id, cx);
+            }));
+        if let Some(rows) = picker {
+            let weak = cx.entity().downgrade();
+            let closing = weak.clone();
+            let close: input_picker::Close = Rc::new(move |_, cx| {
+                closing
+                    .update(cx, |this, cx| {
+                        this.track_headers_mut().input_picker = None;
+                        cx.notify();
+                    })
+                    .ok();
+            });
+            let choose: input_picker::Choose = Rc::new(move |c: &InputChoice, _, cx| {
+                let c = c.clone();
+                weak.update(cx, |this, cx| this.choose_input(id, &c, cx))
+                    .ok();
+            });
+            input_row = input_row.children(input_picker::popup(
+                "input-picker",
+                rows,
+                &mut rs,
+                window,
+                close,
+                choose,
+            ));
+        }
+        let mut row = div()
+            .id(("track-row", id))
+            .relative()
+            .w_full()
+            .h(px(ROW_HEIGHT))
+            .flex_none()
+            .border_b_1()
+            .border_color(rgb(SEPARATOR))
+            .when(selected, |d| d.bg(rgba(SELECTED)))
+            .child(rs.this("button", &row_label(lane, input), true))
+            .child(
+                at(place::KIND)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(rgb(colors::DIM))
+                    .child(kind_glyph(lane.kind)),
+            )
+            .child(name)
+            .child(monitor)
             .child(toggle(
                 ("mute", id),
+                place::MUTE,
                 "M",
                 lane.mute,
                 MUTE_ON,
@@ -270,6 +563,7 @@ impl TrackHeaders {
             ))
             .child(toggle(
                 ("solo", id),
+                place::SOLO,
                 "S",
                 lane.solo,
                 SOLO_ON,
@@ -281,6 +575,7 @@ impl TrackHeaders {
             ))
             .child(toggle(
                 ("arm", id),
+                place::ARM,
                 "R",
                 lane.arm,
                 ARM_ON,
@@ -289,43 +584,23 @@ impl TrackHeaders {
                     let arm = this.lane(id, cx).map(|l| !l.arm);
                     this.set_flags(id, None, None, arm, cx);
                 },
-            ));
-        div()
-            .id(("track-row", id))
-            .relative()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(4.))
-            .w_full()
-            .h(px(ROW_HEIGHT))
-            .flex_none()
-            .px(px(6.))
-            .border_b_1()
-            .border_color(rgb(SEPARATOR))
-            .when(selected, |d| d.bg(rgba(SELECTED)))
-            .child(
-                div()
-                    .w(px(16.))
-                    .flex_none()
-                    .text_color(rgb(colors::DIM))
-                    .child(kind_glyph(lane.kind)),
-            )
-            .child(name)
-            .child(toggles)
-            .child(scope.control("button", &row_label(lane), true))
-            .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
-                if control::is_channel_click() {
-                    // Swift parity: the row's press toggles mute.
-                    let mute = this.lane(id, cx).map(|l| !l.mute);
-                    this.set_flags(id, mute, None, None, cx);
-                    return;
-                }
-                let m = e.modifiers();
-                let extend = m.shift || m.secondary(cx);
-                this.select_track(id, extend, cx);
-            }))
-            .into_any_element()
+            ))
+            .child(input_row);
+        if let Some(m) = input.meter.filter(|_| shows_meter(ROW_HEIGHT)) {
+            row = row.children(meter(lane, &m, ROW_HEIGHT, &mut rs));
+        }
+        row.on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
+            if control::is_channel_click() {
+                // Swift parity: the row's press toggles mute.
+                let mute = this.lane(id, cx).map(|l| !l.mute);
+                this.set_flags(id, mute, None, None, cx);
+                return;
+            }
+            let m = e.modifiers();
+            let extend = m.shift || m.secondary(cx);
+            this.select_track(id, extend, cx);
+        }))
+        .into_any_element()
     }
 
     fn add_row(
@@ -394,18 +669,18 @@ impl TrackHeaders {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn toggle(
     id: (&'static str, u64),
+    r: (f32, f32, f32, f32),
     text: &'static str,
     on: bool,
     on_color: u32,
     cx: &mut Context<DocumentWindow>,
     action: impl Fn(&mut DocumentWindow, &mut Context<DocumentWindow>) + 'static,
 ) -> impl IntoElement {
-    div()
+    at(r)
         .id(id)
-        .w(px(20.))
-        .h(px(18.))
         .flex()
         .items_center()
         .justify_center()
@@ -420,6 +695,49 @@ fn toggle(
             cx.stop_propagation();
             action(this, cx);
         }))
+}
+
+/// The thin input meter and its clip mark (Swift `LaneHeaderView.meter`):
+/// the meter background (the mid colour, dimmed, while the input opens),
+/// the level in the low colour, and the clip mark lit in the clip colour.
+fn meter(
+    lane: &LaneRow,
+    m: &HeaderMeter,
+    lane_height: f32,
+    scope: &mut RegistryScope,
+) -> [AnyElement; 2] {
+    let t = tokens();
+    let track = if m.opening {
+        let mut c = rgb(t.meter_mid);
+        c.a = 0.5;
+        c
+    } else {
+        rgb(t.meter_background)
+    };
+    let fill = MixerMath::meter_fill(m.level) as f32;
+    let r = place::meter(lane_height);
+    let label = format!("Input level of {}", lane.name);
+    let bar = at(r)
+        .bg(track)
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .top_0()
+                .h_full()
+                .w(px(r.2 * fill))
+                .bg(rgb(t.meter_low)),
+        )
+        .child(scope.control_with("level", &label, true, Some(&meter_value(m)), false))
+        .into_any_element();
+    let clip = at(place::clip(lane_height))
+        .bg(rgb(if m.clipped {
+            t.meter_clip
+        } else {
+            t.meter_background
+        }))
+        .into_any_element();
+    [bar, clip]
 }
 
 fn add_menu(scope: &mut RegistryScope, cx: &mut Context<DocumentWindow>) -> AnyElement {
@@ -455,4 +773,33 @@ fn add_menu(scope: &mut RegistryScope, cx: &mut Context<DocumentWindow>) -> AnyE
         );
     }
     list.into_any_element()
+}
+
+impl DocumentWindow {
+    /// The monitor button: the track's next mode (one undo step).
+    pub(crate) fn cycle_monitor(&mut self, lane: u64, cx: &mut Context<Self>) {
+        let Some(l) = self.lane(lane, cx) else { return };
+        self.with_model(cx, |d| d.cycle_lane_monitor(&l));
+    }
+
+    /// Opens track `lane`'s input picker (reading the sources again, off
+    /// the UI thread), or closes it when it is open.
+    pub(crate) fn toggle_input_picker(&mut self, lane: u64, cx: &mut Context<Self>) {
+        let headers = self.track_headers_mut();
+        if headers.input_picker == Some(lane) {
+            headers.input_picker = None;
+        } else {
+            headers.input_picker = Some(lane);
+            headers.add_menu_open = false;
+            self.refresh_inputs(cx);
+        }
+        cx.notify();
+    }
+
+    /// A picker's choice for track `lane` (nothing when it is the input
+    /// now; a refusal is the status line).
+    pub(crate) fn choose_input(&mut self, lane: u64, choice: &InputChoice, cx: &mut Context<Self>) {
+        let Some(l) = self.lane(lane, cx) else { return };
+        self.with_model(cx, |d| d.choose_input(choice, &l));
+    }
 }

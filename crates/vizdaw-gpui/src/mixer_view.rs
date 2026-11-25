@@ -58,6 +58,7 @@ use gpui::{
 };
 use vizdaw_app::DocumentModel;
 use vizdaw_app::builtin_synth_window::builtin_synth_destination;
+use vizdaw_app::lane_inputs::{InputChoice, LaneInputs};
 use vizdaw_app::mixer::layout::{
     RowHeights, StripGrid, StripLayout, StripRowKind, midi_rows, rows_of, vca_rows,
 };
@@ -77,6 +78,7 @@ use crate::controls::{
     self, ControlBinding, Entry, Grip, KnobSize, MixerRef, NumberBinding, NumberBox, Toggle, fader,
 };
 use crate::frame_stats;
+use crate::input_picker;
 use crate::plugin_windows::{self, Subject};
 use crate::registry::RegistryScope;
 use crate::strip_palette::{KnobFunction, tokens};
@@ -154,6 +156,8 @@ pub enum StripMenu {
     Vca,
     /// A VCA's automation mode menu (its ID with it).
     VcaMode,
+    /// The input picker of an audio path's input track.
+    Input,
 }
 
 impl StripMenu {
@@ -631,6 +635,15 @@ impl MixerView {
         cx.notify();
     }
 
+    /// Escape: closes an open input picker. True when one was open.
+    pub(crate) fn close_input_picker(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.menu.is_some_and(|(_, m)| m == StripMenu::Input) {
+            self.close_menu(cx);
+            return true;
+        }
+        false
+    }
+
     fn open_submenu(&mut self, row: usize, cx: &mut Context<Self>) {
         if self.submenu != Some(row) {
             self.submenu = Some(row);
@@ -794,6 +807,8 @@ struct StripParts {
     solo: Option<Toggle>,
     arm: Toggle,
     monitor: Toggle,
+    /// The input row: the input track's picker and monitor button.
+    input: Option<InputParts>,
     /// The output menu's face and its choices (title, bus).
     output: Option<(String, Vec<OutputChoice>)>,
     mode: AutomationModeRow,
@@ -802,6 +817,19 @@ struct StripParts {
     group: Option<GroupTag>,
     /// The VCA offset row, while the mixer has a VCA.
     offset: Option<OffsetParts>,
+}
+
+/// A strip's input row (Swift `StripInputView`): the input track's picker
+/// and its monitor button.
+struct InputParts {
+    lane: LaneRow,
+    /// The picker's face (Swift `pickerTitle`).
+    title: String,
+    /// "Input of <track>[, recording ⇠ <synth>]".
+    help: String,
+    /// The monitor button, `<track>: <help>`.
+    monitor: Toggle,
+    monitor_help: &'static str,
 }
 
 /// A grouped strip's tag (Swift `StripGroupTag`).
@@ -1156,12 +1184,46 @@ fn audio_parts(
             enabled: armable,
             touched: false,
         },
+        input: lane.map(|l| input_parts(d, l)),
         output,
         mode: s.automation,
         meter: m.meters().level_at(s.id, now),
         group,
         offset,
     })
+}
+
+/// The strip input picker's help (Swift `StripInputView`): "Input of
+/// <track>", then ", recording ⇠ <synth>" for a synth's return.
+pub fn input_help(d: &DocumentModel, lane: &LaneRow) -> String {
+    match d.input_badge(lane) {
+        Some(b) => format!("Input of {}, recording {b}", lane.name),
+        None => format!("Input of {}", lane.name),
+    }
+}
+
+/// The input row of a strip whose input track is `lane` (Swift
+/// `StripInputView`).
+fn input_parts(d: &DocumentModel, lane: &LaneRow) -> InputParts {
+    let help = LaneInputs::monitor_help(lane.monitor);
+    InputParts {
+        lane: lane.clone(),
+        title: d.input_picker_title(lane),
+        help: input_help(d, lane),
+        monitor: Toggle {
+            letter: LaneInputs::monitor_label(lane.monitor),
+            on: lane.monitor != MonitorModeRow::Off,
+            colour: if lane.monitor == MonitorModeRow::Input {
+                tokens().state_warning
+            } else {
+                tokens().state_play
+            },
+            label: format!("{}: {help}", lane.name),
+            enabled: true,
+            touched: false,
+        },
+        monitor_help: help,
+    }
 }
 
 /// VCA `vca` (column `index`), as it shows (Swift `VcaStripCells`).
@@ -1783,6 +1845,10 @@ fn strip(
             InstrumentPart::BuiltinSynth => builtin_synth_slot(view, scope, cx),
         };
         out = out.child(at(side, y, inner, RowHeights::SLOT).child(el));
+    }
+    if let (Some(part), (Some(y), Some(h))) = (&s.input, row(StripRowKind::Input)) {
+        let el = input_row(view, s.id, part, scope, window, cx);
+        out = out.child(at(side, y, inner, h.min(controls::menu_face::HEIGHT)).child(el));
     }
     if let (Some(y), Some(_)) = row(StripRowKind::Eq) {
         let el = eq_slot(view, &s, scope, window, cx);
@@ -2642,6 +2708,116 @@ fn sends_row(
             .children(plus),
     )
     .into_any_element()
+}
+
+/// A strip's input row (Swift `StripInputView`): the picker, its face
+/// the input (led by the track's name when the path is shared), then the
+/// monitor button. The picker reads the sources again as it opens.
+fn input_row(
+    view: &Entity<MixerView>,
+    strip: u64,
+    part: &InputParts,
+    scope: &mut RegistryScope,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let mixer = view.read(cx).mixer.clone();
+    let lane = part.lane.id;
+    let open = view.read(cx).menu == Some((strip, StripMenu::Input));
+    let label = format!("Input of {}", part.lane.name);
+    let w = view.downgrade();
+    let refresh = mixer.clone();
+    let face = controls::menu_face(&label, &part.title, None, true, scope, move |_, cx| {
+        let opening = w
+            .update(cx, |v, cx| {
+                v.toggle_menu(strip, StripMenu::Input, cx);
+                v.menu.is_some()
+            })
+            .unwrap_or(false);
+        if opening {
+            let doc = refresh.doc;
+            refresh.app.update(cx, |s, cx| {
+                s.store.refresh_inputs(doc);
+                cx.notify();
+            });
+        }
+    });
+    let mut picker = crate::sheet_host::with_help(
+        div()
+            .id(("strip-input", strip))
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .child(face),
+        part.help.clone(),
+    );
+    if open {
+        let rows = mixer
+            .read(cx, |_, d| {
+                d.lanes()
+                    .iter()
+                    .find(|l| l.id == lane)
+                    .map(|l| input_picker::rows(d.inputs().groups(l), l.input.as_ref()))
+            })
+            .flatten()
+            .unwrap_or_default();
+        let closing = view.downgrade();
+        let close: input_picker::Close = Rc::new(move |_, cx| {
+            closing.update(cx, |v, cx| v.close_menu(cx)).ok();
+        });
+        let chooser = mixer.clone();
+        let choose: input_picker::Choose = Rc::new(move |c: &InputChoice, _, cx| {
+            let c = c.clone();
+            let doc = chooser.doc;
+            chooser.app.update(cx, |s, cx| {
+                s.store.with_document(doc, |d, _| {
+                    if let Some(l) = d.lanes().iter().find(|l| l.id == lane).cloned() {
+                        d.choose_input(&c, &l);
+                    }
+                });
+                cx.notify();
+            });
+        });
+        picker = picker.children(input_picker::popup(
+            "strip-input-picker",
+            rows,
+            scope,
+            window,
+            close,
+            choose,
+        ));
+    }
+    let cycler = mixer.clone();
+    let monitor = crate::sheet_host::with_help(
+        div()
+            .id(("strip-input-monitor", strip))
+            .flex_none()
+            .child(controls::toggle(
+                part.monitor.clone(),
+                scope,
+                move |_, cx| {
+                    let doc = cycler.doc;
+                    cycler.app.update(cx, |s, cx| {
+                        s.store.with_document(doc, |d, _| {
+                            if let Some(l) = d.lanes().iter().find(|l| l.id == lane).cloned() {
+                                d.cycle_lane_monitor(&l);
+                            }
+                        });
+                        cx.notify();
+                    });
+                },
+            )),
+        part.monitor_help,
+    );
+    div()
+        .size_full()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.))
+        .child(picker)
+        .child(monitor)
+        .into_any_element()
 }
 
 /// What a menu item does when picked (the menu has closed).

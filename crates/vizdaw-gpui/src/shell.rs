@@ -61,7 +61,7 @@ use crate::piano_roll::{PianoRoll, RollState};
 use crate::record_popover::{PopoverState, RecordPopover};
 use crate::registry::{RegistryScope, SharedRegistry};
 use crate::text_input::{TextInput, TextInputEvent};
-use crate::track_headers::{HeadersState, Rename, TrackHeaders};
+use crate::track_headers::{HeaderInput, HeadersState, Rename, TrackHeaders};
 use crate::transport_bar::{self, BarState, FaultsState, Plan, RecordBar, colors};
 use crate::transport_fields::TransportFields;
 
@@ -999,6 +999,35 @@ impl DocumentWindow {
         self.with_model(cx, |d| d.set_status(Some(text.to_owned())));
     }
 
+    /// Escape: closes a mixer strip's open input picker in this window.
+    fn close_strip_input_pickers(&mut self, cx: &mut Context<Self>) -> bool {
+        let views: Vec<_> = [
+            &self.mix_view,
+            &self.pane_mixer,
+            &self.window_mixer,
+            &self.strip_mixer,
+        ]
+        .into_iter()
+        .flatten()
+        .map(|p| p.view.clone())
+        .collect();
+        let mut closed = false;
+        for v in views {
+            closed |= v.update(cx, |v, cx| v.close_input_picker(cx));
+        }
+        closed
+    }
+
+    /// An input picker opens: the document reads its input again (the
+    /// sources off the UI thread).
+    pub(crate) fn refresh_inputs(&mut self, cx: &mut Context<Self>) {
+        let doc = self.doc;
+        self.app.update(cx, |s, cx| {
+            s.store.refresh_inputs(doc);
+            cx.notify();
+        });
+    }
+
     /// A status text newly drawn clears itself `STATUS_TIMEOUT` later
     /// unless another has replaced it (Swift `StatusLine`: the timer is
     /// keyed on the text, so a new message starts it again).
@@ -1179,6 +1208,7 @@ impl DocumentWindow {
         }
         self.arrangement.close_menus();
         self.track_headers.add_menu_open = false;
+        self.track_headers.input_picker = None;
         if self.arrangement.focus_handle().is_focused(window) {
             window.focus(&self.focus, cx);
         }
@@ -1257,7 +1287,9 @@ impl DocumentWindow {
             cx.stop_propagation();
             return;
         }
-        let headers = std::mem::take(&mut self.track_headers.add_menu_open);
+        let headers = std::mem::take(&mut self.track_headers.add_menu_open)
+            | self.track_headers.input_picker.take().is_some()
+            | self.close_strip_input_pickers(cx);
         let more = std::mem::take(&mut self.more_open);
         self.more_click = None;
         let click_menu = self.click_menu.take().is_some();
@@ -1524,6 +1556,8 @@ impl DocumentWindow {
 struct RegionParts<'a> {
     tools: ToolbarState,
     lanes: &'a [LaneRow],
+    inputs: &'a [HeaderInput],
+    picker: Option<(u64, Vec<crate::input_picker::PickerRow>)>,
     selected: &'a [u64],
     arranged: ArrangementState,
     pane: &'a DetailPaneState,
@@ -1602,6 +1636,8 @@ impl DocumentWindow {
                             &HeadersState {
                                 lanes: parts.lanes,
                                 selected: parts.selected,
+                                inputs: parts.inputs,
+                                picker: parts.picker,
                                 vertical_offset: self.arrangement.vertical_offset(),
                             },
                             &mut root.container(),
@@ -1962,6 +1998,8 @@ impl Render for DocumentWindow {
             model,
             front,
             lanes,
+            header_inputs,
+            picker,
             selected,
             status,
             layout,
@@ -1983,6 +2021,8 @@ impl Render for DocumentWindow {
                 menus::menu_model(s.store.document(doc), &s.keymap),
                 s.store.front().is_none_or(|f| f == doc),
                 d.map(|d| d.lanes().to_vec()).unwrap_or_default(),
+                d.map(HeaderInput::all).unwrap_or_default(),
+                d.and_then(|d| self.track_headers.picker_rows(d)),
                 d.map(DocumentModel::selected_lanes).unwrap_or_default(),
                 d.and_then(|d| d.status().map(String::from)),
                 s.transport_layout(),
@@ -2018,6 +2058,10 @@ impl Render for DocumentWindow {
             }
         }
         let roll_mounted = rolled.is_some();
+        // The picker's track went: so does the picker.
+        if picker.is_none() {
+            self.track_headers.input_picker = None;
+        }
         // A retry waits: poll at once, and often.
         let fast = self
             .read_model(cx, DocumentModel::wants_fast_poll)
@@ -2120,6 +2164,8 @@ impl Render for DocumentWindow {
             RegionParts {
                 tools,
                 lanes: &lanes,
+                inputs: &header_inputs,
+                picker,
                 selected: &selected,
                 arranged,
                 pane: &pane,

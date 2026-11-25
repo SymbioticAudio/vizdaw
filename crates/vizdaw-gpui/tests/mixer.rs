@@ -1505,3 +1505,167 @@ fn a_mode_command_on_a_busy_core_says_so_in_the_status_line(cx: &mut TestAppCont
     assert_eq!(status.as_deref(), Some("editor opening"));
     assert!(!alert, "Swift's .busy: the status line, no alert");
 }
+
+// ---- Slice 8c: the strip's input row (Swift `StripInputView`) ----
+
+const AUTO_HELP: &str =
+    "Input monitoring: Auto (heard while armed and stopped, or recording in range)";
+
+impl Setup {
+    /// The fake's lanes changed: a new snapshot version fetches them.
+    fn relanes(&mut self) {
+        let mut n = self.fake.snap();
+        n.version += 1;
+        self.update_model(|d| d.apply(n));
+    }
+
+    fn menuitem_titles(&mut self) -> Vec<(String, bool)> {
+        self.elements()
+            .into_iter()
+            .filter(|e| e.role == "menuitem")
+            .map(|e| (e.label, e.selected))
+            .collect()
+    }
+}
+
+/// The strip's input row: the picker shows the input (led by the track's
+/// name when another track plays through the same path), named "Input of
+/// <track>", and the monitor button beside it is `<track>: <help>`, a
+/// lane edit to the next mode. The strip's I toggle keeps its own label
+/// (Swift `StripButtons`).
+#[gpui::test]
+fn the_strip_input_row_has_its_picker_and_monitor(cx: &mut TestAppContext) {
+    use vizdaw_ffi::edit::LaneInputRow;
+    let mut s = setup(cx, fake());
+    assert_eq!(
+        s.value("menu", "Input of Groove").as_deref(),
+        Some("No Input")
+    );
+    assert_eq!(
+        s.value("menu", "Input of Chords").as_deref(),
+        Some("No Input")
+    );
+    assert!(s.find("menu", "Input of Synth").is_none(), "no input track");
+    let groove = format!("Groove: {AUTO_HELP}");
+    assert_eq!(s.value("button", &groove).as_deref(), Some("on"));
+    assert_eq!(
+        s.value("button", "Chords: Input monitoring: off")
+            .as_deref(),
+        Some("off")
+    );
+    assert!(s.find("button", "Input monitor Audio 1").is_some());
+    // Above the EQ, beside the picker.
+    let picker = s.element("menu", "Input of Groove").bounds;
+    let monitor = s.element("button", &groove).bounds;
+    assert_eq!(picker.center().y, monitor.center().y);
+    assert!(monitor.origin.x >= picker.right());
+    s.click("button", &groove);
+    assert_eq!(
+        s.fake.edits().last(),
+        Some(&EditCommand::Lane {
+            edit: LaneEdit::SetMonitor {
+                seq: 3,
+                lane: 30,
+                monitor: MonitorModeRow::Input,
+            }
+        })
+    );
+    // Another track on Audio 1's path: the picker says whose input.
+    let mut groove = vizdaw_app::testing::lane_row(30, "Groove", false);
+    groove.audio_out = Some(1);
+    groove.input = Some(LaneInputRow::Audio {
+        first: 0,
+        stereo: false,
+        return_of: None,
+    });
+    let mut bass = vizdaw_app::testing::lane_row(32, "Bass", false);
+    bass.audio_out = Some(1);
+    let mut chords = vizdaw_app::testing::lane_row(31, "Chords", false);
+    chords.audio_out = Some(2);
+    s.fake.set_lanes(3, vec![groove, chords, bass]);
+    s.relanes();
+    assert_eq!(
+        s.value("menu", "Input of Groove").as_deref(),
+        Some("Groove: In 1")
+    );
+    assert_eq!(
+        s.value("menu", "Input of Chords").as_deref(),
+        Some("No Input")
+    );
+}
+
+/// The strip's picker: the model's sections with the input checked; a
+/// choice is one lane edit and closes it; Escape and a click outside
+/// close it.
+#[gpui::test]
+fn the_strip_picker_chooses_an_input(cx: &mut TestAppContext) {
+    use vizdaw_ffi::edit::LaneInputRow;
+    let mut s = setup(cx, fake());
+    s.click("menu", "Input of Groove");
+    assert_eq!(
+        s.menuitem_titles(),
+        vec![
+            ("No Input".into(), true),
+            ("Audio".into(), false),
+            ("In 1".into(), false),
+            ("In 2".into(), false),
+            ("In 1+2".into(), false),
+        ]
+    );
+    s.click("menuitem", "In 2");
+    assert!(s.find("menuitem", "No Input").is_none());
+    assert_eq!(
+        s.fake.edits().last(),
+        Some(&EditCommand::Lane {
+            edit: LaneEdit::SetInput {
+                seq: 3,
+                lane: 30,
+                input: Some(LaneInputRow::Audio {
+                    first: 1,
+                    stereo: false,
+                    return_of: None
+                })
+            }
+        })
+    );
+    assert_eq!(s.value("menu", "Input of Groove").as_deref(), Some("In 2"));
+    s.click("menu", "Input of Groove");
+    assert!(s.find("menuitem", "In 1").is_some());
+    s.cx.simulate_keystrokes("escape");
+    s.cx.run_until_parked();
+    assert!(s.find("menuitem", "In 1").is_none());
+    s.click("menu", "Input of Groove");
+    let away = s.element("button", "Mute Master").bounds.center();
+    let n = s.fake.edits().len();
+    s.click_at(away, Modifiers::none());
+    assert!(s.find("menuitem", "In 1").is_none());
+    assert_eq!(s.fake.edits().len(), n, "the click outside only closes it");
+}
+
+/// The picker's help names a synth's return (Swift `StripInputView`).
+#[gpui::test]
+fn the_strip_picker_help_names_the_return(cx: &mut TestAppContext) {
+    use vizdaw_ffi::edit::LaneInputRow;
+    let f = fake();
+    f.set_destinations(vec![vizdaw_app::testing::dest_row(9, "Moog")]);
+    let mut ret = vizdaw_app::testing::lane_row(30, "Groove", false);
+    ret.audio_out = Some(1);
+    ret.input = Some(LaneInputRow::Audio {
+        first: 0,
+        stereo: false,
+        return_of: Some(9),
+    });
+    f.set_lanes(3, vec![ret]);
+    let mut s = setup(cx, f);
+    let (help, plain) = s.model(|d| {
+        let l = d.lanes()[0].clone();
+        let mut other = l.clone();
+        other.input = None;
+        (
+            vizdaw_gpui::mixer_view::input_help(d, &l),
+            vizdaw_gpui::mixer_view::input_help(d, &other),
+        )
+    });
+    assert_eq!(help, "Input of Groove, recording \u{21E0} Moog");
+    assert_eq!(plain, "Input of Groove");
+}

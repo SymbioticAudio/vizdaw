@@ -906,7 +906,8 @@ impl DocumentModel {
             .lanes
             .iter()
             .map(|l| (l.id, LaneReads::default()))
-            .collect();
+            .collect(); // The return badges' names, with the lanes (views never read them).
+        self.warm_dest_names();
     }
 
     pub fn session(&self) -> &Arc<dyn DocSession> {

@@ -265,6 +265,16 @@ fn a_return_lane_keeps_its_synth() {
         MonitorModeRow::Auto,
     )]);
     d.fake.set_destinations(vec![dest_row(5, "Moog")]);
+    // The names are read with the snapshot (an edit here), never by the
+    // badge.
+    d.fake.set_undo_label(Some("bump"));
+    let _ = d.m().edit(EditCommand::Lane {
+        edit: LaneEdit::Rename {
+            seq: 3,
+            lane: 30,
+            name: "Audio 30".into(),
+        },
+    });
     let l = d.lane(30);
     assert_eq!(d.m().input_badge(&l).as_deref(), Some("\u{21E0} Moog"));
     assert_eq!(d.m().input_return_name(&l).as_deref(), Some("Moog"));
@@ -309,6 +319,46 @@ fn a_return_lane_keeps_its_synth() {
     });
     let l = d.lane(30);
     assert_eq!(d.m().input_badge(&l).as_deref(), Some("\u{21E0} Synth"));
+}
+
+/// The return badge's names are read once per snapshot version, with the
+/// snapshot (its lanes' refetch), so the views that draw the badge make no
+/// session call (slice 8c Task 2 carry).
+#[test]
+fn the_badge_reads_the_names_with_the_snapshot_not_when_drawn() {
+    let ret = Some(LaneInputRow::Audio {
+        first: 0,
+        stereo: false,
+        return_of: Some(5),
+    });
+    let f = Arc::new(FakeCore::new());
+    let mut store = DocumentStore::with_core(f.clone());
+    let fake = Doc::hand_out(&f, vec![audio_lane(30, ret, false, MonitorModeRow::Auto)]);
+    fake.set_destinations(vec![dest_row(5, "Moog")]);
+    let id = store.new_demo().unwrap();
+    store.document_mut(id).unwrap().select(Some(3));
+    let reads = fake.destination_reads();
+    assert!(reads >= 1, "read with the lanes");
+    let m = store.document(id).unwrap();
+    let l = m.lanes()[0].clone();
+    for _ in 0..3 {
+        assert_eq!(m.input_badge(&l).as_deref(), Some("\u{21E0} Moog"));
+        assert_eq!(m.input_return_name(&l).as_deref(), Some("Moog"));
+    }
+    assert_eq!(fake.destination_reads(), reads, "the badge reads none");
+    // A track with no return asks for no names.
+    let f = Arc::new(FakeCore::new());
+    let mut store = DocumentStore::with_core(f.clone());
+    let fake = Doc::hand_out(
+        &f,
+        vec![audio_lane(30, mono(0), false, MonitorModeRow::Auto)],
+    );
+    let id = store.new_demo().unwrap();
+    store.document_mut(id).unwrap().select(Some(3));
+    let before = fake.destination_reads();
+    let m = store.document(id).unwrap();
+    assert_eq!(m.input_badge(&m.lanes()[0].clone()), None);
+    assert_eq!(fake.destination_reads(), before);
 }
 
 #[test]

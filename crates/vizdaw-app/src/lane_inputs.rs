@@ -14,7 +14,7 @@
 //! so each sees every peak.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use core_control::registry::ArgValue;
@@ -161,8 +161,9 @@ pub struct LaneInputs {
     /// The peaks since the meters' last read, and since the channel's.
     meter_held: Vec<f32>,
     channel_held: Vec<f32>,
-    /// Destination names by snapshot version (the return badge).
-    dest_names: Mutex<Option<(u64, HashMap<u64, String>)>>,
+    /// Destination names by snapshot version (the return badge), read
+    /// with the snapshot's lanes, never when a view draws.
+    dest_names: Option<(u64, HashMap<u64, String>)>,
 }
 
 impl Default for LaneInputs {
@@ -191,7 +192,7 @@ impl LaneInputs {
             opening: false,
             meter_held: vec![],
             channel_held: vec![],
-            dest_names: Mutex::new(None),
+            dest_names: None,
         }
     }
 
@@ -613,18 +614,43 @@ impl DocumentModel {
             .map(|n| format!("\u{21E0} {n}"))
     }
 
-    /// A destination's name, read once per snapshot version.
+    /// A destination's name as the snapshot's read found it (no session
+    /// call: views draw the badge).
     fn dest_name(&self, id: u64) -> Option<String> {
+        self.inputs
+            .dest_names
+            .as_ref()
+            .and_then(|(_, m)| m.get(&id).cloned())
+    }
+
+    /// Reads the destinations' names for the return badges, once per
+    /// snapshot version, while a shown track records a synth's return
+    /// (called when the lanes are fetched again).
+    pub(crate) fn warm_dest_names(&mut self) {
+        let returns = self.lanes().iter().any(|l| {
+            matches!(
+                l.input,
+                Some(LaneInputRow::Audio {
+                    return_of: Some(_),
+                    ..
+                })
+            )
+        });
         let v = self.snapshot().version;
-        let mut names = self.inputs.dest_names.lock().unwrap();
-        if names.as_ref().is_none_or(|(at, _)| *at != v) {
-            let mut map = HashMap::new();
-            for d in self.session.destinations().unwrap_or_default() {
-                map.entry(d.id).or_insert(d.name);
-            }
-            *names = Some((v, map));
+        if !returns
+            || self
+                .inputs
+                .dest_names
+                .as_ref()
+                .is_some_and(|(at, _)| *at == v)
+        {
+            return;
         }
-        names.as_ref().and_then(|(_, m)| m.get(&id).cloned())
+        let mut map = HashMap::new();
+        for d in self.session.destinations().unwrap_or_default() {
+            map.entry(d.id).or_insert(d.name);
+        }
+        self.inputs.dest_names = Some((v, map));
     }
 
     /// Sets `lane`'s input (one undo step); nothing when it is unchanged.

@@ -14,6 +14,7 @@ mod fit;
 pub mod format_panel;
 #[doc(hidden)]
 pub mod frame_stats;
+pub mod input_picker;
 pub mod list_editor;
 pub mod menu_bar;
 pub mod menus;

@@ -92,8 +92,11 @@ impl Setup {
         self.click_at(at, Modifiers::none());
     }
 
+    /// A double-click on a header's name (Swift `LaneHeaderLayout`: the
+    /// name's line is the row's top 26 points).
     fn double_click(&mut self, role: &str, label: &str) {
-        let at = self.element(role, label).bounds.center();
+        let row = self.element(role, label).bounds;
+        let at = point(row.origin.x + px(60.), row.origin.y + px(13.));
         for count in [1, 2] {
             self.cx.simulate_event(MouseDownEvent {
                 button: MouseButton::Left,
@@ -241,7 +244,7 @@ fn a_header_click_selects_its_track(cx: &mut TestAppContext) {
     assert_eq!(s.selected(), vec![30, 31]);
     // M toggles mute and leaves the selection.
     let row = s.element("button", GROOVE).bounds;
-    let mute = point(row.right() - px(60.), row.center().y);
+    let mute = point(row.right() - px(60.), row.origin.y + px(13.));
     s.click_at(mute, Modifiers::none());
     assert_eq!(s.selected(), vec![30, 31]);
     let flags: Vec<_> = s
@@ -696,4 +699,633 @@ fn control_quit_commits_an_open_rename_before_refusing(cx: &mut TestAppContext) 
         other => panic!("app.quit should refuse: {other:?}"),
     }
     assert_eq!(s.fake.count("close"), 0);
+}
+
+// ---- Slice 8c: the monitor button, the input row and picker, the meter ----
+
+use std::time::{Duration, Instant};
+
+use vizdaw_app::lane_inputs::LaneInputs;
+use vizdaw_ffi::InputInfoRow;
+use vizdaw_ffi::edit::{LaneInputRow, MonitorModeRow};
+use vizdaw_gpui::track_headers;
+
+fn audio(id: u64, name: &str, input: Option<LaneInputRow>, monitor: MonitorModeRow) -> LaneRowT {
+    let mut l = lane_row(id, name, false);
+    l.kind = TrackKindRow::Audio;
+    l.audio_out = Some(7);
+    l.audio_out_name = Some("Out 1".into());
+    l.input = input;
+    l.monitor = monitor;
+    l
+}
+
+type LaneRowT = vizdaw_ffi::snapshot::LaneRow;
+
+fn mono(first: u16) -> Option<LaneInputRow> {
+    Some(LaneInputRow::Audio {
+        first,
+        stereo: false,
+        return_of: None,
+    })
+}
+
+fn input_info(opening: bool) -> InputInfoRow {
+    InputInfoRow {
+        device: "Fake".into(),
+        channels: 2,
+        names: vec!["L".into(), "R".into()],
+        input_latency_frames: 0,
+        output_latency_frames: 0,
+        buffer_frames: 0,
+        round_trip_frames: 0,
+        opening,
+        sample_rate: 0.0,
+        midi_fx_dropped: 0,
+        per_note_dropped: 0,
+        mpe_stolen: 0,
+    }
+}
+
+impl Setup {
+    /// Row `label`'s own children, in order: (role, label, value).
+    fn row_children(&mut self, label: &str) -> Vec<(String, String, Option<String>)> {
+        let row = self.element("button", label);
+        self.elements()
+            .into_iter()
+            .filter(|e| e.path.len() == row.path.len() + 1 && e.path.starts_with(&row.path))
+            .map(|e| (e.role, e.label, e.value))
+            .collect()
+    }
+
+    /// The header row labels, in order (without "Add Track").
+    fn row_labels(&mut self) -> Vec<String> {
+        self.header_children()
+            .into_iter()
+            .map(|(_, l)| l)
+            .filter(|l| l != "Add Track")
+            .collect()
+    }
+
+    fn with_doc(&mut self, f: impl FnOnce(&mut vizdaw_app::DocumentModel)) {
+        let doc = self.doc();
+        self.app.update(&mut self.cx, |a, cx| {
+            a.store.with_document(doc, |d, _| f(d));
+            cx.notify();
+        });
+        self.cx.run_until_parked();
+    }
+
+    /// The fake's lanes changed: a new snapshot version fetches them.
+    fn relanes(&mut self) {
+        let mut n = self.fake.snap();
+        n.version += 1;
+        self.with_doc(|d| d.apply(n));
+    }
+
+    fn menuitems(&mut self) -> Vec<(String, bool, bool)> {
+        self.elements()
+            .into_iter()
+            .filter(|e| e.role == "menuitem")
+            .map(|e| (e.label, e.enabled, e.selected))
+            .collect()
+    }
+
+    fn picker_open(&mut self) -> bool {
+        self.window
+            .read_with(&self.cx, |v, _| v.track_headers().input_picker())
+            .unwrap()
+            .is_some()
+    }
+
+    fn monitor_edits(&self) -> Vec<(u64, MonitorModeRow)> {
+        self.fake
+            .edits()
+            .into_iter()
+            .filter_map(|e| match e {
+                EditCommand::Lane {
+                    edit: LaneEdit::SetMonitor { lane, monitor, .. },
+                } => Some((lane, monitor)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn input_edits(&self) -> Vec<(u64, Option<LaneInputRow>)> {
+        self.fake
+            .edits()
+            .into_iter()
+            .filter_map(|e| match e {
+                EditCommand::Lane {
+                    edit: LaneEdit::SetInput { lane, input, .. },
+                } => Some((lane, input)),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+const AUTO_HELP: &str =
+    "Input monitoring: Auto (heard while armed and stopped, or recording in range)";
+const INPUT_HELP: &str = "Input monitoring: always the input";
+const OFF_HELP: &str = "Input monitoring: off";
+
+/// The header's words for each input, return and monitor case (Swift
+/// `ArrangementA11y.header`), and ", input opening" while the input opens
+/// on a metered track.
+#[gpui::test]
+fn the_header_words_name_the_input_its_return_and_monitoring(cx: &mut TestAppContext) {
+    let fake = demo_fake();
+    let mut keys = lane_row(33, "Keys", false);
+    keys.input = Some(LaneInputRow::Midi {
+        port: Some("Pads".into()),
+        channel: Some(2),
+    });
+    keys.monitor = MonitorModeRow::Off;
+    let ret = Some(LaneInputRow::Audio {
+        first: 2,
+        stereo: true,
+        return_of: Some(5),
+    });
+    fake.set_destinations(vec![vizdaw_app::testing::dest_row(5, "Moog")]);
+    fake.set_lanes(
+        3,
+        vec![
+            audio(30, "Plain", None, MonitorModeRow::Auto),
+            audio(31, "Vocal", mono(0), MonitorModeRow::Input),
+            audio(32, "Return", ret, MonitorModeRow::Auto),
+            keys,
+        ],
+    );
+    let mut s = setup(cx, fake);
+    assert_eq!(
+        s.row_labels(),
+        vec![
+            "Audio track, Plain, output Out 1",
+            "Audio track, Vocal, output Out 1, input In 1, monitoring input",
+            "Audio track, Return, output Out 1, input In 3+4, recording the return of Moog",
+            "MIDI track, Keys, no destination, input Pads \u{b7} Ch 3, monitoring off",
+        ]
+    );
+    // Armed and opening: the meter shows, and the label says so.
+    let mut armed = audio(31, "Vocal", mono(0), MonitorModeRow::Auto);
+    armed.arm = true;
+    s.fake.set_lanes(3, vec![armed]);
+    s.fake.set_input(input_info(true));
+    s.relanes();
+    s.with_doc(|d| {
+        d.poll_meters(Instant::now());
+    });
+    assert_eq!(
+        s.row_labels(),
+        vec!["Audio track, Vocal, output Out 1, armed, input In 1, input opening"]
+    );
+    s.fake.set_input(input_info(false));
+    s.with_doc(|d| {
+        d.poll_meters(Instant::now());
+    });
+    assert_eq!(
+        s.row_labels(),
+        vec!["Audio track, Vocal, output Out 1, armed, input In 1"]
+    );
+}
+
+/// The tree names a header's monitor button (its help, also its tooltip
+/// and value), its input row (`Input of <track>`, its text the value) and,
+/// while the track meters, its input meter.
+#[gpui::test]
+fn the_tree_names_the_monitor_button_input_row_and_meter(cx: &mut TestAppContext) {
+    let fake = demo_fake();
+    let mut vocal = audio(30, "Vocal", mono(1), MonitorModeRow::Input);
+    vocal.arm = true;
+    fake.set_lanes(3, vec![vocal, audio(31, "Room", None, MonitorModeRow::Off)]);
+    let mut s = setup(cx, fake);
+    let vocal = "Audio track, Vocal, output Out 1, armed, input In 2, monitoring input";
+    assert_eq!(
+        s.row_children(vocal),
+        vec![
+            ("button".into(), INPUT_HELP.into(), Some(INPUT_HELP.into())),
+            ("menu".into(), "Input of Vocal".into(), Some("In 2".into())),
+            (
+                "level".into(),
+                "Input level of Vocal".into(),
+                Some("0.00".into())
+            ),
+        ]
+    );
+    // No meter on a track that is neither armed nor monitoring its input.
+    assert_eq!(
+        s.row_children("Audio track, Room, output Out 1, monitoring off"),
+        vec![
+            ("button".into(), OFF_HELP.into(), Some(OFF_HELP.into())),
+            (
+                "menu".into(),
+                "Input of Room".into(),
+                Some("No Input".into())
+            ),
+        ]
+    );
+    // The children sit where Swift's `LaneHeaderLayout` puts them.
+    let row = s.element("button", vocal).bounds;
+    let monitor = s.element("button", INPUT_HELP).bounds;
+    assert_eq!(
+        (
+            monitor.origin.x - row.origin.x,
+            monitor.origin.y - row.origin.y
+        ),
+        (px(113.), px(4.))
+    );
+    assert_eq!(monitor.size, gpui::size(px(18.), px(18.)));
+    let input = s.element("menu", "Input of Vocal").bounds;
+    assert_eq!(
+        (input.origin.x - row.origin.x, input.origin.y - row.origin.y),
+        (px(104.), px(24.))
+    );
+    let meter = s.element("level", "Input level of Vocal").bounds;
+    assert_eq!(
+        (meter.origin.x - row.origin.x, meter.origin.y - row.origin.y),
+        (px(8.), px(43.))
+    );
+    assert_eq!(meter.size, gpui::size(px(178.), px(3.)));
+}
+
+/// Swift `theMonitorButtonHasItsTooltip`: the monitor button explains its
+/// mode (its tooltip, which the tree shows as its value: GPUI's test
+/// platform does not expose a shown tooltip); the name has none.
+#[gpui::test]
+fn the_monitor_button_has_its_tooltip(cx: &mut TestAppContext) {
+    let fake = demo_fake();
+    let mut chords = lane_row(31, "Chords", false);
+    chords.monitor = MonitorModeRow::Input;
+    fake.set_lanes(3, vec![lane_row(30, "Groove", false), chords]);
+    let mut s = setup(cx, fake);
+    let row = "MIDI track, Chords, no destination, monitoring input";
+    let kids = s.row_children(row);
+    assert_eq!(
+        kids[0],
+        ("button".into(), INPUT_HELP.into(), Some(INPUT_HELP.into()))
+    );
+    assert!(kids.iter().all(|(_, l, _)| l != "Chords"), "{kids:?}");
+    assert_eq!(s.row_children(GROOVE)[0].2.as_deref(), Some(AUTO_HELP));
+}
+
+/// Swift `theMeterHidesUnder46PointsAndTheMonitorClickCycles`: the meter
+/// needs 46 points of row; a click on the monitor button is one lane edit
+/// to the next mode and leaves the selection.
+#[gpui::test]
+fn the_meter_hides_under_46_points_and_the_monitor_click_cycles(cx: &mut TestAppContext) {
+    assert!(!track_headers::shows_meter(45.));
+    for h in [46., 47., 48., 96.] {
+        assert!(track_headers::shows_meter(h), "{h}");
+    }
+    let mut s = setup(cx, demo_fake());
+    let monitor = s.row_children(CHORDS)[0].clone();
+    assert_eq!(monitor.1, AUTO_HELP);
+    // Row 1's button: the first labelled so under Chords.
+    let row = s.element("button", CHORDS);
+    let at = s
+        .elements()
+        .into_iter()
+        .find(|e| e.path.starts_with(&row.path) && e.label == AUTO_HELP)
+        .unwrap()
+        .bounds
+        .center();
+    s.click_at(at, Modifiers::none());
+    assert_eq!(s.monitor_edits(), vec![(31, MonitorModeRow::Input)]);
+    assert!(s.selected().is_empty(), "the selection is left alone");
+    // The control channel presses it the same way.
+    let mut chords = lane_row(31, "Chords", false);
+    chords.monitor = MonitorModeRow::Input;
+    s.fake
+        .set_lanes(3, vec![lane_row(30, "Groove", false), chords]);
+    s.relanes();
+    let row = "MIDI track, Chords, no destination, monitoring input";
+    let path = s.element("button", row).path;
+    let id = s
+        .elements()
+        .into_iter()
+        .find(|e| e.path.starts_with(&path) && e.label == INPUT_HELP)
+        .map(|e| core_control::element::element_id(&e.path, "button", INPUT_HELP))
+        .unwrap();
+    let mut params = Map::new();
+    params.insert("element".into(), json!(id));
+    let command = core_control::validate(&RawRequest {
+        id: RequestId::Num(1),
+        cmd: "ui.click".into(),
+        params,
+    })
+    .unwrap();
+    s.cx.cx.update(|cx| control::handle(&command, cx));
+    s.cx.run_until_parked();
+    assert_eq!(
+        s.monitor_edits(),
+        vec![(31, MonitorModeRow::Input), (31, MonitorModeRow::Off)]
+    );
+}
+
+/// Swift `monitorTooltipsCoverTheVisibleRowsAndFollowAScroll`: of 200
+/// tracks, only the rows in view show a monitor button (each with its own
+/// tooltip), and a scroll moves them: row 10's button is where row 0's
+/// was, explaining row 10's mode.
+#[gpui::test]
+fn monitor_tooltips_cover_the_visible_rows_and_follow_a_scroll(cx: &mut TestAppContext) {
+    let fake = demo_fake();
+    let rows: Vec<_> = (0..200)
+        .map(|i| {
+            let mut l = lane_row(1000 + i, &format!("T{i}"), false);
+            l.monitor = if i == 10 {
+                MonitorModeRow::Input
+            } else {
+                MonitorModeRow::Off
+            };
+            l
+        })
+        .collect();
+    fake.set_lanes(3, rows);
+    let mut s = setup(cx, fake);
+    let shown = |s: &mut Setup| -> Vec<vizdaw_gpui::registry::Element> {
+        let registry = s
+            .window
+            .read_with(&s.cx, |v, _| v.registry().clone())
+            .unwrap();
+        let r = registry.borrow();
+        r.elements()
+            .iter()
+            .filter(|e| e.label.starts_with("Input monitoring") && r.visible_part(e).is_some())
+            .cloned()
+            .collect()
+    };
+    let group = s.element("group", "Track Headers").bounds;
+    let visible = (f32::from(group.size.height) / track_headers::ROW_HEIGHT).ceil() as usize + 1;
+    let before = shown(&mut s);
+    assert!(
+        !before.is_empty() && before.len() <= visible,
+        "{} buttons",
+        before.len()
+    );
+    let first = before[0].bounds;
+    assert_eq!(before[0].label, OFF_HELP);
+    s.cx.simulate_event(gpui::ScrollEvent {
+        position: group.center(),
+        delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-10. * track_headers::ROW_HEIGHT))),
+        ..Default::default()
+    });
+    s.cx.run_until_parked();
+    let after = shown(&mut s);
+    assert!(after.len() <= visible);
+    let at = after
+        .iter()
+        .find(|e| e.bounds == first)
+        .expect("a button where row 0's was");
+    assert_eq!(at.label, INPUT_HELP);
+    assert_eq!(at.value.as_deref(), Some(INPUT_HELP));
+    assert!(
+        after
+            .iter()
+            .all(|e| e.bounds.bottom() > group.origin.y && e.bounds.origin.y < group.bottom()),
+        "only rows in view"
+    );
+}
+
+/// The picker: a click on the input row opens it (reading the input
+/// again) under the row, with Swift's sections in order and a ✓ on the
+/// track's input; a choice is one lane edit, one undo step, and closes
+/// it; the current input again makes none; Escape and a click outside
+/// close it.
+#[gpui::test]
+fn the_input_picker_lists_sections_checks_the_input_and_chooses(cx: &mut TestAppContext) {
+    let fake = demo_fake();
+    fake.set_lanes(3, vec![audio(30, "Vocal", mono(1), MonitorModeRow::Auto)]);
+    fake.set_input(input_info(false));
+    let mut s = setup(cx, fake);
+    assert!(!s.picker_open());
+    s.click("menu", "Input of Vocal");
+    assert!(s.picker_open());
+    // The press selected the track too (Swift).
+    assert_eq!(s.selected(), vec![30]);
+    // The engine's input was read as the picker opened: its names.
+    assert_eq!(
+        s.menuitems(),
+        vec![
+            ("No Input".into(), true, false),
+            ("Audio".into(), false, false),
+            ("In 1 (L)".into(), true, false),
+            ("In 2 (R)".into(), true, true),
+            ("In 1+2".into(), true, false),
+        ]
+    );
+    // Under the input row.
+    let input = s.element("menu", "Input of Vocal").bounds;
+    let first = s.element("menuitem", "No Input").bounds;
+    assert!(
+        first.origin.y >= input.bottom(),
+        "{first:?} under {input:?}"
+    );
+    // The current input again: no edit; the picker closes.
+    s.click("menuitem", "In 2 (R)");
+    assert!(!s.picker_open());
+    assert!(s.input_edits().is_empty());
+    assert!(s.find("menuitem", "No Input").is_none());
+    // A choice: one edit, its undo step the core's.
+    s.click("menu", "Input of Vocal");
+    s.click("menuitem", "In 1+2");
+    assert!(!s.picker_open());
+    assert_eq!(
+        s.input_edits(),
+        vec![(
+            30,
+            Some(LaneInputRow::Audio {
+                first: 0,
+                stereo: true,
+                return_of: None
+            })
+        )]
+    );
+    assert_eq!(s.fake.snap().undo_label.as_deref(), Some("Set Track Input"));
+    // Escape closes it.
+    s.click("menu", "Input of Vocal");
+    assert!(s.picker_open());
+    s.cx.simulate_keystrokes("escape");
+    s.cx.run_until_parked();
+    assert!(!s.picker_open());
+    // So does a click outside, which reaches nothing else.
+    s.click("menu", "Input of Vocal");
+    s.click_at(point(px(700.), px(500.)), Modifiers::none());
+    assert!(!s.picker_open());
+    assert!(s.find("menuitem", "No Input").is_none());
+    assert!(
+        s.find("button", "Audio track, Vocal, output Out 1, input In 1+2")
+            .is_some()
+    );
+    assert_eq!(s.input_edits().len(), 1);
+}
+
+/// A MIDI track's picker: "MIDI Input" (all, then each source) and "MIDI
+/// Channel" sections, the track's port and channel checked.
+#[gpui::test]
+fn a_midi_track_picker_lists_sources_and_channels(cx: &mut TestAppContext) {
+    let fake = demo_fake();
+    let mut keys = lane_row(31, "Keys", false);
+    keys.midi_dest = Some(1);
+    keys.input = Some(LaneInputRow::Midi {
+        port: None,
+        channel: Some(0),
+    });
+    fake.set_lanes(3, vec![keys]);
+    let mut s = setup(cx, fake);
+    s.click("menu", "Input of Keys");
+    let items = s.menuitems();
+    let titles: Vec<&str> = items.iter().map(|(t, _, _)| t.as_str()).collect();
+    assert_eq!(&titles[..3], &["No Input", "MIDI Input", "All MIDI Inputs"]);
+    let channel = titles.iter().position(|t| *t == "MIDI Channel").unwrap();
+    assert_eq!(titles[channel + 1], "Any Channel");
+    assert_eq!(titles[channel + 2], "Channel 1");
+    assert_eq!(titles.last(), Some(&"Channel 16"));
+    let checked: Vec<&str> = items
+        .iter()
+        .filter(|(_, _, on)| *on)
+        .map(|(t, _, _)| t.as_str())
+        .collect();
+    assert_eq!(checked, vec!["All MIDI Inputs", "Channel 1"]);
+}
+
+/// While a pass records, the core refuses an input change: the status
+/// line says why and nothing changes.
+#[gpui::test]
+fn a_choice_while_recording_shows_busy(cx: &mut TestAppContext) {
+    let fake = demo_fake();
+    let mut vocal = audio(30, "Vocal", mono(0), MonitorModeRow::Auto);
+    vocal.arm = true;
+    fake.set_lanes(3, vec![vocal]);
+    let mut s = setup(cx, fake);
+    s.cx.dispatch_action(RunCommand::new("transport.record"));
+    s.cx.run_until_parked();
+    s.click("menu", "Input of Vocal");
+    s.click("menuitem", "In 2");
+    assert!(s.input_edits().is_empty());
+    assert_eq!(
+        s.status().as_deref(),
+        Some(vizdaw_ffi::session::RECORDING_LANES)
+    );
+}
+
+/// The meter follows the poll's scripted peaks; the clip mark lights at
+/// full scale and goes 2 s later (the poll's clock is the test's).
+#[gpui::test]
+fn the_meter_follows_scripted_peaks_and_holds_the_clip_two_seconds(cx: &mut TestAppContext) {
+    let fake = demo_fake();
+    let mut vocal = audio(30, "Vocal", mono(0), MonitorModeRow::Auto);
+    vocal.arm = true;
+    fake.set_lanes(3, vec![vocal]);
+    let mut s = setup(cx, fake);
+    let meter = |s: &mut Setup| s.value_of("level", "Input level of Vocal");
+    let t0 = Instant::now();
+    s.fake.set_input_levels(vec![0.5]);
+    s.with_doc(|d| {
+        d.poll_meters(t0);
+    });
+    assert_eq!(meter(&mut s).as_deref(), Some("0.50"));
+    let half = s.element("level", "Input level of Vocal");
+    s.fake.set_input_levels(vec![1.0]);
+    s.with_doc(|d| {
+        d.poll_meters(t0 + Duration::from_millis(100));
+    });
+    assert_eq!(meter(&mut s).as_deref(), Some("1.00, clipped"));
+    // Still lit just inside the hold, falling meanwhile.
+    s.with_doc(|d| {
+        d.poll_meters(t0 + Duration::from_millis(2000));
+    });
+    let v = meter(&mut s).unwrap();
+    assert!(v.ends_with(", clipped"), "{v}");
+    // Gone after it.
+    s.with_doc(|d| {
+        d.poll_meters(t0 + Duration::from_millis(2200));
+    });
+    assert!(!meter(&mut s).unwrap().contains("clipped"));
+    assert_eq!(half.bounds.size.width, px(178.));
+    // Disarmed: the meter goes.
+    let vocal = audio(30, "Vocal", mono(0), MonitorModeRow::Auto);
+    s.fake.set_lanes(3, vec![vocal]);
+    s.relanes();
+    assert!(s.find("level", "Input level of Vocal").is_none());
+}
+
+/// The views read the return badge's names from the model's cache: a
+/// draw makes no session call (slice 8c Task 2 carry).
+#[gpui::test]
+fn drawing_the_headers_makes_no_destinations_call(cx: &mut TestAppContext) {
+    let fake = demo_fake();
+    let ret = Some(LaneInputRow::Audio {
+        first: 0,
+        stereo: false,
+        return_of: Some(5),
+    });
+    fake.set_destinations(vec![vizdaw_app::testing::dest_row(5, "Moog")]);
+    fake.set_lanes(3, vec![audio(30, "Return", ret, MonitorModeRow::Auto)]);
+    let mut s = setup(cx, fake);
+    let label = "Audio track, Return, output Out 1, input In 1, recording the return of Moog";
+    assert!(s.find("button", label).is_some());
+    assert_eq!(
+        s.value_of("menu", "Input of Return").as_deref(),
+        Some("\u{21E0} Moog \u{b7} In 1")
+    );
+    let reads = s.fake.destination_reads();
+    for _ in 0..5 {
+        s.window
+            .update(&mut s.cx, |_, window, _| window.refresh())
+            .unwrap();
+        s.cx.run_until_parked();
+    }
+    assert!(s.find("button", label).is_some());
+    assert_eq!(s.fake.destination_reads(), reads, "no read in a draw");
+}
+
+impl Setup {
+    fn value_of(&mut self, role: &str, label: &str) -> Option<String> {
+        self.element(role, label).value
+    }
+}
+
+/// `LaneInputs` titles the header's input row as the strip does.
+#[test]
+fn the_input_row_text_leads_with_an_arrow() {
+    let input = track_headers::HeaderInput {
+        text: LaneInputs::title(mono(2).as_ref()),
+        return_name: None,
+        meter: None,
+        opening: false,
+    };
+    assert_eq!(track_headers::input_text(&input), "\u{25BE} In 3");
+}
+
+/// One picker is open per window: with one open, a press elsewhere (on
+/// another track's input row, or Add Track) only closes it.
+#[gpui::test]
+fn one_input_picker_is_open_per_window(cx: &mut TestAppContext) {
+    let fake = demo_fake();
+    fake.set_lanes(
+        3,
+        vec![
+            audio(30, "Vocal", mono(0), MonitorModeRow::Auto),
+            audio(31, "Guitar", mono(1), MonitorModeRow::Auto),
+        ],
+    );
+    let mut s = setup(cx, fake);
+    let open = |s: &mut Setup| {
+        s.window
+            .read_with(&s.cx, |v, _| v.track_headers().input_picker())
+            .unwrap()
+    };
+    // Guitar's list hangs below its row, clear of Vocal's.
+    s.click("menu", "Input of Guitar");
+    assert_eq!(open(&mut s), Some(31));
+    s.click("menu", "Input of Vocal");
+    assert_eq!(open(&mut s), None);
+    s.click("menu", "Input of Vocal");
+    assert_eq!(open(&mut s), Some(30));
+    s.click("menu", "Input of Vocal");
+    s.click("menu", "Input of Guitar");
+    s.click("button", "Add Track");
+    assert_eq!(open(&mut s), None);
+    assert!(s.find("menuitem", "New Audio Track").is_none());
 }
