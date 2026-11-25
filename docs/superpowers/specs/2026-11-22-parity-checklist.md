@@ -208,8 +208,8 @@ item (false: keys, the Keys settings and the control channel only).
 
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
-| lane.set_input | Track | Set Track Input |  | false | S8c | S8c (Linux run pending) |
-| lane.set_monitor | Track | Set Track Monitor |  | false | S8c | S8c (Linux run pending) |
+| lane.set_input | Track | Set Track Input |  | false | S8c | S8c |
+| lane.set_monitor | Track | Set Track Monitor |  | false | S8c | S8c |
 | lane.set_output | Track | Set Track Output |  | false | | |
 | lane.set_input_fx | Track | Set Input Effects |  | false | | |
 | lane.set_mpe | Track | Set Track MPE |  | false | | |
@@ -548,16 +548,16 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 | regions_normalize_relink_and_trash | | |
 | records_audio_loop_takes_and_midi | S8a (`gpui_records_audio_loop_takes_and_midi`; `record.recover`: `gpui_record_recover_trash_over_the_channel`) | S8a (offline device, fake input; Trash: gap H4) |
 | tracks_the_fake_synth | | |
-| arms_meters_counts_in_and_draws_the_take | S8c (`gpui_arms_meters_counts_in_and_draws_the_take`; the `audio.set` steps wait for Settings) | S8c (offline device, fake input; the `audio.set` steps wait for Settings; Linux run pending) |
+| arms_meters_counts_in_and_draws_the_take | S8c (`gpui_arms_meters_counts_in_and_draws_the_take`; the `audio.set` steps wait for Settings) | S8c (offline device, fake input; the `audio.set` steps wait for Settings) |
 | touch_writes_a_fader_over_the_channel | S6a (mixer parts) | S6a (mixer parts) |
 | drives_a_fader_and_a_button_from_an_mcu | | |
 | drives_the_mixer_from_a_kontrol_mk3 | | |
 | bounces_the_demo_and_checks_the_file | | |
 | edits_a_region_through_the_stub_editor | | |
-| window_views_and_panes_over_the_channel | S6a (views and panes; mixer-window step later), S8c (markers step) | S6a (views via ui.view_*; ⌃2 is ⌘2 on Linux), S8c (markers step; Linux run pending) |
+| window_views_and_panes_over_the_channel | S6a (views and panes; mixer-window step later), S8c (markers step) | S6a (views via ui.view_*; ⌃2 is ⌘2 on Linux), S8c (markers step) |
 | themes_and_the_strip_over_the_channel | | |
 | edits_a_region_in_the_audio_editor | | |
-| transport_jumps_readouts_and_fields_over_the_channel | S3 (steps 0–6), S8b (step 7) | S3 (steps 0–6); step 7 S8b, Linux run pending |
+| transport_jumps_readouts_and_fields_over_the_channel | S3 (steps 0–6), S8b (step 7) | S3 (steps 0–6); step 7 S8b |
 | new_project_tracks_over_the_channel | S3 (passed with the screen locked once the channel draws a fresh frame) | S2 |
 | loop_wraps_at_the_end | S3 | S3 |
 | arpeggiates_an_injected_chord_while_recording | S8a | S8a |
@@ -583,7 +583,7 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 | co_producer_import_midi_is_refused | | |
 | control_close_of_a_dirty_song_does_not_prompt | S2 | S2 |
 | app_quit_refuses_while_a_song_is_unsaved | S2 | S2 |
-| groups_vcas_and_transport_bar_over_the_channel | S6a + S6b (strips, groups and VCAs), S8b (the bar part: `gpui_transport_bar_click_and_command_buttons`) | partial S6a; the bar part S8b, Linux run pending |
+| groups_vcas_and_transport_bar_over_the_channel | S6a + S6b (strips, groups and VCAs), S8b (the bar part: `gpui_transport_bar_click_and_command_buttons`) | partial S6a; the bar part S8b |
 
 ## Linux gaps
 
