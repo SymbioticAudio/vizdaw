@@ -14,7 +14,7 @@ use gpui::{
 use serde_json::{Map, json};
 use vizdaw_app::DocSession;
 use vizdaw_app::DocumentStore;
-use vizdaw_app::arrangement::Rect;
+use vizdaw_app::arrangement::{Rect, ZOOM_STEP};
 use vizdaw_app::editor::{DetailEditorKind, EditorTarget, Tool};
 use vizdaw_app::testing::{FakeSession, ScriptedWave, demo_fake, lane_row};
 use vizdaw_ffi::blocks::{BlockKind, BlockRow};
@@ -1836,4 +1836,51 @@ fn overlapping_bars_fill_as_their_union() {
         matches!(&path.style, PathStyle::Fill(o) if o.fill_rule == FillRule::NonZero),
         "non-zero fill"
     );
+}
+
+/// A zoom asks for the waveforms at the new zoom at once, not at the
+/// next frame: a window that draws no frames (hidden, a background app,
+/// a locked screen) holds them by the first frame it draws. (Asked only
+/// from a frame, the first frame after a zoom was always blank there,
+/// and a capture right after the zoom showed a blank region.) The frame
+/// that follows asks nothing more.
+#[gpui::test]
+fn a_zoom_asks_before_the_next_frame(cx: &mut TestAppContext) {
+    let f = with_region(None);
+    f.set_region_waveform(
+        KICK,
+        ScriptedWave {
+            state: OverviewStateRow::Ready,
+            channels: 1,
+            min: -0.5,
+            max: 0.5,
+        },
+    );
+    let mut s = setup(cx, f);
+    assert_eq!(s.value("button", KICK_LABEL).as_deref(), Some("ready"));
+    for (factor, button) in [
+        (1. / ZOOM_STEP, vizdaw_gpui::arrangement::ZOOM_IN),
+        (ZOOM_STEP, vizdaw_gpui::arrangement::ZOOM_OUT),
+    ] {
+        let asked = s.fake.count("region_waveform");
+        let reading = s
+            .window
+            .update(&mut s.cx, |v, _, cx| {
+                v.zoom_by(factor, cx);
+                // No frame has drawn the new zoom yet.
+                v.app().read(cx).store.reading()
+            })
+            .unwrap();
+        assert!(reading, "{button}: asked before the next frame");
+        s.cx.run_until_parked();
+        s.redraw(2);
+        assert_eq!(
+            s.fake.count("region_waveform"),
+            asked + 1,
+            "{button}: once, by the zoom: {:?}",
+            s.fake.region_waveform_asks()
+        );
+        assert_eq!(s.value("button", KICK_LABEL).as_deref(), Some("ready"));
+        assert_eq!(s.drawn_waves().len(), 1, "{button}: drawn");
+    }
 }

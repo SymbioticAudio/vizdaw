@@ -1169,7 +1169,6 @@ impl Scene {
         };
         let mut separators = vec![];
         let mut blocks = vec![];
-        let mut wants = vec![];
         for row in &state.rows {
             let i = row.index;
             let top = RULER_HEIGHT + g.row_top(i);
@@ -1196,7 +1195,7 @@ impl Scene {
                 );
                 if b.kind == BlockKind::Events {
                     for r in row.regions.iter().filter(|r| b.events.contains(&r.row.id)) {
-                        if let Some(d) = self.region(r, i, &body, state, &mut wants) {
+                        if let Some(d) = self.region(r, i, &body, state) {
                             regions.push((r, d.rect, d.selected, d.offline));
                             drawn.regions.push(d);
                         }
@@ -1244,55 +1243,103 @@ impl Scene {
             time: TimeLayer::new(axis, &state.bars, w, h, self.range, state.playhead),
             separators,
             blocks,
-            wants,
+            wants: self.wants(state, bounds),
             takes,
         }
     }
 
-    /// Audio region `r` of row `i`, when it shows in `body`; what it
-    /// needs read joins `wants`.
+    /// The waveforms the regions in view in `bounds` need read (not held
+    /// for the slice in view), as [`Self::prepare`] lays them out.
+    fn wants(&self, state: &ArrangementState, bounds: Bounds<Pixels>) -> Vec<RegionWant> {
+        let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+        let body = Rect {
+            x: 0.,
+            y: RULER_HEIGHT,
+            width: w,
+            height: (h - RULER_HEIGHT).max(0.),
+        };
+        let g = &self.geometry;
+        let mut wants = vec![];
+        for row in &state.rows {
+            let i = row.index;
+            let top = RULER_HEIGHT + g.row_top(i);
+            if top + g.lane_height < RULER_HEIGHT || top > h {
+                continue;
+            }
+            for b in row.blocks.iter().filter(|b| b.kind == BlockKind::Events) {
+                let mut rect = g.block_rect(b, i, &self.axis);
+                rect.y += RULER_HEIGHT;
+                if !rect.intersects(&body) {
+                    continue;
+                }
+                wants.extend(
+                    row.regions
+                        .iter()
+                        .filter(|r| b.events.contains(&r.row.id))
+                        .filter_map(|r| self.region_want(r, i, &body)),
+                );
+            }
+        }
+        wants
+    }
+
+    /// Region `e` of row `i`'s rect in canvas points (Swift
+    /// `ArrangementGeometry.regionRect`).
+    fn region_rect(&self, e: &EventRow, i: usize) -> Rect {
+        let (axis, g) = (&self.axis, &self.geometry);
+        let end = e.tick.saturating_add(e.duration.max(0));
+        let x0 = axis.x(e.tick);
+        let inset = Geometry::BLOCK_INSET + 1.;
+        Rect {
+            x: x0,
+            y: RULER_HEIGHT + g.row_top(i) + inset,
+            width: (axis.x(end) - x0).max(Geometry::MIN_BLOCK_WIDTH),
+            height: (g.lane_height - 2. * inset).max(1.),
+        }
+    }
+
+    /// The read audio region `r` of row `i` needs when it shows in `body`
+    /// and its rows for the slice in view are not held (offline: none).
+    fn region_want(&self, r: &RegionState, i: usize, body: &Rect) -> Option<RegionWant> {
+        let axis = &self.axis;
+        let e = &r.row;
+        self.region_rect(e, i).intersection(body)?;
+        if r.look.state == WaveState::Offline {
+            return None;
+        }
+        // The visible ticks, in ticks so a scroll that keeps the whole
+        // region in view asks nothing new.
+        let end = e.tick.saturating_add(e.duration.max(0));
+        let from = e.tick.max(axis.tick_at(body.x));
+        let to = end.min(axis.tick_at(body.max_x())).max(from + 1);
+        let width = ((to - from) as f64 / axis.ticks_per_point()) as f32;
+        let visible = TickRange {
+            start: from,
+            end: to,
+        };
+        Slice::of(visible, width)
+            .is_some_and(|s| r.look.needs(s))
+            .then(|| RegionWant {
+                region: e.clone(),
+                visible,
+                width,
+            })
+    }
+
+    /// Audio region `r` of row `i`, when it shows in `body` (what it
+    /// needs read: [`Self::region_want`]).
     fn region(
         &self,
         r: &RegionState,
         i: usize,
         body: &Rect,
         state: &ArrangementState,
-        wants: &mut Vec<RegionWant>,
     ) -> Option<RegionDraw> {
         let axis = &self.axis;
-        let g = &self.geometry;
         let e = &r.row;
-        // Swift `ArrangementGeometry.regionRect`.
-        let len = e.duration.max(0);
-        let end = e.tick.saturating_add(len);
-        let x0 = axis.x(e.tick);
-        let inset = Geometry::BLOCK_INSET + 1.;
-        let rect = Rect {
-            x: x0,
-            y: RULER_HEIGHT + g.row_top(i) + inset,
-            width: (axis.x(end) - x0).max(Geometry::MIN_BLOCK_WIDTH),
-            height: (g.lane_height - 2. * inset).max(1.),
-        };
+        let rect = self.region_rect(e, i);
         rect.intersection(body)?;
         let offline = r.look.state == WaveState::Offline;
-        if !offline {
-            // The visible ticks, in ticks so a scroll that keeps the whole
-            // region in view asks nothing new.
-            let from = e.tick.max(axis.tick_at(body.x));
-            let to = end.min(axis.tick_at(body.max_x())).max(from + 1);
-            let width = ((to - from) as f64 / axis.ticks_per_point()) as f32;
-            let visible = TickRange {
-                start: from,
-                end: to,
-            };
-            if Slice::of(visible, width).is_some_and(|s| r.look.needs(s)) {
-                wants.push(RegionWant {
-                    region: e.clone(),
-                    visible,
-                    width,
-                });
-            }
-        }
         let drawable = |rows: &OverviewRows| {
             matches!(
                 rows.state,
@@ -1913,11 +1960,52 @@ impl DocumentWindow {
         });
     }
 
-    /// A zoom button: the zoom times `factor`, the origin kept.
-    fn zoom_by(&mut self, factor: f64, cx: &mut Context<Self>) {
+    /// A zoom button: the zoom times `factor`, the origin kept. The
+    /// waveforms at the new zoom are asked for now, not by the next frame.
+    pub fn zoom_by(&mut self, factor: f64, cx: &mut Context<Self>) {
         let a = &mut self.arrangement;
         a.axis = a.axis.with_zoom(a.axis.ticks_per_point() * factor);
+        self.want_region_waves_now(cx);
         cx.notify();
+    }
+
+    /// Asks for the waveforms the canvas as last laid out needs at its
+    /// axis now. A zoom drops every region's rows; asked only by the next
+    /// frame, a window that draws no frames (hidden, a background app, a
+    /// locked screen) would show its first frame after the zoom blank, a
+    /// capture of it too. Asked now, they are held by that frame.
+    fn want_region_waves_now(&mut self, cx: &mut Context<Self>) {
+        let a = &self.arrangement;
+        let bounds = a.layout.get();
+        if bounds.size.width <= px(0.) {
+            return;
+        }
+        let doc = self.doc();
+        let wants = {
+            let s = self.app().read(cx);
+            let Some(d) = s.store.document(doc) else {
+                return;
+            };
+            let visible = a.visible_rows(d.lanes().len(), f32::from(bounds.size.height));
+            let state = ArrangementState::of(
+                d,
+                s.transport(doc),
+                Instant::now(),
+                visible,
+                &a.axis,
+                a.width(),
+            );
+            let scene = Scene {
+                axis: a.axis,
+                geometry: a.geometry(),
+                range: None,
+            };
+            scene.wants(&state, bounds)
+        };
+        if !wants.is_empty() {
+            let tpp = a.axis.ticks_per_point();
+            self.want_region_waves(tpp, &wants, cx);
+        }
     }
 
     /// The rows changed (a track went): the offset stays in the content.
