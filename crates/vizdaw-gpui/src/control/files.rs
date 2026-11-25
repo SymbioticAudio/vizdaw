@@ -875,11 +875,18 @@ pub(crate) fn install_spawner(cx: &mut App) {
                     cx.update(|cx| {
                         let app = AppState::global(cx);
                         app.update(cx, |s, cx| {
-                            match landed {
+                            // A take read that changed nothing redraws
+                            // nothing (plan 8c Task 5 fix round 1).
+                            let redraw = match landed {
                                 Some(l) => s.store.land(l),
-                                None => s.store.cancel_read(ticket),
+                                None => {
+                                    s.store.cancel_read(ticket);
+                                    true
+                                }
+                            };
+                            if redraw {
+                                cx.notify();
                             }
-                            cx.notify();
                         });
                         settle(cx);
                     });

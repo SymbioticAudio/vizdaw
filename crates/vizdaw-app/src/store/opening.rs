@@ -1105,7 +1105,13 @@ impl DocumentStore {
     /// Read `ticket` will never land (its work panicked or was dropped):
     /// it is forgotten, so [`DocumentStore::reading`] does not stay true.
     pub fn cancel_read(&mut self, ticket: u64) {
-        self.reads.waiting.remove(&ticket);
+        // A take read that never lands frees its document to read again
+        // (fix round 1 M2).
+        if let Some(ReadFor::Takes(doc)) = self.reads.waiting.remove(&ticket)
+            && let Some(d) = self.documents.get_mut(&doc)
+        {
+            d.lose_growing_read();
+        }
     }
 
     /// Whether windows wait to open ([`DocumentStore::take_pending`]) or
@@ -1117,11 +1123,27 @@ impl DocumentStore {
     /// A read's answer: applied when the store still wants it; an
     /// answer for a document that closed, or older than a newer read of
     /// the same sheet, is dropped.
-    pub fn land(&mut self, landed: Landed) {
+    ///
+    /// True when the windows should redraw: a take read that changed
+    /// nothing held does not ask (fix round 1 I1(a)).
+    pub fn land(&mut self, landed: Landed) -> bool {
         let Some(purpose) = self.reads.waiting.remove(&landed.ticket) else {
-            return;
+            return false;
         };
         match (purpose, landed.answer) {
+            (ReadFor::Takes(doc), ReadAnswer::Takes(r)) => self
+                .documents
+                .get_mut(&doc)
+                .is_some_and(|d| d.land_growing_read(r)),
+            (purpose, answer) => {
+                self.land_answer(purpose, answer);
+                true
+            }
+        }
+    }
+
+    fn land_answer(&mut self, purpose: ReadFor, answer: ReadAnswer) {
+        match (purpose, answer) {
             (ReadFor::InputSources(doc), ReadAnswer::Sources(r)) => {
                 if let Some(d) = self.documents.get_mut(&doc)
                     && d.inputs.land_sources(&r)
@@ -1133,11 +1155,6 @@ impl DocumentStore {
             (ReadFor::Waves(doc), ReadAnswer::Waves(r)) => {
                 if let Some(d) = self.documents.get_mut(&doc) {
                     d.land_waves(r);
-                }
-            }
-            (ReadFor::Takes(doc), ReadAnswer::Takes(r)) => {
-                if let Some(d) = self.documents.get_mut(&doc) {
-                    d.land_growing_read(r);
                 }
             }
             (ReadFor::OpenDawproject(path), ReadAnswer::Dawproject(r)) => {

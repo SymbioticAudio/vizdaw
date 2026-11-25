@@ -6,7 +6,9 @@
 
 mod support;
 
+use std::cell::Cell;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use support::{FakeSession, demo_fake, lane_row};
 use vizdaw_app::DocumentModel;
@@ -75,10 +77,26 @@ fn recording(punch_end: Option<i64>) -> (Arc<FakeSession>, DocumentModel) {
     (f, m)
 }
 
+thread_local! {
+    static CLOCK: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+/// The poll's clock: a fifth of a second later each call (past the
+/// take reads' least interval).
+fn tick() -> Instant {
+    CLOCK.with(|c| {
+        let next = c
+            .get()
+            .map_or_else(Instant::now, |t| t + Duration::from_millis(200));
+        c.set(Some(next));
+        next
+    })
+}
+
 /// One record poll, its pieces' read run on another thread and landed
 /// (the store's part).
 fn poll(m: &mut DocumentModel) {
-    m.poll_record();
+    m.poll_record_at(tick());
     if let Some(r) = m.take_growing_read() {
         let reply = std::thread::spawn(move || r.run()).join().unwrap();
         m.land_growing_read(reply);
@@ -331,15 +349,15 @@ fn the_pieces_are_read_off_the_ui_thread_one_read_at_a_time() {
         axis: TimeAxis::default(),
         width: 800.,
     });
-    m.poll_record();
+    m.poll_record_at(tick());
     assert_eq!(f.reads("recording_waveform"), 0, "no read in the poll");
     let first = m.take_growing_read().expect("a read to run");
-    m.poll_record();
+    m.poll_record_at(tick());
     assert!(m.take_growing_read().is_none(), "one read out at a time");
     let reply = std::thread::spawn(move || first.run()).join().unwrap();
     assert!(m.land_growing_read(reply));
     assert!(!m.held_takes()[0].pieces.is_empty());
-    m.poll_record();
+    m.poll_record_at(tick());
     let late = m.take_growing_read().expect("the next read");
     m.toggle_record().unwrap();
     let reply = std::thread::spawn(move || late.run()).join().unwrap();
@@ -376,4 +394,97 @@ fn the_store_runs_the_pieces_read() {
     let held = store.document(id).unwrap().held_takes();
     assert_eq!(held.len(), 1);
     assert_eq!(held[0].pieces.len(), f.reads("recording_waveform"));
+}
+
+fn view() -> TakeView {
+    TakeView {
+        axis: TimeAxis::default(),
+        width: 800.,
+    }
+}
+
+/// Fix round 1 I1(b): take reads start at most ten times a second, however
+/// often the poll runs (control waits poll at the 16 ms pump).
+#[test]
+fn take_reads_start_at_most_ten_times_a_second() {
+    let (_f, mut m) = recording(None);
+    m.set_take_view(view());
+    let t0 = Instant::now();
+    m.poll_record_at(t0);
+    let r = m.take_growing_read().expect("the first read");
+    m.land_growing_read(r.run());
+    m.poll_record_at(t0 + Duration::from_millis(16));
+    assert!(m.take_growing_read().is_none(), "16 ms later: none");
+    m.poll_record_at(t0 + Duration::from_millis(66));
+    assert!(m.take_growing_read().is_none(), "66 ms later: none");
+    m.poll_record_at(t0 + Duration::from_millis(100));
+    assert!(m.take_growing_read().is_some(), "100 ms later: the next");
+}
+
+/// Fix round 1 I1(c): the take counts as changed only when it grows by a
+/// whole point on the view (600 frames at 384 ticks a point, 48 kHz).
+#[test]
+fn the_take_changes_only_when_it_grows_a_whole_point() {
+    let (f, mut m) = recording(None);
+    m.set_take_view(view());
+    let t0 = Instant::now();
+    assert!(m.poll_growing_takes_at(t0), "the take appears");
+    f.with_pass(|r| r.frames += 300);
+    m.refresh_record(false);
+    assert!(!m.poll_growing_takes_at(t0), "half a point: no redraw");
+    assert_eq!(m.held_takes()[0].take.to_frame, 192_300, "still held");
+    f.with_pass(|r| r.frames += 300);
+    m.refresh_record(false);
+    assert!(m.poll_growing_takes_at(t0), "a whole point");
+}
+
+fn store_recording() -> (
+    Arc<FakeSession>,
+    vizdaw_app::DocumentStore,
+    vizdaw_app::DocId,
+) {
+    let (f, m) = recording(None);
+    drop(m);
+    let shared = f.clone();
+    let mut store = vizdaw_app::DocumentStore::new(
+        Box::new(|| Ok(Arc::new(FakeSession::new(vec![])))),
+        Box::new(move || Ok(shared.clone())),
+        Box::new(|_| Ok(Arc::new(demo_fake()))),
+    );
+    let id = store.new_demo().unwrap();
+    store.with_document(id, |d, _| {
+        d.select(Some(3));
+        d.refresh_project_info();
+        d.refresh_record(false);
+        d.set_take_view(view());
+        d.poll_record_at(tick());
+    });
+    (f, store, id)
+}
+
+/// Fix round 1 I1(a): a landed take read redraws only when it changed
+/// what is held.
+#[test]
+fn a_take_read_that_changes_nothing_asks_no_redraw() {
+    let (_f, mut store, id) = store_recording();
+    let read = store.take_reads().pop().expect("the take read");
+    assert!(store.land(read.run()), "new rows: redraw");
+    store.with_document(id, |d, _| {
+        d.poll_record_at(tick());
+    });
+    let read = store.take_reads().pop().expect("the next read");
+    assert!(!store.land(read.run()), "the same rows: no redraw");
+}
+
+/// Fix round 1 M2: a read that never lands (it panicked) is cancelled,
+/// and the next poll reads again.
+#[test]
+fn a_cancelled_take_read_lets_the_next_poll_read() {
+    let (_f, mut store, id) = store_recording();
+    let read = store.take_reads().pop().expect("the take read");
+    store.cancel_read(read.ticket());
+    store.with_document(id, |d, _| {
+        d.poll_record_at(tick());
+    });
+    assert_eq!(store.take_reads().len(), 1, "read again");
 }

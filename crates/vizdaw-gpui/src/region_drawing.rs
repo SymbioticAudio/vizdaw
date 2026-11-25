@@ -12,7 +12,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, BorderStyle, ContentMask, Hsla, PathBuilder, Pixels, Window, fill, point, px, quad,
+    App, BorderStyle, ContentMask, FillOptions, FillRule, Hsla, PathBuilder, PathStyle, Pixels,
+    Window, fill, point, px, quad,
 };
 use vizdaw_app::arrangement::{Point, Rect};
 use vizdaw_ffi::events::EventRow;
@@ -182,10 +183,26 @@ pub fn paint_waveform(
     ) {
         return;
     }
-    // One path for all the bars, a run of equal bars as one rectangle: a
-    // quad per bar costs too much per frame while a take grows (plan 8c
-    // Task 5).
-    let mut p = PathBuilder::fill();
+    if let Some(p) = waveform_path(rows, wave, o)
+        && let Ok(path) = p.build()
+    {
+        window.paint_path(path, colour);
+    }
+}
+
+/// The path [`paint_waveform`] fills: every bar, a run of equal bars as
+/// one rectangle; `None` with no bars. One path, not a quad per bar: a
+/// quad per bar costs too much per frame while a take grows (plan 8c
+/// Task 5). Bars narrower than half a point overlap, so it fills by the
+/// non-zero rule: their union, never holes.
+pub fn waveform_path(
+    rows: &OverviewRows,
+    wave: Rect,
+    o: gpui::Point<Pixels>,
+) -> Option<PathBuilder> {
+    let mut p = PathBuilder::fill().with_style(PathStyle::Fill(FillOptions {
+        fill_rule: FillRule::NonZero,
+    }));
     let mut any = false;
     for b in merge_runs(waveform_bars(rows, wave)) {
         let (x0, y0) = (o.x + px(b.x), o.y + px(b.y));
@@ -196,9 +213,7 @@ pub fn paint_waveform(
         );
         any = true;
     }
-    if any && let Ok(path) = p.build() {
-        window.paint_path(path, colour);
-    }
+    any.then_some(p)
 }
 
 /// `bars` with each run of side-by-side bars of the same top and height
@@ -225,8 +240,9 @@ pub(crate) struct RegionDraw {
     pub(crate) rect: Rect,
     pub(crate) offline: bool,
     pub(crate) selected: bool,
-    /// The rows held and the rect they cover.
-    pub(crate) wave: Option<(Rect, Arc<OverviewRows>)>,
+    /// The rows held and the rects they cover (one, or the pieces of the
+    /// take Stop placed here until the region's own rows are held).
+    pub(crate) wave: Vec<(Rect, Arc<OverviewRows>)>,
 }
 
 fn stroke(lines: &[(Point, Point)], o: gpui::Point<Pixels>, colour: Hsla, window: &mut Window) {
@@ -271,14 +287,16 @@ pub(crate) fn paint_region(
                 hsla(colors::OFFLINE, colors::OFFLINE_HATCH_ALPHA),
                 window,
             );
-        } else if let Some((wave, rows)) = &d.wave {
-            paint_waveform(
-                rows,
-                *wave,
-                o,
-                hsla(colors::REGION_LINE, colors::WAVEFORM_ALPHA),
-                window,
-            );
+        } else {
+            for (wave, rows) in &d.wave {
+                paint_waveform(
+                    rows,
+                    *wave,
+                    o,
+                    hsla(colors::REGION_LINE, colors::WAVEFORM_ALPHA),
+                    window,
+                );
+            }
         }
         stroke(
             &fade_lines(&d.row, r),

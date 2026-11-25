@@ -44,11 +44,11 @@ use vizdaw_app::editor::{DetailEditorKind, Division, EditorTarget, Snap, Tool};
 use vizdaw_app::growing_take::{GrowingTake, HeldPiece, TakeView};
 use vizdaw_app::region_waves::{RegionWant, Slice, WaveLook, WaveState};
 use vizdaw_app::transport::TransportModel;
-use vizdaw_ffi::OverviewRows;
 use vizdaw_ffi::blocks::{BlockKind, BlockRow};
 use vizdaw_ffi::edit::{EditCommand, EventEdit};
 use vizdaw_ffi::events::{EventKindRow, EventRow};
 use vizdaw_ffi::selection::TickRange;
+use vizdaw_ffi::{OverviewRows, OverviewStateRow};
 
 use crate::region_drawing::{RegionDraw, paint_region, paint_waveform, wave_rect};
 use crate::registry::{ChildRecorder, RegistryScope};
@@ -151,6 +151,8 @@ pub struct Arrangement {
     playhead: Rc<Cell<Option<f32>>>,
     /// The waveforms the last frame drew: a test seam.
     drawn: Rc<RefCell<Vec<DrawnWave>>>,
+    /// Whether frames keep `drawn` (tests only).
+    keep_drawn: Rc<Cell<bool>>,
     rows_built: Cell<usize>,
     _auto_scroll: Option<Task<()>>,
     /// Presses below the ruler (Swift `ToolMachine`).
@@ -195,6 +197,7 @@ impl Arrangement {
             layout: Rc::default(),
             playhead: Rc::default(),
             drawn: Rc::default(),
+            keep_drawn: Rc::default(),
             rows_built: Cell::new(0),
             _auto_scroll: None,
             machine: ToolMachine::new(),
@@ -246,6 +249,13 @@ impl Arrangement {
     #[doc(hidden)]
     pub fn rows_built(&self) -> usize {
         self.rows_built.get()
+    }
+
+    /// Keeps the waveforms the next frames draw for
+    /// [`Self::drawn_waves`]: a test seam (normal frames keep none).
+    #[doc(hidden)]
+    pub fn keep_drawn_waves(&self) {
+        self.keep_drawn.set(true);
     }
 
     /// The waveforms the last frame drew, takes first, in canvas points:
@@ -352,6 +362,7 @@ impl Arrangement {
         let layout = self.layout.clone();
         let playhead = self.playhead.clone();
         let drawn = self.drawn.clone();
+        let keep_drawn = self.keep_drawn.clone();
         let weak = cx.entity().downgrade();
         let grown = weak.clone();
         let painter = canvas(
@@ -380,7 +391,9 @@ impl Arrangement {
                 }
                 let mut prepared = view.prepare(&state, bounds, &mut recorder);
                 playhead.set(prepared.time.playhead);
-                *drawn.borrow_mut() = prepared.drawn_waves();
+                if keep_drawn.get() {
+                    *drawn.borrow_mut() = prepared.drawn_waves();
+                }
                 // The waveforms not held yet are asked for after the
                 // frame, off the UI thread (render reads none).
                 let wants = std::mem::take(&mut prepared.wants);
@@ -828,11 +841,13 @@ pub struct RowState {
     pub regions: Vec<RegionState>,
 }
 
-/// An audio region as drawn: its row, its name and its waveform.
+/// An audio region as drawn: its row, its name and its waveform (and,
+/// placed by Stop, the take's last rows until its own are held).
 pub struct RegionState {
     pub row: EventRow,
     pub name: String,
     pub look: WaveLook,
+    pub handover: Option<Arc<[HeldPiece]>>,
 }
 
 impl ArrangementState {
@@ -909,6 +924,7 @@ impl ArrangementState {
                             row: e.clone(),
                             name: region_name(e, file),
                             look: doc.region_wave_in(e, rows, axis.ticks_per_point()),
+                            handover: doc.handed_over_take(l.id, e.tick),
                         }
                     })
                     .collect();
@@ -1277,10 +1293,31 @@ impl Scene {
                 });
             }
         }
-        let wave = r.look.held.as_ref().filter(|_| !offline).map(|h| {
-            let w = wave_rect(rect, axis.x(h.slice.from_tick), axis.x(h.slice.to_tick));
-            (w, h.rows.clone())
-        });
+        let drawable = |rows: &OverviewRows| {
+            matches!(
+                rows.state,
+                OverviewStateRow::Ready | OverviewStateRow::Coarse
+            )
+        };
+        let wave = match r.look.held.as_ref().filter(|h| drawable(&h.rows)) {
+            _ if offline => vec![],
+            Some(h) => vec![(
+                wave_rect(rect, axis.x(h.slice.from_tick), axis.x(h.slice.to_tick)),
+                h.rows.clone(),
+            )],
+            // Placed by Stop, its own rows not held yet: the take's.
+            None => r
+                .handover
+                .iter()
+                .flat_map(|pieces| pieces.iter())
+                .map(|p| {
+                    (
+                        wave_rect(rect, axis.x(p.from_tick), axis.x(p.to_tick)),
+                        p.rows.clone(),
+                    )
+                })
+                .collect(),
+        };
         Some(RegionDraw {
             row: e.clone(),
             rect,
@@ -1333,8 +1370,8 @@ impl Prepared {
             })
         });
         let regions = self.blocks.iter().flat_map(|b| {
-            b.regions.iter().filter_map(|r| {
-                r.wave.as_ref().map(|(wave, rows)| DrawnWave {
+            b.regions.iter().flat_map(|r| {
+                r.wave.iter().map(|(wave, rows)| DrawnWave {
                     kind: "region",
                     wave: *wave,
                     rows: rows.clone(),

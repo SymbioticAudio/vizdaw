@@ -1656,7 +1656,12 @@ impl Setup {
         self.cx.run_until_parked();
     }
 
+    /// The waveforms the next frame draws (the seam kept for it).
     fn drawn_waves(&mut self) -> Vec<DrawnWave> {
+        self.window
+            .read_with(&self.cx, |v, _| v.arrangement().keep_drawn_waves())
+            .unwrap();
+        self.redraw(1);
         self.window
             .read_with(&self.cx, |v, _| v.arrangement().drawn_waves())
             .unwrap()
@@ -1764,5 +1769,71 @@ fn equal_bars_side_by_side_join() {
     assert_eq!(
         merge_runs(bars),
         vec![r(0., 5., 30., 10.), r(30., 0., 10., 10.)]
+    );
+}
+
+/// Fix round 1 I1(e): normal frames keep no test bookkeeping.
+#[gpui::test]
+fn frames_keep_no_drawn_waves_unless_asked(cx: &mut TestAppContext) {
+    let mut s = armed_vox(cx);
+    s.fake.set_recording_waveform(take_rows(40));
+    s.written(24_000);
+    assert!(s.find("image", RECORDING_TAKE).is_some());
+    let kept = s
+        .window
+        .read_with(&s.cx, |v, _| v.arrangement().drawn_waves())
+        .unwrap();
+    assert!(kept.is_empty(), "{kept:?}");
+}
+
+/// Fix round 1 M3: the region's first frame after Stop, before its own
+/// read lands (a new file answers `Pending`), draws the take's last rows
+/// in its place: the same bars just before and after Stop.
+#[gpui::test]
+fn the_regions_first_frame_after_stop_draws_the_takes_bars(cx: &mut TestAppContext) {
+    let mut s = armed_vox(cx);
+    s.fake.set_recording_waveform(take_rows(60));
+    s.written(36_000);
+    let take: Vec<DrawnWave> = s
+        .drawn_waves()
+        .into_iter()
+        .filter(|w| w.kind == "take")
+        .collect();
+    assert_eq!(take.len(), 1, "{take:?}");
+    let mut region = audio_region(KICK, 0, 23_040, 5);
+    region.frames = 36_000;
+    s.fake
+        .set_blocks(3, VOX, vec![events_block(0, 23_040, &[KICK])]);
+    s.fake.set_events(3, VOX, vec![region]);
+    // No scripted overview: the core answers `Pending` for the new file.
+    s.cx.dispatch_action(RunCommand::new("transport.record"));
+    s.cx.run_until_parked();
+    let label = "Region kick.wav on Vox, bar 1, gain 0.0 dB";
+    assert_eq!(s.value("button", label).as_deref(), Some("pending"));
+    let after = s.drawn_waves();
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(after[0].kind, "region");
+    assert_eq!(after[0].wave, take[0].wave);
+    assert_eq!(
+        waveform_bars(&after[0].rows, after[0].wave),
+        waveform_bars(&take[0].rows, take[0].wave),
+        "the take's bars until the region's own land"
+    );
+}
+
+/// Fix round 1 M1: bars narrower than half a point overlap; the one path
+/// fills their union (non-zero), never holes where two overlap.
+#[test]
+fn overlapping_bars_fill_as_their_union() {
+    use gpui::{FillRule, PathStyle, point, px};
+    use vizdaw_gpui::region_drawing::waveform_path;
+    let rows = rows(1, &[-0.5, -0.2, -0.5, -0.1], &[0.5, 0.2, 0.5, 0.9]);
+    let wave = r(0., 0., 1., 20.);
+    let bars = waveform_bars(&rows, wave);
+    assert!(bars[0].max_x() > bars[1].x, "they overlap: {bars:?}");
+    let path = waveform_path(&rows, wave, point(px(0.), px(0.))).expect("a path");
+    assert!(
+        matches!(&path.style, PathStyle::Fill(o) if o.fill_rule == FillRule::NonZero),
+        "non-zero fill"
     );
 }

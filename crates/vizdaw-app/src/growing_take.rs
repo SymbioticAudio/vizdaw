@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use vizdaw_ffi::OverviewRows;
 
@@ -24,6 +25,9 @@ pub const PIECE_WIDTH: f32 = 64.;
 pub const MAX_PIECES: usize = 32;
 /// The core's column limit for one request, shared by the pieces.
 pub const MAX_COLUMNS: u32 = 8192;
+/// The least time between two take reads' starts: about ten a second,
+/// however often the poll runs (fix round 1 I1(b)).
+pub const READ_EVERY: Duration = Duration::from_millis(100);
 
 /// A take being written, where the arrangement draws it: its span in the
 /// sequence and the file frames that fill it.
@@ -156,6 +160,12 @@ pub struct GrowingRows {
     /// refresh, never queues reads up).
     in_flight: Option<u64>,
     pending: Option<TakeRead>,
+    /// When the last read started (at most one per [`READ_EVERY`]).
+    last_read: Option<Instant>,
+    /// The takes as held at Stop, and the snapshot version Stop landed:
+    /// the placed regions draw them until their own rows are held (fix
+    /// round 1 M3).
+    handover: Option<(u64, Vec<HeldTake>)>,
 }
 
 impl Clone for GrowingRows {
@@ -169,6 +179,8 @@ impl Clone for GrowingRows {
             next_ticket: self.next_ticket,
             in_flight: self.in_flight,
             pending: None,
+            last_read: self.last_read,
+            handover: self.handover.clone(),
         }
     }
 }
@@ -181,6 +193,7 @@ impl GrowingRows {
         self.rows.clear();
         self.pending = None;
         self.in_flight = None;
+        self.last_read = None;
         self.pass += 1;
     }
 }
@@ -433,11 +446,42 @@ impl DocumentModel {
             .collect()
     }
 
-    /// The record poll's part for the takes: while a pass records, each
-    /// shown track's take, and a read of its visible pieces'
-    /// `recording_waveform` rows for the store to run off the UI thread
-    /// (unless one is still out). True when where a take is changed.
-    pub(crate) fn poll_growing_takes(&mut self) -> bool {
+    /// The record poll's part for the takes (the poll's clock `now`):
+    /// while a pass records, each shown track's take, and a read of its
+    /// visible pieces' `recording_waveform` rows for the store to run off
+    /// the UI thread, unless one is still out or one started less than
+    /// [`READ_EVERY`] ago. True when a take appeared, went, or grew by a
+    /// whole point on the view (a redraw).
+    /// The rows a region placed by Stop draws until its own are held: the
+    /// last rows of the take on `lane` that started at the region's tick,
+    /// while the snapshot is still the one Stop landed (the owner's ruling:
+    /// the take looks the same just before and after Stop).
+    pub fn handed_over_take(&self, lane: u64, region_tick: i64) -> Option<Arc<[HeldPiece]>> {
+        let (version, takes) = self.record.growing.handover.as_ref()?;
+        if *version != self.snapshot().version {
+            return None;
+        }
+        takes
+            .iter()
+            .find(|h| h.take.lane == lane && h.take.start_tick == region_tick)
+            .map(|h| h.pieces.clone())
+            .filter(|p| !p.is_empty())
+    }
+
+    /// The pass ended: its takes and rows go, kept for the placed regions
+    /// to draw until theirs land (`version`: the snapshot Stop landed).
+    pub(crate) fn hand_over_takes(&mut self, before: Vec<HeldTake>) {
+        let version = self.snapshot().version;
+        self.record.growing.handover = (!before.is_empty()).then_some((version, before));
+    }
+
+    /// A take read that will never land (it panicked) is forgotten: the
+    /// next poll reads again.
+    pub fn lose_growing_read(&mut self) {
+        self.record.growing.in_flight = None;
+    }
+
+    pub fn poll_growing_takes_at(&mut self, now: Instant) -> bool {
         let shown: Vec<u64> = self.lanes().iter().map(|l| l.id).collect();
         let takes: Vec<GrowingTake> = if self.record.is_recording() {
             self.growing_takes()
@@ -449,7 +493,13 @@ impl DocumentModel {
         };
         let g = &self.record.growing;
         let read = match g.view {
-            Some(v) if g.in_flight.is_none() && g.pending.is_none() && !takes.is_empty() => {
+            Some(v)
+                if g.in_flight.is_none()
+                    && g.pending.is_none()
+                    && !takes.is_empty()
+                    && g.last_read
+                        .is_none_or(|t| now.saturating_duration_since(t) >= READ_EVERY) =>
+            {
                 let asks: Vec<TakeAsk> = takes
                     .iter()
                     .map(|t| TakeAsk {
@@ -464,6 +514,7 @@ impl DocumentModel {
         let session = self.session.clone();
         let g = &mut self.record.growing;
         if let Some(asks) = read {
+            g.last_read = Some(now);
             let ticket = g.next_ticket;
             g.next_ticket += 1;
             g.pending = Some(TakeRead {
@@ -475,7 +526,18 @@ impl DocumentModel {
         }
         g.rows
             .retain(|lane, _| takes.iter().any(|t| t.lane == *lane));
-        let changed = g.takes != takes;
+        let span = |ts: &[GrowingTake]| -> Vec<(u64, i64, i64)> {
+            ts.iter()
+                .map(|t| match g.view {
+                    Some(v) => {
+                        let (x, w) = t.x_span(&v.axis);
+                        (t.lane, x.floor() as i64, (x + w).floor() as i64)
+                    }
+                    None => (t.lane, t.start_tick, t.end_tick),
+                })
+                .collect()
+        };
+        let changed = span(&g.takes) != span(&takes);
         g.takes = takes;
         changed
     }

@@ -571,9 +571,12 @@ impl DocumentModel {
                 let ended = self.record.is_recording() && !s.recording;
                 self.record.state = Some(s);
                 if ended {
-                    // The take's rows go at Stop: the placed region draws it.
+                    // The take's rows go at Stop: the placed region draws
+                    // it, from them until its own rows are held.
+                    let last = self.held_takes();
                     self.record.growing.clear_takes();
                     self.take_landed_snapshot();
+                    self.hand_over_takes(last);
                 }
             }
             Err(VizError::Busy { .. }) => {}
@@ -601,6 +604,12 @@ impl DocumentModel {
     /// ([`DocumentModel::poll_growing_takes`]), and a held recovery offer
     /// shown again. True when what the window shows changed.
     pub fn poll_record(&mut self) -> bool {
+        self.poll_record_at(std::time::Instant::now())
+    }
+
+    /// [`Self::poll_record`] on the poll's clock `now` (the take reads'
+    /// least interval follows it).
+    pub fn poll_record_at(&mut self, now: std::time::Instant) -> bool {
         let t = self.last_transport();
         let mut changed = false;
         if t.playing || t.counting_in || self.record.is_recording() {
@@ -609,7 +618,7 @@ impl DocumentModel {
             changed = before != self.record.state;
         }
         if self.record.is_recording() || !self.held_takes().is_empty() {
-            changed |= self.poll_growing_takes();
+            changed |= self.poll_growing_takes_at(now);
         }
         self.reoffer_if_held() || changed
     }
