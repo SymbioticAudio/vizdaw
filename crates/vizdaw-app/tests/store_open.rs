@@ -44,6 +44,15 @@ fn format(rate: u32, depth: BitDepthRow) -> ProjectFormatRow {
     }
 }
 
+/// The core's calls but the Software Monitoring reads (each new document
+/// reads it for its meters).
+fn made_calls(core: &FakeCore) -> Vec<String> {
+    core.calls()
+        .into_iter()
+        .filter(|c| c != "audio_settings")
+        .collect()
+}
+
 /// A store over a fake core.
 fn store() -> (DocumentStore, Arc<FakeCore>) {
     let core = Arc::new(FakeCore::new());
@@ -152,7 +161,7 @@ fn the_demo_with_audio_is_its_own_constructor() {
     let (mut s, core) = store();
     let id = s.new_demo_audio().unwrap();
     assert_eq!(s.document(id).unwrap().snapshot().sequences.len(), 3);
-    assert_eq!(core.calls(), ["new_demo_audio"]);
+    assert_eq!(made_calls(&core), ["new_demo_audio"]);
     core.fail_next(
         "new_demo_audio",
         VizError::Io {
@@ -310,7 +319,7 @@ fn a_co_producer_copy_opens_as_a_new_project() {
         panic!("not opened");
     };
     assert_eq!(
-        core.calls(),
+        made_calls(&core),
         ["open_copy(/m/Song.vizdaw/Co-Producer/Copies/Take.vizdaw)"]
     );
     assert!(s.open_copy(copy).is_ok());
@@ -865,7 +874,7 @@ fn a_clean_project_opens_without_questions() {
     assert!(matches!(s.open(Path::new(SONG)), Ok(Opened::Doc(_))));
     assert!(s.open_question().is_none());
     assert_eq!(
-        core.calls(),
+        made_calls(&core),
         ["recovery_check(/p/Song.vizdaw)", "open(/p/Song.vizdaw)"]
     );
 }

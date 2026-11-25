@@ -198,15 +198,21 @@ impl TransportModel {
 
     /// [`Self::poll`] for document `doc` of `store`: after a good read,
     /// the document's record state (while playing, recording or counting
-    /// in) and a held recovery offer. True when what its windows show
+    /// in) and a held recovery offer; after any read, the input meters
+    /// ([`DocumentModel::poll_meters`]). True when what its windows show
     /// changed beyond the transport (see [`DocumentModel::poll_record`]).
     pub fn poll_document(&mut self, store: &mut DocumentStore, doc: DocId) -> (PollResult, bool) {
         let result = self.poll(store);
-        let changed = result == PollResult::Updated
+        let recorded = result == PollResult::Updated
             && store
                 .with_document(doc, |d, _| d.poll_record())
                 .unwrap_or(false);
-        (result, changed)
+        // The meters read the input, not the transport: they poll whatever
+        // the transport read did (Swift `metersPollWhileTheTransportReadFails`).
+        let metered = store
+            .with_document(doc, |d, _| d.poll_meters(Instant::now()))
+            .unwrap_or(false);
+        (result, recorded || metered)
     }
 
     /// The readouts of `doc`'s transport: tempo and meter come from the

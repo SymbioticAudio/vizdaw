@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use core_model::automation::{fader_db, fader_norm, pan_norm, pan_of};
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::automation::{AutomationModeRow, GestureHolderRow, GesturePhaseRow};
-use vizdaw_ffi::edit::{EditCommand, LaneEdit, MonitorModeRow};
+use vizdaw_ffi::edit::{EditCommand, LaneEdit};
 use vizdaw_ffi::events::AutomationTargetRow;
 use vizdaw_ffi::mixer::{
     BusRow, DestRow, MixerSnapshot, StripKindRow, StripRow, SwatchRow, VcaRow,
@@ -1226,25 +1226,7 @@ impl MixerModel {
     }
 }
 
-/// The input monitor's next mode: Auto, Input, Off, Auto.
-pub fn next_monitor(m: MonitorModeRow) -> MonitorModeRow {
-    match m {
-        MonitorModeRow::Auto => MonitorModeRow::Input,
-        MonitorModeRow::Input => MonitorModeRow::Off,
-        MonitorModeRow::Off => MonitorModeRow::Auto,
-    }
-}
-
-/// The input monitor's help for mode `m` (Swift `LaneInputs.help`).
-pub fn monitor_help(m: MonitorModeRow) -> &'static str {
-    match m {
-        MonitorModeRow::Auto => {
-            "Input monitoring: Auto (heard while armed and stopped, or recording in range)"
-        }
-        MonitorModeRow::Input => "Input monitoring: always the input",
-        MonitorModeRow::Off => "Input monitoring: off",
-    }
-}
+pub use crate::lane_inputs::{monitor_help, next_monitor};
 
 /// A send's position as the automation target spells it (0-based).
 pub fn send_index(index: usize) -> u16 {

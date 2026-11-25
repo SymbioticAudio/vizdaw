@@ -348,6 +348,7 @@ pub struct Landed {
 }
 
 enum ReadAnswer {
+    Sources(crate::lane_inputs::SourcesRead),
     Dawproject(Result<DawprojectInfoRow, VizError>),
     Aaf(Result<AafInfoRow, VizError>),
     Midi(Result<MidiFileInfoRow, VizError>),
@@ -355,6 +356,11 @@ enum ReadAnswer {
 
 /// What a read was for.
 pub(super) enum ReadFor {
+    /// The input picker's sources of document `doc` (its generation is in
+    /// the answer).
+    InputSources(DocId),
+    /// The launch warm-up of the picker's sources.
+    WarmSources,
     OpenDawproject(String),
     OpenAaf(String),
     /// The Import AAF sheet's read of document `doc`, the `generation`th.
@@ -968,6 +974,50 @@ impl DocumentStore {
         }
     }
 
+    /// A picker of document `doc` opens: the engine's input is read now,
+    /// and the MIDI sources (and the device's channels while the engine's
+    /// input is closed) off the UI thread. Only the newest read lands.
+    pub fn refresh_inputs(&mut self, doc: DocId) {
+        if let Some(d) = self.documents.get_mut(&doc) {
+            d.refresh_input_info();
+        }
+        self.start_source_read(doc);
+    }
+
+    /// Runs document `doc`'s waiting source read off the UI thread.
+    pub(crate) fn start_source_read(&mut self, doc: DocId) {
+        let Some(r) = self
+            .documents
+            .get_mut(&doc)
+            .and_then(|d| d.inputs.take_source_read())
+        else {
+            return;
+        };
+        self.read(ReadFor::InputSources(doc), move || {
+            ReadAnswer::Sources(r.run())
+        });
+    }
+
+    /// Reads the MIDI sources and the device's channels once, off the UI
+    /// thread, for the documents opened from now on (the app at launch;
+    /// Swift `warmSources`).
+    pub fn warm_sources(&mut self) {
+        let r = crate::lane_inputs::SourceRead::warm(self.core.clone());
+        self.read(ReadFor::WarmSources, move || ReadAnswer::Sources(r.run()));
+    }
+
+    /// The picker's sources new documents start with.
+    pub fn input_sources(&self) -> &crate::lane_inputs::InputSources {
+        &self.input_sources
+    }
+
+    fn keep_sources(&mut self, r: crate::lane_inputs::SourcesRead) {
+        self.input_sources.midi = r.midi;
+        if let Some(device) = r.device {
+            self.input_sources.device = device;
+        }
+    }
+
     /// Where reads run from now on (GPUI: its background executor, landing
     /// on the main thread); without one they wait in
     /// [`DocumentStore::take_reads`].
@@ -1020,6 +1070,14 @@ impl DocumentStore {
             return;
         };
         match (purpose, landed.answer) {
+            (ReadFor::InputSources(doc), ReadAnswer::Sources(r)) => {
+                if let Some(d) = self.documents.get_mut(&doc)
+                    && d.inputs.land_sources(&r)
+                {
+                    self.keep_sources(r);
+                }
+            }
+            (ReadFor::WarmSources, ReadAnswer::Sources(r)) => self.keep_sources(r),
             (ReadFor::OpenDawproject(path), ReadAnswer::Dawproject(r)) => {
                 self.dawproject_read(path, r)
             }

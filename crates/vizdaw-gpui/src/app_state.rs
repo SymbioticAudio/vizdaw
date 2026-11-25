@@ -333,6 +333,13 @@ impl AppState {
         }
     }
 
+    /// Reads the input picker's sources once, off the UI thread, for the
+    /// documents opened from now on (the app at launch; Swift
+    /// `warmSources`).
+    pub fn warm_sources(&mut self) {
+        self.store.warm_sources();
+    }
+
     /// Polls `doc`'s transport; true when what the window shows changed.
     pub fn poll(&mut self, doc: DocId) -> bool {
         let idled = self.idle(doc);

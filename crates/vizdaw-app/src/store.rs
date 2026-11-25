@@ -121,6 +121,9 @@ pub struct DocumentStore {
     reads: opening::Reads,
     shift_held: Box<dyn Fn() -> bool>,
     disable_plugins: opening::DisablePlugins,
+    /// The picker's sources as any document (or the launch warm-up) last
+    /// read them: a new document's first picker lists them.
+    input_sources: crate::lane_inputs::InputSources,
 }
 
 impl DocumentStore {
@@ -158,6 +161,7 @@ impl DocumentStore {
             reads: opening::Reads::default(),
             shift_held: Box::new(|| false),
             disable_plugins: Box::new(move |p| disabling.disable_plugins(p).is_ok()),
+            input_sources: crate::lane_inputs::InputSources::default(),
         }
     }
 
@@ -198,6 +202,9 @@ impl DocumentStore {
         let result = f(&mut doc, self);
         let alert = doc.alert.take();
         self.documents.insert(id, doc);
+        // A picker refresh `f` asked for reads its sources off the UI
+        // thread.
+        self.start_source_read(id);
         if let Some(alert) = alert {
             self.post_document_alert(id, alert);
         }
@@ -233,7 +240,8 @@ impl DocumentStore {
     ) -> Option<DocId> {
         let made = make(self).and_then(DocumentModel::new);
         match made {
-            Ok(model) => {
+            Ok(mut model) => {
+                model.inputs.attach(self.core.clone(), &self.input_sources);
                 let id = DocId(self.next_id);
                 self.next_id += 1;
                 self.documents.insert(id, model);

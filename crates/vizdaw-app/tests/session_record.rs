@@ -729,3 +729,41 @@ fn a_held_source_read_finishes_after_a_later_one() {
         "a released hold waits not"
     );
 }
+
+// ---- The track input edits' undo names (slice 8c Task 2) ---------------
+
+/// The core names the input and monitor edits' undo steps, and the fake
+/// names them alike (`lane.set_input` / `lane.set_monitor`, the picker,
+/// the monitor button).
+#[test]
+fn the_core_names_the_input_and_monitor_edits() {
+    let _one = offline();
+    let s = LiveCore.new_demo_audio().unwrap();
+    let seq = song(&*s);
+    let lp = lane_id(&*s, seq, "Loop");
+    let input = s
+        .edit(EditCommand::Lane {
+            edit: LaneEdit::SetInput {
+                seq,
+                lane: lp,
+                input: Some(LaneInputRow::Audio {
+                    first: 1,
+                    stereo: false,
+                    return_of: None,
+                }),
+            },
+        })
+        .unwrap();
+    assert_eq!(input.undo_label.as_deref(), Some("Set Track Input"));
+    let monitor = s
+        .edit(EditCommand::Lane {
+            edit: LaneEdit::SetMonitor {
+                seq,
+                lane: lp,
+                monitor: vizdaw_ffi::edit::MonitorModeRow::Input,
+            },
+        })
+        .unwrap();
+    assert_eq!(monitor.undo_label.as_deref(), Some("Set Track Monitor"));
+    let _ = s.close();
+}

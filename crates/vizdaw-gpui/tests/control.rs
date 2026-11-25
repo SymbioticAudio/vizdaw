@@ -2620,6 +2620,129 @@ fn state_get_input_reads_the_input(cx: &mut TestAppContext) {
     assert_eq!(again["levels"], json!([0.0, 0.0, 0.0]), "{again}");
 }
 
+/// `state.get input` and the header meters both see a scripted peak: one
+/// core read (which resets the core's peaks) feeds both holds, whichever
+/// reader comes first (slice 8c Task 2; 8a Task 6 carry).
+#[gpui::test]
+fn state_get_input_and_the_meters_both_see_a_scripted_peak(cx: &mut TestAppContext) {
+    let s = setup(cx, armed_fake());
+    ok(call(&s, cx, "app.new_demo", json!({})));
+    let doc = cx.update(|cx| AppState::global(cx).read(cx).windows()[0].doc);
+    let meter = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let s = AppState::global(cx).read(cx);
+            let d = s.store.document(doc).unwrap();
+            (d.inputs().level(30), d.inputs().is_clipped(30))
+        })
+    };
+    // The armed audio track meters: the poll runs fast while stopped.
+    let every = cx.update(|cx| AppState::global(cx).read(cx).poll_interval(doc));
+    assert_eq!(every, Some(std::time::Duration::from_millis(33)));
+    // The channel reads first; the meters still see the peak.
+    s.fake.set_input_levels(vec![1.25, 0.5]);
+    let i = ok(call(&s, cx, "state.get", json!({"target": "input"})));
+    assert_eq!(i["levels"], json!([1.25, 0.5]), "{i}");
+    cx.update(|cx| AppState::global(cx).update(cx, |s, _| s.poll(doc)));
+    assert_eq!(meter(cx), (1.25, true));
+    // The meters read first; the channel still sees the peak.
+    s.fake.set_input_levels(vec![0.25, 1.5]);
+    cx.update(|cx| AppState::global(cx).update(cx, |s, _| s.poll(doc)));
+    assert_eq!(meter(cx).0, 1.5);
+    let i = ok(call(&s, cx, "state.get", json!({"target": "input"})));
+    assert_eq!(i["levels"], json!([0.25, 1.5]), "{i}");
+    let again = ok(call(&s, cx, "state.get", json!({"target": "input"})));
+    assert_eq!(again["levels"], json!([0.0, 0.0]), "{again}");
+}
+
+/// `lane.set_input` and `lane.set_monitor` over the channel: lane edits,
+/// one undo step each; hostile or mismatched parameters are
+/// `invalid_params`; an input change while a pass records is `busy`.
+#[gpui::test]
+fn lane_set_input_and_monitor_over_the_channel(cx: &mut TestAppContext) {
+    use vizdaw_ffi::edit::{EditCommand, LaneEdit, LaneInputRow, MonitorModeRow};
+    let s = setup(cx, armed_fake());
+    ok(call(&s, cx, "app.new_demo", json!({})));
+    let r = ok(run_id(
+        &s,
+        cx,
+        "lane.set_input",
+        json!({"seq": 3, "lane": 31, "kind": "midi", "port": "Keys", "midi_channel": 2}),
+    ));
+    assert_eq!(r["undo"], "Set Track Input", "{r}");
+    assert_eq!(
+        s.fake.edits().last(),
+        Some(&EditCommand::Lane {
+            edit: LaneEdit::SetInput {
+                seq: 3,
+                lane: 31,
+                input: Some(LaneInputRow::Midi {
+                    port: Some("Keys".into()),
+                    channel: Some(1)
+                })
+            }
+        })
+    );
+    let r = ok(run_id(
+        &s,
+        cx,
+        "lane.set_monitor",
+        json!({"seq": 3, "lane": 30, "mode": "input"}),
+    ));
+    assert_eq!(r["undo"], "Set Track Monitor", "{r}");
+    assert_eq!(
+        s.fake.edits().last(),
+        Some(&EditCommand::Lane {
+            edit: LaneEdit::SetMonitor {
+                seq: 3,
+                lane: 30,
+                monitor: MonitorModeRow::Input
+            }
+        })
+    );
+    let edits = s.fake.edits().len();
+    for params in [
+        json!({"seq": 3, "lane": 30, "kind": "video"}),
+        json!({"seq": 3, "lane": 30, "kind": "audio", "channel": 0}),
+        json!({"seq": 3, "lane": 30, "kind": "audio", "port": "Keys"}),
+        json!({"seq": 3, "lane": 30, "kind": "midi", "stereo": true}),
+        json!({"seq": 3, "lane": 30}),
+    ] {
+        assert_eq!(
+            refusal(run_id(&s, cx, "lane.set_input", params.clone())).0,
+            ErrorCode::InvalidParams,
+            "{params}"
+        );
+    }
+    assert_eq!(
+        refusal(run_id(
+            &s,
+            cx,
+            "lane.set_monitor",
+            json!({"seq": 3, "lane": 30, "mode": "loud"})
+        ))
+        .0,
+        ErrorCode::InvalidParams
+    );
+    assert_eq!(s.fake.edits().len(), edits);
+    // While a scripted pass records, the core refuses an input change.
+    ok(run_id(&s, cx, "transport.record", json!({})));
+    assert_eq!(
+        refusal(run_id(
+            &s,
+            cx,
+            "lane.set_input",
+            json!({"seq": 3, "lane": 30, "kind": "audio", "channel": 2})
+        )),
+        (
+            ErrorCode::Busy,
+            vizdaw_ffi::session::RECORDING_LANES.to_owned()
+        )
+    );
+    assert_eq!(s.fake.edits().len(), edits);
+    ok(run_id(&s, cx, "transport.record", json!({})));
+    no_alert(&s, cx);
+}
+
 /// Step entry over the channel: `state.get editor` shows it and the
 /// transport marks; `step.notes` enters a chord; a bad pitch list is
 /// refused; each step id answers, and refuses while step entry is off.

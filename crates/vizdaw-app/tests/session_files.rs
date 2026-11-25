@@ -657,8 +657,14 @@ fn the_store_makes_and_opens_through_its_core() {
     store.new_empty().unwrap();
     store.new_demo().unwrap();
     store.open(std::path::Path::new("/p/Song.vizdaw")).unwrap();
+    // Each new document reads Software Monitoring for its meters.
+    let calls: Vec<String> = core
+        .calls()
+        .into_iter()
+        .filter(|c| c != "audio_settings")
+        .collect();
     assert_eq!(
-        core.calls(),
+        calls,
         vec![
             "new_empty",
             "new_demo",

@@ -1510,6 +1510,16 @@ impl FakeSession {
         self.st().rec.input = Some(info);
     }
 
+    /// The recording pass's clipped-sample count of track `lane` (as the
+    /// core counts them while it records).
+    pub fn set_pass_clipped(&self, lane: u64, clipped: u64) {
+        if let Some(r) = self.st().rec.pass.as_mut() {
+            for l in r.lanes.iter_mut().filter(|l| l.lane == lane) {
+                l.clipped = clipped;
+            }
+        }
+    }
+
     /// The peaks the next `input_levels` answers (then silence).
     pub fn set_input_levels(&self, levels: Vec<f32>) {
         self.st().rec.levels = levels;
@@ -1906,7 +1916,23 @@ impl DocSession for FakeSession {
         if let Some(e) = s.edit_error.clone() {
             return Err(e);
         }
+        // As the core's: an input or arm change waits for Stop.
+        if s.rec.pass.is_some() && vizdaw_ffi::edit::waits_for_recording(&cmd) {
+            return Err(VizError::Busy {
+                message: vizdaw_ffi::session::RECORDING_LANES.into(),
+            });
+        }
         s.calls.push("edit".into());
+        // The core's undo names of the track input edits.
+        let label = match &cmd {
+            EditCommand::Lane {
+                edit: LaneEdit::SetInput { .. },
+            } => Some("Set Track Input"),
+            EditCommand::Lane {
+                edit: LaneEdit::SetMonitor { .. },
+            } => Some("Set Track Monitor"),
+            _ => None,
+        };
         if let EditCommand::Lane { edit } = &cmd {
             match edit {
                 LaneEdit::Rename { seq, lane, name } => {
@@ -1932,6 +1958,11 @@ impl DocSession for FakeSession {
                         l.monitor = *monitor;
                     }
                 }
+                LaneEdit::SetInput { seq, lane, input } => {
+                    if let Some(l) = Self::lane_mut(&mut s, *seq, *lane) {
+                        l.input = input.clone();
+                    }
+                }
                 LaneEdit::Remove { seq, lane } => {
                     if let Some(rows) = s.lanes.get_mut(seq) {
                         rows.retain(|l| l.id != *lane);
@@ -1945,7 +1976,11 @@ impl DocSession for FakeSession {
             }
         }
         s.edits.push(cmd);
-        Ok(Self::command_result(&mut s))
+        Self::command_result(&mut s);
+        if let Some(label) = label {
+            s.snap.undo_label = Some(label.into());
+        }
+        Ok(s.snap.clone())
     }
     fn set_lane_mute(&self, seq: u64, lane: u64, mute: bool) -> Result<DocSnapshot, VizError> {
         let mut s = self.st();

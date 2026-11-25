@@ -601,10 +601,10 @@ impl DocumentModel {
         self.reoffer_if_held() || changed
     }
 
-    /// The transport polls fast: recording or counting in (metering joins
-    /// with the track inputs).
+    /// The transport polls fast: recording, counting in, or a shown track
+    /// meters its input (even while stopped).
     pub fn record_polls_fast(&self) -> bool {
-        self.record.is_recording() || self.last_transport().counting_in
+        self.record.is_recording() || self.last_transport().counting_in || self.metering()
     }
 
     /// The count-in is playing (the timeline waits).

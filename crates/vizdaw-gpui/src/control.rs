@@ -72,7 +72,9 @@ use gpui::{
     MouseUpEvent, PlatformInput, WindowHandle,
 };
 use serde_json::{Value, json};
-use vizdaw_app::commands::{self, APP_COMMANDS, RECORD_COMMANDS, TRANSPORT_COMMANDS};
+use vizdaw_app::commands::{
+    self, APP_COMMANDS, LANE_INPUT_COMMANDS, RECORD_COMMANDS, TRANSPORT_COMMANDS,
+};
 use vizdaw_app::step_entry::STEP_COMMANDS;
 use vizdaw_app::{DocId, SaveAction};
 use vizdaw_ffi::control::{
@@ -663,11 +665,13 @@ fn run_command(
             }
             return Ok(ran_json(id, doc, entry, ran.undo, ran.status));
         }
-        // Record, step entry and the channel's record commands run as the
-        // transport's: an alert they raise is the call's failure, and the
-        // window reads the transport again (a step moves it).
+        // Record, step entry, the channel's record commands and the track
+        // input edits run as the transport's: an alert they raise is the
+        // call's failure, and the window reads the transport again (a step
+        // moves it).
         _ if TRANSPORT_COMMANDS.contains(&id)
             || RECORD_COMMANDS.contains(&id)
+            || LANE_INPUT_COMMANDS.contains(&id)
             || STEP_COMMANDS.contains(&id) =>
         {
             return run_transport(id, args, entry, cx);
@@ -996,25 +1000,27 @@ fn transport_state(entry: &WindowEntry, cx: &mut App) -> Result<Value, ControlEr
 
 /// `state.get record` (what recording is doing, read fresh from the
 /// session, nothing else touched) and `state.get input` (what the input
-/// offers and each channel's peak since the last read). Busy is the
-/// call's `busy`, another refusal its `failed`.
-fn record_state(target: StateTarget, doc: DocId, cx: &App) -> Result<Value, ControlError> {
-    let s = AppState::global(cx);
-    let s = s.read(cx);
-    let d = s.store.document(doc).ok_or_else(closed)?;
-    let session = d.session();
-    let result = match target {
-        StateTarget::Record => ControlResult::Record {
-            doc: doc_id(doc),
-            state: session.record_state().map_err(read_error)?,
-        },
-        _ => ControlResult::InputState {
-            doc: doc_id(doc),
-            info: session.input_info().map_err(read_error)?,
-            levels: session.input_levels().map_err(read_error)?,
-        },
-    };
-    Ok(result_json(&result))
+/// offers, read fresh, and each channel's peak since the channel's last
+/// read). The peaks come from the document's own hold, which the meters'
+/// reads feed too, so neither reader loses a peak to the other. Busy is
+/// the call's `busy`, another refusal its `failed`.
+fn record_state(target: StateTarget, doc: DocId, cx: &mut App) -> Result<Value, ControlError> {
+    let app = AppState::global(cx);
+    app.update(cx, |s, _| {
+        let d = s.store.document_mut(doc).ok_or_else(closed)?;
+        let result = match target {
+            StateTarget::Record => ControlResult::Record {
+                doc: doc_id(doc),
+                state: d.session().record_state().map_err(read_error)?,
+            },
+            _ => ControlResult::InputState {
+                doc: doc_id(doc),
+                info: d.session().input_info().map_err(read_error)?,
+                levels: d.take_channel_levels().map_err(read_error)?,
+            },
+        };
+        Ok(result_json(&result))
+    })
 }
 
 /// A refused session read as the call's error: Busy is `busy`.

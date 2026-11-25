@@ -212,7 +212,12 @@ fn the_poll_reads_the_record_state_only_while_playing_recording_or_counting_in()
 
 #[test]
 fn the_transport_polls_fast_while_counting_in_and_slow_when_idle() {
-    let (f, mut m) = armed();
+    // A MIDI track alone: an armed audio track meters, and metering polls
+    // fast too (slice 8c).
+    let f = Arc::new(demo_fake());
+    f.set_lanes(3, vec![midi(31, "Keys")]);
+    let mut m = model(&f);
+    m.select(Some(3));
     let mut s = store();
     let mut t = TransportModel::new(&m).unwrap();
     assert_eq!(t.poll_interval_for(&m), Duration::from_millis(250));

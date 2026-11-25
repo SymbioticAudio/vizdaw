@@ -121,6 +121,8 @@ pub struct DocumentModel {
     recovery: recovery::RecoveryOffer,
     /// Recording: the options, the popover, the last record state.
     pub(crate) record: crate::record::RecordModel,
+    /// The track inputs: picker sources, meters, the opening note.
+    pub(crate) inputs: crate::lane_inputs::LaneInputs,
     /// Step entry: its state and target (off: none).
     pub(crate) step: crate::step_entry::StepEntryModel,
     /// The Relink sheet's offer.
@@ -265,6 +267,7 @@ impl DocumentModel {
             midi_export: crate::interchange::MidiExport::default(),
             recovery: recovery::RecoveryOffer::default(),
             record: crate::record::RecordModel::default(),
+            inputs: crate::lane_inputs::LaneInputs::default(),
             step: crate::step_entry::StepEntryModel::default(),
             relink: crate::relink::RelinkOffer::default(),
             bounce: crate::bounce::Bounce::default(),

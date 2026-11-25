@@ -15,6 +15,7 @@ use vizdaw_ffi::automation::automation_suspended;
 use crate::alerts::error_message;
 use crate::document::DocumentModel;
 use crate::editor::{DetailEditorKind, GESTURE_OPEN};
+pub use crate::lane_inputs::LANE_INPUT_COMMANDS;
 use crate::mixer::commands::{SELECTION_FILLED, SUSPEND, mode_of, suspend};
 use crate::mixer::strips_text;
 use crate::prefs::Prefs;
@@ -376,6 +377,9 @@ pub fn enabled(id: &str, doc: &DocumentModel) -> bool {
     if RECORD_COMMANDS.contains(&id) {
         return crate::record::record_command_enabled(id, doc);
     }
+    if LANE_INPUT_COMMANDS.contains(&id) {
+        return crate::lane_inputs::lane_input_enabled(doc);
+    }
     if STEP_COMMANDS.contains(&id) {
         return crate::step_entry::step_enabled(id, doc);
     }
@@ -423,6 +427,9 @@ pub fn perform_from_menu(id: &str, doc: &mut DocumentModel) -> Result<Ran, Contr
     }
     if RECORD_COMMANDS.contains(&id) {
         return crate::record::run_record(id, &[], doc).map_err(|e| refused(doc, e));
+    }
+    if LANE_INPUT_COMMANDS.contains(&id) {
+        return crate::lane_inputs::run_lane_input(id, &[], doc).map_err(|e| refused(doc, e));
     }
     if STEP_COMMANDS.contains(&id) {
         return crate::step_entry::run_step(id, &[], doc).map_err(|e| refused(doc, e));
@@ -549,6 +556,9 @@ pub fn run(
     }
     if RECORD_COMMANDS.contains(&id) {
         return crate::record::run_record(id, args, doc);
+    }
+    if LANE_INPUT_COMMANDS.contains(&id) {
+        return crate::lane_inputs::run_lane_input(id, args, doc);
     }
     if STEP_COMMANDS.contains(&id) {
         return crate::step_entry::run_step(id, args, doc);

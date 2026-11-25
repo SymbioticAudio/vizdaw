@@ -332,6 +332,8 @@ pub fn run() {
         if let Some(problem) = vizdaw_app::session::open_plugin_catalog() {
             eprintln!("{problem}");
         }
+        // The picker's sources, off the UI thread, for every document.
+        state.update(cx, |s, _| s.warm_sources());
         // Before any document opens.
         if let Some(path) = &options.control
             && let Err(e) = control::start(path, cx)
