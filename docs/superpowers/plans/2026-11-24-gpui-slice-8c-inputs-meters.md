@@ -229,3 +229,40 @@
   - The output/destination pickers in the GPUI header, if they are still missing (Swift `→ <output>` / `▾ <destination>`; check the checklist first, and do not port them here).
 - The controller runs the Linux GPUI tests and e2e over ssh and makes the macOS on-screen checks. Screenshots go to the owner only when the header and the take resemble the approved look.
 - [ ] Commit `docs: slice 8c manual checks, checklist and backlog`.
+
+## Outcome (2026-11-24)
+
+All eight tasks done (commits on `next` from 100253bf to ee9aba19). Tracks get their inputs and monitoring (header monitor button, input picker and meter; the strip's picker), the channel's input levels with their own peak hold, audio regions draw their waveforms (owner ruling, Swift parity), the take draws as it records with the same drawing and hands over to its region at Stop, and the Markers pane lists and jumps to markers. Evidence: vizdaw-app 1108 and vizdaw-gpui 650 green on the Mac at Task 6; app+gpui 1759/1759 on Linux; GPUI e2e 36/37 on the Mac (the screenshot test needs the screenshot build), including the new `gpui_arms_meters_counts_in_and_draws_the_take`; CI runs the Linux e2e. Final whole-branch review: ready, no Critical/Important.
+
+**Still to see:** recording speed with the screen live (the Mac e2e timings were taken while it was locked) and a long multi-track take by hand; every look row in the slice 8c section of `docs/testing/manual-checks.md`.
+
+### Rulings
+
+- Task 1: review clean. Rulings (implementer, accepted): live-backend check in tests/session_inputs_live.rs (session_record turns on fake input process-wide); held fake reads time out after 10 s (later tests assert read order); no Software Monitoring setter on the seam (Settings slice)
+- Task 2: review clean. Rulings (implementer, accepted): undo names are the core's 'Set Track Input'/'Set Track Monitor' (Swift parity, core-model lane.rs:252-253); source reads via SlowRead with a per-document generation guard; warm_sources only from run(); poll_meters every poll; state.get input answers busy/failed and keeps held peaks; refresh_inputs reads input_info on the UI thread when a picker opens (Swift same)
+- Task 3: review clean. Ruling: both strip monitor buttons kept (Swift parity: ChannelStrip.swift:1022-1029 and StripInputView.swift:37-41); the plan's line about dropping the old label was wrong — cost: none. Rulings (implementer, accepted): header child tree names (monitor button, 'Input of <track>' menu, 'Input level of <track>'); header row at Swift's absolute positions (rename field 22 pt); not ported: MPE sections, header destination/output text, co-producer words
+- Task 4: review clean. Rulings (implementer, accepted): overview news re-asks only pending/coarse/failed rows, ready rows stay (no blink; media change still drops all); every snapshot re-asks visible regions and keeps old rows until new land (tempo edits); one slice held per region; off-thread proof in model tests; media_rows() cache read in render; region name/gain line/handles not drawn yet
+- Task 5: Ruling (implementer, accepted): take waveform reads off the UI thread instead of in the poll; Task 4's paint_waveform now one path per waveform (~12 ms → ~3 ms/frame debug); 'Recording take' image label (new, Swift had none) — cost: one new a11y string
+- Task 5: Ruling: the per-poll redraw while recording (record state frame count changes each poll) stays — pre-existing 8a behaviour and needed for the playhead/time readout; take paint now ~3 ms/frame debug — cost: if render is slow on a real screen the control channel could lag during recording; confirm with an unlocked e2e run of gpui_records_audio_loop_takes_and_midi (carry to Task 8 / on-screen checks)
+- Task 5: Ruling (implementer, accepted): M3 done by handing the take's last rows to the placed region (drawn until its own rows land; hidden after any edit via the snapshot version) rather than seeding the waveform cache
+- Task 6: review clean (row click carries the drawn row's tick and the window's document; rows rebuilt each frame). Rulings (implementer, accepted): failed move shows 'Go to Marker Failed:' with the port's error_message; one button per row (name label, position value); no rename field (Swift none); fake marker.add really adds
+- Task 7: review clean; Linux e2e gate = CI (box has no Xvfb). Rulings (implementer, accepted): 'on Mic' checked by the Recording take frame inside Mic's header row; extra checks (header meter/label, region ready after Stop) from the brief; audio.set steps skipped (Settings slice)
+
+### Carried
+
+- Task 1: carry to Task 2+: the new seam calls (audio_input_channels, midi_source_ports) must be read off the UI thread or from the poll
+- Task 2: carry to Task 3: warm destinations() from the poll, not render (input_badge/input_return_name)
+- Task 3: carry to Task 8: look rows for the picker/meter/monitor; picker list can't scroll in a short window (backlog)
+- Task 4: carry to Task 8: look rows — waveform colour, offline hatching (0xf0883e at 0.55 stand-in) and pill, fades and crossfade X, muted/selected, stereo two bands, no blink on scroll, blank after zoom
+- Task 5: Ruling: the per-poll redraw while recording (record state frame count changes each poll) stays — pre-existing 8a behaviour and needed for the playhead/time readout; take paint now ~3 ms/frame debug — cost: if render is slow on a real screen the control channel could lag during recording; confirm with an unlocked e2e run of gpui_records_audio_loop_takes_and_midi (carry to Task 8 / on-screen checks)
+- Task 6: carry to Task 8: look rows — row spacing/colours, position digits alignment (Swift monospaced), 'Go to <name>' tooltip, scrolling many markers; parity row window_views_and_panes credits S8c
+
+### Deferred minors
+
+- Task 2: minor (deferred): new-document source seed has no ordering (an older read can replace it); LaneInputs::default reads the live core; meter decay never snaps to 0; input_of falls back silently on wrong-typed params
+- Task 3: minor (deferred): strip picker stays open and empty when its track goes; duplicated monitor tint
+- Task 4: minor (deferred): no coalescing — a stream of edits (drag, automation write) queues one waveform batch per frame (plain playback doesn't); a panicked read isn't retried until news/edit/zoom/scroll; region name, gain line and handles not drawn
+- Task 5: minor (deferred): the hand-over never draws if the pass hadn't landed when the version was read (safe); lose_growing_read doesn't check the cancelled ticket is the in-flight one (one extra concurrent read)
+- Task 6: minor (deferred): a scrolled-out row still records bounds (channel ui.click lands outside the list); duplicate marker names give duplicate labels
+- Task 7: minor (deferred): one-track fixture makes the on-Mic geometry check weak; Linux cells for lane.set_input/set_monitor ticked before a Linux run — confirm on CI
+- Final: minor (deferred): brief hand-over draw on a layered region at the same tick; waveform re-reads during recording if anything edits mid-pass; media-list clone every frame; wave landings always redraw; panicked reads not retried
