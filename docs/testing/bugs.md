@@ -48,7 +48,7 @@ Claude tidies each entry into the shape below when it triages them.
   "Track … plays the built-in synth"; on import, "VCA VCA 1 Fader" comes
   back as an instrument track on Built-in Synth with no events. The VCA
   itself comes back with level, mute and solo (check 447 holds).
-- Status: fixed on `next` (c8f5e542; labels 445d425f). Verified in the 27.1 app by Claude (`controller-checks.md`, DAWproject import row).
+- Status: fixed on `next` (c8f5e542; labels 445d425f). To verify in the 27.1 app (`controller-checks.md`, DAWproject import row).
 - Notes: The report said "7 automation points" were written, so the moves
   may also reach the VCA channel; not yet traced. The track name repeats
   "VCA" ("VCA VCA 1 Fader", `StripLane.swift:172`) when the VCA keeps its
