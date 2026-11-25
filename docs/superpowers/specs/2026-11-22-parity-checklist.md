@@ -208,8 +208,8 @@ item (false: keys, the Keys settings and the control channel only).
 
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
-| lane.set_input | Track | Set Track Input |  | false | | |
-| lane.set_monitor | Track | Set Track Monitor |  | false | | |
+| lane.set_input | Track | Set Track Input |  | false | S8c | S8c |
+| lane.set_monitor | Track | Set Track Monitor |  | false | S8c | S8c |
 | lane.set_output | Track | Set Track Output |  | false | | |
 | lane.set_input_fx | Track | Set Input Effects |  | false | | |
 | lane.set_mpe | Track | Set Track MPE |  | false | | |
@@ -547,13 +547,13 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 | regions_normalize_relink_and_trash | | |
 | records_audio_loop_takes_and_midi | S8a (`gpui_records_audio_loop_takes_and_midi`; `record.recover`: `gpui_record_recover_trash_over_the_channel`) | S8a (offline device, fake input; Trash: gap H4) |
 | tracks_the_fake_synth | | |
-| arms_meters_counts_in_and_draws_the_take | | |
+| arms_meters_counts_in_and_draws_the_take | S8c (`gpui_arms_meters_counts_in_and_draws_the_take`; the `audio.set` steps wait for Settings) | S8c (offline device, fake input; the `audio.set` steps wait for Settings; Linux run pending) |
 | touch_writes_a_fader_over_the_channel | S6a (mixer parts) | S6a (mixer parts) |
 | drives_a_fader_and_a_button_from_an_mcu | | |
 | drives_the_mixer_from_a_kontrol_mk3 | | |
 | bounces_the_demo_and_checks_the_file | | |
 | edits_a_region_through_the_stub_editor | | |
-| window_views_and_panes_over_the_channel | S6a (views and panes; markers and mixer-window steps later) | S6a (views via ui.view_*; ⌃2 is ⌘2 on Linux) |
+| window_views_and_panes_over_the_channel | S6a (views and panes; mixer-window step later), S8c (markers step) | S6a (views via ui.view_*; ⌃2 is ⌘2 on Linux), S8c (markers step) |
 | themes_and_the_strip_over_the_channel | | |
 | edits_a_region_in_the_audio_editor | | |
 | transport_jumps_readouts_and_fields_over_the_channel | S3 (steps 0–6), S8b (step 7) | S3 (steps 0–6); step 7 S8b, Linux run pending |
@@ -597,5 +597,5 @@ unknown.
 | `ui.screenshot` of a native Wayland window (the GPUI pin has no offscreen render off macOS) | X11 `GetImage` of the window (XWayland, Xvfb); a native Wayland window answers `unavailable` "Screenshots need an X11 window on Linux." until GPUI or the compositor gives a capture | |
 | Keypad − and + as Rewind and Fast Forward keys, and step entry's keypad twins (Keypad1–6 note values, Keypad. Dotted, Keypad/ Triplet, Keypad+ Tie, Keypad0 Rest) (GPUI at the pin does not tell keypad keys from main keys; Mac too) | The ⇧, and ⇧. keys and the buttons; the number row and `.`, `/`, `=` for step entry (with "reserve number row" on, the note values and Rest have no key: the Step menu and the channel); the control channel's `keypad_minus`/`keypad_plus` work. Closes when GPUI reports the keypad | |
 | Media import on Linux (only VizDAW CAF files import, with no resampler: `media.import` answers `failed` "… not a VizDAW CAF file" for WAV/AIFF and "… resampling needs the system importer" across rates; the e2e import steps assert those refusals on Linux) | Host track H4: Linux audio import reads WAV/AIFF and other formats (Symphonia) and adds a resampler | |
-| Live audio/MIDI input on Linux (input device list and channel names, duplex PipeWire input, ALSA MIDI input, step entry from a played keyboard) | Host track H3; until then recording on Linux uses the offline device (`VIZDAW_AUDIO=offline`, fake input `VIZDAW_AUDIO_INPUT=fake`) and MIDI by `midi.inject` | |
+| Live audio/MIDI input on Linux (input device list and channel names, duplex PipeWire input, ALSA MIDI input, step entry from a played keyboard) | Host track H3; until then recording on Linux uses the offline device (`VIZDAW_AUDIO=offline`, fake input `VIZDAW_AUDIO_INPUT=fake`) and MIDI by `midi.inject`; the picker offers two unnamed channels until H3 | |
 | Move to Trash for recovered recordings (`record.recover action: trash`, and Recovered Recordings' Move to Trash) | Host track H4: Linux Trash support. Until then the file stays where it is (kept for the next open) and the call answers `failed` with the problem line `<path>: not moved to the Trash (this platform has no Trash support yet)`; `gpui_record_recover_trash_over_the_channel` asserts it on Linux | |

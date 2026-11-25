@@ -3549,6 +3549,173 @@ fn gpui_records_audio_loop_takes_and_midi() {
     app.quit();
 }
 
+/// The first node whose label starts with `prefix` and holds `part`.
+fn node_like(nodes: &Value, prefix: &str, part: &str) -> Option<Value> {
+    nodes.as_array().into_iter().flatten().find_map(|n| {
+        let l = n["label"].as_str().unwrap_or("");
+        if l.starts_with(prefix) && l.contains(part) {
+            Some(n.clone())
+        } else {
+            node_like(&n["children"], prefix, part)
+        }
+    })
+}
+
+/// Whether node `n`'s frame lies inside the rows of node `row` (its top
+/// and bottom edges).
+fn within_rows(n: &Value, row: &Value) -> bool {
+    let (f, r) = (&n["frame"], &row["frame"]);
+    let (y, h) = (f["y"].as_f64().unwrap(), f["height"].as_f64().unwrap());
+    let (ry, rh) = (r["y"].as_f64().unwrap(), r["height"].as_f64().unwrap());
+    y >= ry - 0.5 && y + h <= ry + rh + 0.5
+}
+
+/// Ported from `arms_meters_counts_in_and_draws_the_take` (plan 5d-1,
+/// README 5d-2 steps): arming before any Play claims the engine and meters
+/// the fake input, and the header shows the meter; a count-in plays before
+/// the roll with the timeline standing still; the take's peak grows while
+/// it records and the take draws on its track; its overview peaks at the
+/// fake sine's −12 dBFS after Stop (5c final review M8), and the placed
+/// region draws its waveform. The offline device: no hardware, no
+/// permission prompt, nothing saved.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_arms_meters_counts_in_and_draws_the_take() {
+    use core_engine::fixtures::{Builder, Q};
+    use core_model::command::{Command, LaneCmd, RoutingCmd, SequenceCmd};
+    use core_model::ids::AnyId;
+    use core_model::lane::{InputChannels, LaneInput, MonitorMode};
+    use core_model::sequence::SeqLength;
+    use core_model::time::Tick;
+    let home = temp_home();
+    let mut app = App::start_with(home.path(), false, &[("VIZDAW_AUDIO_INPUT", "fake")]);
+    // Eight bars at 120 BPM; track "Mic" records fake input 1, heard never.
+    let mut b = Builder::new();
+    let (seq, mic) = b.sequence("Take", "Mic", None).unwrap();
+    let r = b
+        .run(Command::Routing(RoutingCmd::AddOutput {
+            name: "Audio 1".into(),
+            reference: "audio:1-2".into(),
+        }))
+        .unwrap();
+    let out = r
+        .created
+        .iter()
+        .find_map(|id| match id {
+            AnyId::Output(o) => Some(*o),
+            _ => None,
+        })
+        .unwrap();
+    for c in [
+        LaneCmd::SetOutput {
+            seq,
+            lane: mic,
+            output: Some(out),
+        },
+        LaneCmd::SetInput {
+            seq,
+            lane: mic,
+            input: Some(LaneInput::Audio {
+                channels: InputChannels::Mono(0),
+                return_of: None,
+            }),
+        },
+        LaneCmd::SetMonitor {
+            seq,
+            lane: mic,
+            monitor: MonitorMode::Off,
+        },
+    ] {
+        b.run(Command::Lane(c)).unwrap();
+    }
+    b.run(Command::Sequence(SequenceCmd::SetLength {
+        seq,
+        length: SeqLength::Locked(Tick(32 * Q)),
+    }))
+    .unwrap();
+    let path = home.path().join("Arm.vizdaw");
+    core_model::file::save(&b.finish(), &path).unwrap();
+    let w = app.call("app.open", json!({"path": path}))["window"].clone();
+    app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+
+    // Armed before any Play: the engine is claimed and the input metered.
+    app.call(
+        "command.run",
+        json!({"id": "transport.arm_previous", "window": w}),
+    );
+    let input = wait_for_state(&mut app, &w, "input", |i| {
+        i["levels"][0].as_f64().is_some_and(|l| l > 0.2)
+    });
+    assert_eq!(input["channels"], 3, "{input}");
+    assert_eq!(
+        input["levels"].as_array().map(Vec::len),
+        Some(3),
+        "a level per device channel: {input}"
+    );
+    assert_eq!(input["opening"], false, "{input}");
+    let t = app.call("state.get", json!({"target": "transport", "window": w}));
+    assert_eq!(t["playing"], false, "nothing played: {t}");
+    // The header shows the input meter, and says what the track hears.
+    wait_in_tree(&mut app, &w, "Mic's input meter", |nodes| {
+        find_node(nodes, "Input level of Mic")?;
+        node_like(nodes, "Audio track, Mic, ", "input In 1, monitoring off")
+    });
+
+    // Swift's `audio.set` steps (the buffer size asked for, and refused
+    // while recording) come with the Settings slice.
+
+    // One bar of count-in: the timeline stands still, nothing records.
+    app.call(
+        "command.run",
+        json!({"id": "record.set", "params": {"count_in": 1, "loop": false, "replace": true}, "window": w}),
+    );
+    app.call(
+        "command.run",
+        json!({"id": "transport.record", "window": w}),
+    );
+    let t = wait_for_state(&mut app, &w, "transport", |t| t["counting_in"] == true);
+    assert_eq!(t["playing"], false, "{t}");
+    assert_eq!(t["tick"], json!(0), "the timeline stands at the start: {t}");
+    let r = app.call("state.get", json!({"target": "record", "window": w}));
+    assert_eq!(
+        (r["recording"].clone(), r["frames"].clone()),
+        (json!(true), json!(0)),
+        "{r}"
+    );
+    // Then it rolls; the take's peak grows to the sine's.
+    let r = wait_for_record(&mut app, &w, |r| {
+        r["frames"].as_u64() >= Some(48_000) && r["lanes"][0]["peak"].as_f64() > Some(0.2)
+    });
+    assert!(
+        (r["lanes"][0]["peak"].as_f64().unwrap() - 0.251).abs() < 0.01,
+        "{r}"
+    );
+    assert_eq!(r["pass_start_tick"], json!(0), "{r}");
+    // The take draws on Mic while it records.
+    wait_in_tree(&mut app, &w, "the recording take on Mic", |nodes| {
+        let take = find_node(nodes, "Recording take")?;
+        let row = node_like(nodes, "Audio track, Mic, ", "")?;
+        within_rows(&take, &row).then_some(())
+    });
+    app.call(
+        "command.run",
+        json!({"id": "transport.record", "window": w}),
+    );
+    wait_for_record(&mut app, &w, |r| r["recording"] == false);
+    wait_for_undo(&mut app, &w, "Record");
+    let m = wait_for_state(&mut app, &w, "media", |m| !m["items"][0]["peak"].is_null());
+    assert!(
+        (m["items"][0]["peak"].as_f64().unwrap() - 0.251).abs() < 0.01,
+        "{m}"
+    );
+    // The take is placed: no take drawn, and the region draws its waveform.
+    wait_in_tree(&mut app, &w, "Mic's region drawn", |nodes| {
+        let region = node_like(nodes, "Region ", " on Mic, ")?;
+        (find_node(nodes, "Recording take").is_none() && region["value"] == "ready").then_some(())
+    });
+    app.quit();
+}
+
 /// Ported from `arpeggiates_an_injected_chord_while_recording` (spec
 /// §12.3; README 239): a C major chord held for a bar into "Keys" with an
 /// Up arpeggiator at 1/16 records as C, E, G repeating, each on a
