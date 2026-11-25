@@ -421,10 +421,11 @@ fn fast_forward_clicks_behind_a_latency_move_a_bar_each() {
     s.stop().unwrap();
     idle_until(&s, |s| !playing(s));
     s.locate(BAR).unwrap();
-    // The latency is in once the slot reports it and the heard position
-    // is behind the bar (4 800 frames: 3 072 ticks at 120 BPM).
+    // The latency is in once the slot reports it; a stopped transport is
+    // where it was located, latency or not (4 800 frames would be 3 072
+    // ticks at 120 BPM).
     idle_until(&s, |s| {
-        slot(s, id).latency == 4_800 && s.transport().unwrap().tick == BAR - 3_072
+        slot(s, id).latency == 4_800 && s.transport().unwrap().tick == BAR
     });
     for bars in 2..=3 {
         std::thread::sleep(Duration::from_millis(300));
@@ -456,7 +457,7 @@ fn a_surface_fast_forward_behind_a_latency_moves_a_bar() {
     idle_until(&s, |s| !playing(s));
     s.locate(BAR).unwrap();
     idle_until(&s, |s| {
-        slot(s, id).latency == 4_800 && s.transport().unwrap().tick == BAR - 3_072
+        slot(s, id).latency == 4_800 && s.transport().unwrap().tick == BAR
     });
     debug_freeze_clock(true);
     let unit = surface_add(SurfaceKindRow::Mcu, "L In".into(), "L Out".into(), None).unwrap();
@@ -464,17 +465,15 @@ fn a_surface_fast_forward_behind_a_latency_moves_a_bar() {
     // Past the wind memory the locate left, which would be the base.
     debug_advance(1_000);
     s.idle().unwrap();
-    // Fast forward: from the schedule's BAR to 2 BAR (the heard 2 BAR
-    // less the latency), not from the heard position to BAR.
+    // Fast forward: from the schedule's BAR to 2 BAR.
     s.inject_surface(unit, vec![0x90, 0x5C, 0x7F, 0x90, 0x5C, 0x00])
         .unwrap();
-    idle_until(&s, |s| s.transport().unwrap().tick == 2 * BAR - 3_072);
+    idle_until(&s, |s| s.transport().unwrap().tick == 2 * BAR);
     debug_advance(1_000);
-    // Rewind: from the schedule's 2 BAR back to BAR (the heard BAR less
-    // the latency), not from the heard position back to 0.
+    // Rewind: from the schedule's 2 BAR back to BAR, not back to 0.
     s.inject_surface(unit, vec![0x90, 0x5B, 0x7F, 0x90, 0x5B, 0x00])
         .unwrap();
-    idle_until(&s, |s| s.transport().unwrap().tick == BAR - 3_072);
+    idle_until(&s, |s| s.transport().unwrap().tick == BAR);
     debug_freeze_clock(false);
     surface_remove(unit).unwrap();
     s.close().unwrap();
