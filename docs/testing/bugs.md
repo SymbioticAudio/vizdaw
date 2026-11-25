@@ -5,9 +5,8 @@ Claude tidies each entry into the shape below when it triages them.
 
 ## How it works
 
-1. Test one build: `scripts/install-test-app.sh` puts the current
-   `dist/VizDAW.app` at `~/Applications/VizDAW Test.app`, which nothing else
-   rebuilds. About VizDAW shows its build, e.g. `0.1.0 (23b48c6 · 2026-11-05 18:49)`.
+1. Test one build of the 27.1 app (see "Getting the build" in
+   `manual-checks.md`). Note the commit (`git log -1 --oneline`).
 2. Note the build once at the top of your session, then log what you find.
    Screenshots go in `docs/testing/shots/` (not committed), named after the
    bug if you can (`B-012.png`), otherwise anything.
@@ -49,7 +48,7 @@ Claude tidies each entry into the shape below when it triages them.
   "Track … plays the built-in synth"; on import, "VCA VCA 1 Fader" comes
   back as an instrument track on Built-in Synth with no events. The VCA
   itself comes back with level, mute and solo (check 447 holds).
-- Status: fixed on `next` (c8f5e542; labels 445d425f). Verify in the next build from `next`.
+- Status: fixed on `next` (c8f5e542; labels 445d425f). Verified in the 27.1 app by Claude (`controller-checks.md`, DAWproject import row).
 - Notes: The report said "7 automation points" were written, so the moves
   may also reach the VCA channel; not yet traced. The track name repeats
   "VCA" ("VCA VCA 1 Fader", `StripLane.swift:172`) when the VCA keeps its
