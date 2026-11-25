@@ -32,6 +32,7 @@ pub mod position;
 pub mod prefs;
 pub mod project_settings;
 pub mod record;
+pub mod region_waves;
 pub mod relink;
 pub mod report_text;
 pub mod session;

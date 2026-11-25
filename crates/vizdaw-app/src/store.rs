@@ -205,6 +205,7 @@ impl DocumentStore {
         // A picker refresh `f` asked for reads its sources off the UI
         // thread.
         self.start_source_read(id);
+        self.start_wave_reads(id);
         if let Some(alert) = alert {
             self.post_document_alert(id, alert);
         }

@@ -123,6 +123,8 @@ struct State {
     idle_slots_changed: bool,
     idle_media_changed: bool,
     idle_problems: Vec<String>,
+    /// The scripted region waveforms and their reads.
+    waves: Waves,
     /// The slots safe mode holds off.
     held: Vec<u64>,
     /// Every `load_plugins(slots)`.
@@ -191,6 +193,27 @@ struct Rec {
     inject_taken: bool,
     /// The free space `record_state` reports (none: no reading).
     free_bytes: Option<u64>,
+}
+
+/// One region's scripted waveform: its state, channels and every
+/// column's lowest and highest sample.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScriptedWave {
+    pub state: OverviewStateRow,
+    pub channels: u16,
+    pub min: f32,
+    pub max: f32,
+}
+
+/// The fake's region waveforms: what each event answers, the reads made
+/// (event, from, to, columns, thread) and the holds on the next reads.
+#[derive(Default)]
+struct Waves {
+    rows: HashMap<u64, ScriptedWave>,
+    asks: Vec<(u64, i64, i64, u32)>,
+    threads: Vec<std::thread::ThreadId>,
+    holds: VecDeque<Arc<ReadHold>>,
+    idle_overviews_changed: bool,
 }
 
 /// How a scripted job ends.
@@ -524,6 +547,7 @@ impl FakeSession {
             idle_slots_changed: false,
             idle_media_changed: false,
             idle_problems: vec![],
+            waves: Waves::default(),
             held: vec![],
             loaded: vec![],
             midi_previews: vec![],
@@ -619,6 +643,35 @@ impl FakeSession {
     /// The problem lines the next `idle` brings (once).
     pub fn set_idle_problems(&self, lines: Vec<String>) {
         self.st().idle_problems = lines;
+    }
+
+    /// The next `idle` says the overviews changed (once).
+    pub fn set_idle_overviews_changed(&self) {
+        self.st().waves.idle_overviews_changed = true;
+    }
+
+    /// What `region_waveform(event, …)` answers from now on: every column
+    /// `min`…`max` (default: `Pending`, mono silence).
+    pub fn set_region_waveform(&self, event: u64, wave: ScriptedWave) {
+        self.st().waves.rows.insert(event, wave);
+    }
+
+    /// Every `region_waveform` read: (event, from tick, to tick, columns).
+    pub fn region_waveform_asks(&self) -> Vec<(u64, i64, i64, u32)> {
+        self.st().waves.asks.clone()
+    }
+
+    /// The thread each `region_waveform` read ran on, in order.
+    pub fn region_waveform_threads(&self) -> Vec<std::thread::ThreadId> {
+        self.st().waves.threads.clone()
+    }
+
+    /// Holds the next `region_waveform` read (queued): it takes its
+    /// answer, then waits for the release.
+    pub fn hold_region_waveform(&self) -> Arc<ReadHold> {
+        let h = Arc::new(ReadHold::default());
+        self.st().waves.holds.push_back(h.clone());
+        h
     }
 
     /// Makes the session hold exactly `s` as its selection.
@@ -1873,6 +1926,7 @@ impl DocSession for FakeSession {
             params_changed: std::mem::take(&mut s.windows.idle_params_changed),
             editor_resize: std::mem::take(&mut s.windows.idle_editor_resize),
             problems: std::mem::take(&mut s.idle_problems),
+            overviews_changed: std::mem::take(&mut s.waves.idle_overviews_changed),
         })
     }
     fn lanes(&self, seq: u64) -> Result<Vec<LaneRow>, VizError> {
@@ -2991,6 +3045,49 @@ impl DocSession for FakeSession {
             min: vec![0.0; columns as usize],
             max: vec![0.0; columns as usize],
         }))
+    }
+    fn region_waveform(
+        &self,
+        event: u64,
+        from_tick: i64,
+        to_tick: i64,
+        columns: u32,
+    ) -> Result<OverviewRows, VizError> {
+        let (answer, hold) = {
+            let mut s = self.st();
+            s.calls.push("region_waveform".into());
+            s.waves.asks.push((event, from_tick, to_tick, columns));
+            s.waves.threads.push(std::thread::current().id());
+            let hold = s.waves.holds.pop_front();
+            let answer = Self::scripted(&mut s, "region_waveform")
+                .and_then(|()| vizdaw_ffi::overviews::check_columns(columns))
+                .and_then(|()| {
+                    if from_tick >= to_tick {
+                        return Err(VizError::Model {
+                            message: "from_tick must be before to_tick".into(),
+                        });
+                    }
+                    let w = s.waves.rows.get(&event).copied().unwrap_or(ScriptedWave {
+                        state: OverviewStateRow::Pending,
+                        channels: 1,
+                        min: 0.0,
+                        max: 0.0,
+                    });
+                    let n = usize::from(w.channels) * columns as usize;
+                    Ok(OverviewRows {
+                        state: w.state,
+                        channels: w.channels,
+                        columns,
+                        min: vec![w.min; n],
+                        max: vec![w.max; n],
+                    })
+                });
+            (answer, hold)
+        };
+        if let Some(h) = hold {
+            h.hold();
+        }
+        answer
     }
     fn recovered_recordings(&self) -> Result<Vec<String>, VizError> {
         let mut s = self.st();

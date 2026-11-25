@@ -2030,7 +2030,14 @@ impl Render for DocumentWindow {
                     let visible = self
                         .arrangement
                         .visible_rows(d.lanes().len(), f32::from(window.viewport_size().height));
-                    ArrangementState::of(d, s.transport(doc), Instant::now(), visible)
+                    ArrangementState::of(
+                        d,
+                        s.transport(doc),
+                        Instant::now(),
+                        visible,
+                        self.arrangement.axis(),
+                        self.arrangement.layout_width(),
+                    )
                 }),
                 d.map(ToolbarState::of).unwrap_or_default(),
                 d.map(DetailPaneState::of).unwrap_or_default(),

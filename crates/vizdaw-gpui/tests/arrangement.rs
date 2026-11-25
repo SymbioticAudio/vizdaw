@@ -12,15 +12,21 @@ use gpui::{
     ScrollEvent, TestAppContext, VisualTestContext, WindowHandle, point, px,
 };
 use serde_json::{Map, json};
+use vizdaw_app::DocSession;
 use vizdaw_app::DocumentStore;
+use vizdaw_app::arrangement::Rect;
 use vizdaw_app::editor::{DetailEditorKind, EditorTarget, Tool};
-use vizdaw_app::testing::{FakeSession, demo_fake, lane_row};
+use vizdaw_app::testing::{FakeSession, ScriptedWave, demo_fake, lane_row};
 use vizdaw_ffi::blocks::{BlockKind, BlockRow};
 use vizdaw_ffi::edit::{EditCommand, EventEdit, LaneRef};
 use vizdaw_ffi::events::{EventKindRow, EventRow};
 use vizdaw_ffi::selection::{SelectionRow, TickRange};
+use vizdaw_ffi::{MediaOriginRow, MediaRow, OfflineReasonRow, OverviewRows, OverviewStateRow};
 use vizdaw_gpui::control;
 use vizdaw_gpui::menus::{self, ItemSpec};
+use vizdaw_gpui::region_drawing::{
+    BAND, HANDLE, fade_lines, hatch_lines, offline_pill_rect, waveform_bars,
+};
 use vizdaw_gpui::registry::Element;
 use vizdaw_gpui::{AppState, DocumentWindow};
 
@@ -1364,4 +1370,241 @@ fn a_double_click_keeps_the_saved_last_editor(cx: &mut TestAppContext) {
     let saved: serde_json::Value =
         serde_json::from_str(&s.fake.layout().expect("a stored layout")).unwrap();
     assert_eq!(saved["lastKind"], "list");
+}
+
+// ---------------------------------------------------------------------
+// Audio regions' waveforms (plan 8c Task 4)
+
+fn rows(ch: u16, min: &[f32], max: &[f32]) -> OverviewRows {
+    OverviewRows {
+        state: OverviewStateRow::Ready,
+        channels: ch,
+        columns: (min.len() / usize::from(ch.max(1))) as u32,
+        min: min.to_vec(),
+        max: max.to_vec(),
+    }
+}
+
+fn r(x: f32, y: f32, width: f32, height: f32) -> Rect {
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+/// Swift `WaveformGeometryTests.barsSpanEachColumnsMinToMax`.
+#[test]
+fn bars_span_each_columns_min_to_max() {
+    let b = waveform_bars(
+        &rows(1, &[-1., -0.5, 0., 0.5], &[1., 0.5, 0., 1.]),
+        r(0., 0., 40., 20.),
+    );
+    assert_eq!(
+        b,
+        vec![
+            r(0., 0., 10., 20.),
+            r(10., 5., 10., 10.),
+            r(20., 10., 10., 0.5),
+            r(30., 0., 10., 5.),
+        ],
+        "silence is a hairline"
+    );
+}
+
+/// Swift `channelsStackAndOversClip`.
+#[test]
+fn channels_stack_and_overs_clip() {
+    let b = waveform_bars(&rows(2, &[-0.5, -3.], &[0.5, 2.]), r(0., 0., 10., 40.));
+    assert_eq!(b, vec![r(0., 5., 10., 10.), r(0., 20., 10., 20.)]);
+}
+
+/// Swift `degenerateRowsDrawNothing` (Review Focus 5).
+#[test]
+fn degenerate_rows_draw_nothing() {
+    let rect = r(0., 0., 10., 10.);
+    assert!(waveform_bars(&rows(1, &[], &[]), rect).is_empty());
+    let short = OverviewRows {
+        columns: 4,
+        ..rows(1, &[0.], &[0.])
+    };
+    assert!(waveform_bars(&short, rect).is_empty());
+    let none = OverviewRows {
+        channels: 0,
+        ..rows(1, &[0.], &[0.])
+    };
+    assert!(waveform_bars(&none, rect).is_empty());
+    assert!(waveform_bars(&rows(1, &[0.], &[0.]), r(0., 0., 0., 10.)).is_empty());
+    let nan = waveform_bars(
+        &rows(
+            1,
+            &[f32::NAN, f32::NEG_INFINITY],
+            &[f32::INFINITY, f32::NAN],
+        ),
+        r(0., 0., 20., 10.),
+    );
+    assert_eq!(nan.len(), 2);
+    assert!(
+        nan.iter()
+            .all(|b| b.y.is_finite() && b.height.is_finite() && b.height >= 0.5)
+    );
+    let many = waveform_bars(&rows(1, &[0.; 8192], &[0.1; 8192]), rect);
+    assert_eq!(many.len(), 8192);
+}
+
+/// The hatching covers the region; the pill clears the gain band and
+/// the fade in, or does not show without room; the fade lines.
+#[test]
+fn hatch_pill_and_fade_lines() {
+    let rect = r(30., 2., 120., 40.);
+    let lines = hatch_lines(rect);
+    assert_eq!(lines.first().unwrap().0.x, rect.x - rect.height);
+    assert!(lines.iter().all(|(a, _)| a.x < rect.max_x()));
+    let mut e = EventRow::blank(1, 0, EventKindRow::AudioRegion);
+    e.frames = 1000;
+    let pill = offline_pill_rect(&e, rect, 30., 12.).unwrap();
+    assert_eq!((pill.x, pill.y), (rect.x + 4., rect.y + BAND + 2.));
+    e.fade_in.length = 250;
+    let after = offline_pill_rect(&e, rect, 30., 12.).unwrap();
+    assert_eq!(after.x, rect.x + 30. + HANDLE / 2. + 2.);
+    assert!(offline_pill_rect(&e, r(0., 0., 30., 40.), 30., 12.).is_none());
+    assert_eq!(fade_lines(&e, rect).len(), 1);
+    e.crossfade = true;
+    e.fade_out.length = 100;
+    assert_eq!(fade_lines(&e, rect).len(), 3, "the X and the fade out");
+}
+
+const VOX: u64 = 40;
+const KICK: u64 = 7;
+
+fn audio_region(id: u64, tick: i64, duration: i64, media: u64) -> EventRow {
+    let mut e = EventRow::blank(id, tick, EventKindRow::AudioRegion);
+    e.duration = duration;
+    e.media = Some(media);
+    e.frames = 96_000;
+    e
+}
+
+fn media_row(id: u64, offline: Option<OfflineReasonRow>) -> MediaRow {
+    MediaRow {
+        id,
+        name: "kick.wav".into(),
+        path: "Audio/kick.caf".into(),
+        channels: 1,
+        frames: 96_000,
+        sample_rate: 48_000,
+        origin: MediaOriginRow::Imported,
+        original_name: None,
+        offline,
+        uses: 1,
+        used_percent: 100.,
+        peak: None,
+    }
+}
+
+/// The demo with an audio track Vox (row 2) holding region 7 over bar 1
+/// on media 5.
+fn with_region(offline: Option<OfflineReasonRow>) -> FakeSession {
+    let f = demo_fake();
+    let mut lanes = f.lanes(3).unwrap();
+    let mut vox = lane_row(VOX, "Vox", false);
+    vox.audio_out = Some(7);
+    lanes.push(vox);
+    f.set_lanes(3, lanes);
+    f.set_blocks(3, VOX, vec![events_block(0, BAR, &[KICK])]);
+    f.set_events(3, VOX, vec![audio_region(KICK, 0, BAR, 5)]);
+    f.set_media(vec![media_row(5, offline)]);
+    f
+}
+
+const KICK_LABEL: &str = "Region kick.wav on Vox, bar 1, gain 0.0 dB";
+
+impl Setup {
+    /// The stopped poll (every 250 ms) runs the idle tick, then the
+    /// window draws.
+    fn tick(&mut self) {
+        self.cx.executor().advance_clock(Duration::from_millis(300));
+        self.cx.run_until_parked();
+    }
+
+    /// Draws the window again, `n` times.
+    fn redraw(&mut self, n: usize) {
+        for _ in 0..n {
+            self.window
+                .update(&mut self.cx, |_, _, cx| cx.notify())
+                .unwrap();
+            self.cx.run_until_parked();
+        }
+    }
+}
+
+/// An audio region is in the tree after its block, labelled as Swift
+/// labels it, its value the waveform's state: `pending` until the core
+/// has the overview, `ready` after the news and the read. Render reads
+/// nothing: frames make no `region_waveform` call.
+#[gpui::test]
+fn an_audio_regions_waveform_goes_from_pending_to_ready(cx: &mut TestAppContext) {
+    let mut s = setup(cx, with_region(None));
+    let kids = s.children("group", "Arrangement");
+    let at = kids
+        .iter()
+        .position(|e| e.label == KICK_LABEL)
+        .unwrap_or_else(|| panic!("no region in {:#?}", labels(&kids)));
+    assert_eq!(kids[at - 1].label, "Block on Vox, bar 1, 1 event");
+    assert_eq!(s.value("button", KICK_LABEL).as_deref(), Some("pending"));
+    let region = s.element("button", KICK_LABEL);
+    let canvas = s.canvas().bounds;
+    assert_eq!(
+        region.bounds.origin.y,
+        canvas.origin.y + px(RULER + 96. + 3.)
+    );
+    assert_eq!(region.bounds.size.width, px(160.));
+    let asks = s.fake.region_waveform_asks();
+    assert_eq!(asks, vec![(KICK, 0, BAR, 160)], "the visible ticks, once");
+    // Asked again only after the news.
+    s.redraw(3);
+    assert_eq!(s.fake.count("region_waveform"), 1, "no busy loop");
+    s.fake.set_region_waveform(
+        KICK,
+        ScriptedWave {
+            state: OverviewStateRow::Ready,
+            channels: 1,
+            min: -0.5,
+            max: 0.5,
+        },
+    );
+    s.fake.set_idle_overviews_changed();
+    s.tick();
+    assert_eq!(s.value("button", KICK_LABEL).as_deref(), Some("ready"));
+    let calls = s.fake.count("region_waveform");
+    assert_eq!(calls, 2);
+    s.redraw(3);
+    assert_eq!(s.fake.count("region_waveform"), calls, "render reads none");
+    // (The test platform runs background tasks on its one thread; the
+    // model tests show the reads run off the calling thread.)
+}
+
+/// An offline region reads `offline`, says so in its label and is never
+/// asked for.
+#[gpui::test]
+fn an_offline_region_is_never_asked(cx: &mut TestAppContext) {
+    let mut s = setup(cx, with_region(Some(OfflineReasonRow::Missing)));
+    let label = format!("{KICK_LABEL}, offline");
+    assert_eq!(s.value("button", &label).as_deref(), Some("offline"));
+    s.redraw(2);
+    s.tick();
+    assert_eq!(s.fake.count("region_waveform"), 0);
+}
+
+/// A zoom change asks again at the new ticks per point.
+#[gpui::test]
+fn a_zoom_asks_again(cx: &mut TestAppContext) {
+    let mut s = setup(cx, with_region(None));
+    assert_eq!(s.fake.count("region_waveform"), 1);
+    s.click("button", vizdaw_gpui::arrangement::ZOOM_IN);
+    let tpp = s.ticks_per_point();
+    let asks = s.fake.region_waveform_asks();
+    assert_eq!(asks.len(), 2, "{asks:?}");
+    assert_eq!(asks[1].3, (BAR as f64 / tpp).ceil() as u32);
 }

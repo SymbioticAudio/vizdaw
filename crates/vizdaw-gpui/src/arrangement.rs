@@ -38,15 +38,17 @@ use vizdaw_app::arrangement::{
     self as model, ArrangementFrame, ArrangementHit, AutoScroll, BlockDragState, Geometry,
     GridKind, MachineEvent, MeterBars, PageFollow, Phase, RULER_HEIGHT, Rect, RulerSelection,
     TimeAxis, ToolMachine, WheelScroll, ZOOM_STEP, a11y_label_in, bar_length, grid_lines_in,
-    hit_test, label_every, sketch,
+    hit_test, label_every, region_a11y_label, region_name, sketch,
 };
 use vizdaw_app::editor::{DetailEditorKind, Division, EditorTarget, Snap, Tool};
+use vizdaw_app::region_waves::{RegionWant, Slice, WaveLook, WaveState};
 use vizdaw_app::transport::TransportModel;
 use vizdaw_ffi::blocks::{BlockKind, BlockRow};
 use vizdaw_ffi::edit::{EditCommand, EventEdit};
-use vizdaw_ffi::events::EventRow;
+use vizdaw_ffi::events::{EventKindRow, EventRow};
 use vizdaw_ffi::selection::TickRange;
 
+use crate::region_drawing::{RegionDraw, paint_region, wave_rect};
 use crate::registry::{ChildRecorder, RegistryScope};
 use crate::shell::DocumentWindow;
 use crate::transport_bar::{self, colors as bar_colors};
@@ -94,6 +96,18 @@ pub mod colors {
     pub const BODY_SHADE: f32 = 0.10;
     /// The mini notes' alpha.
     pub const SKETCH_ALPHA: f32 = 0.55;
+    /// An audio region's waveform: `REGION_LINE` at this alpha (Swift
+    /// `RegionPalette.waveform`).
+    pub const WAVEFORM_ALPHA: f32 = 0.65;
+    /// Offline media: the hatching (at its alpha) and the pill's text
+    /// (Swift `RegionPalette.offline`), on the pill's background (the
+    /// canvas, Swift `offlineLabelBackground`).
+    pub const OFFLINE: u32 = 0xf0883e;
+    pub const OFFLINE_HATCH_ALPHA: f32 = 0.55;
+    pub const OFFLINE_PILL: u32 = CANVAS;
+    /// A region's fade lines (Swift `RegionPalette.fadeLine`, the
+    /// secondary label colour).
+    pub const FADE_LINE: u32 = TICK;
     pub const RADIUS: f32 = 4.;
     /// The piano keyboard's keys and labels (fixed until themes land).
     pub const WHITE_KEY: u32 = 0xe6e6ea;
@@ -275,6 +289,11 @@ impl Arrangement {
         f32::from(self.layout.get().size.width)
     }
 
+    /// The canvas's width as last laid out (0 before the first frame).
+    pub fn layout_width(&self) -> f32 {
+        self.width()
+    }
+
     /// Keeps the vertical offset inside `rows` tracks and the add row.
     fn clamp_vertical(&mut self, rows: usize) {
         let body = self.body_height();
@@ -327,8 +346,19 @@ impl Arrangement {
                     });
                 }
                 layout.set(bounds);
-                let prepared = view.prepare(&state, bounds, &mut recorder);
+                let mut prepared = view.prepare(&state, bounds, &mut recorder);
                 playhead.set(prepared.time.playhead);
+                // The waveforms not held yet are asked for after the
+                // frame, off the UI thread (render reads none).
+                let wants = std::mem::take(&mut prepared.wants);
+                if !wants.is_empty() {
+                    let asks = grown.clone();
+                    let tpp = view.axis.ticks_per_point();
+                    cx.defer(move |cx| {
+                        asks.update(cx, |this, cx| this.want_region_waves(tpp, &wants, cx))
+                            .ok();
+                    });
+                }
                 prepared
             },
             move |bounds, prepared, window, cx| {
@@ -739,6 +769,16 @@ pub struct RowState {
     pub name: String,
     pub blocks: Arc<[BlockRow]>,
     pub events: Arc<[EventRow]>,
+    /// Its audio regions near the view, with their names and waveforms
+    /// as held.
+    pub regions: Vec<RegionState>,
+}
+
+/// An audio region as drawn: its row, its name and its waveform.
+pub struct RegionState {
+    pub row: EventRow,
+    pub name: String,
+    pub look: WaveLook,
 }
 
 impl ArrangementState {
@@ -755,15 +795,21 @@ impl ArrangementState {
     }
 
     /// The `visible` tracks of `doc`'s shown sequence, with `transport`'s
-    /// playhead at `now` (extrapolated from the last poll while playing).
+    /// playhead at `now` (extrapolated from the last poll while playing),
+    /// and the audio regions near a view of `axis` `width` points wide
+    /// (all of them before the width is known).
     pub fn of(
         doc: &DocumentModel,
         transport: Option<&TransportModel>,
         now: Instant,
         visible: std::ops::Range<usize>,
+        axis: &TimeAxis,
+        width: f32,
     ) -> Self {
         let seq = doc.selected_seq();
         let lanes = doc.lanes();
+        let near = (width > 0.).then(|| (axis.tick_at(-width), axis.tick_at(2. * width)));
+        let mut media = None;
         let rows = lanes
             .get(visible.clone())
             .unwrap_or_default()
@@ -772,15 +818,38 @@ impl ArrangementState {
             .map(|(l, index)| {
                 let blocks = doc.blocks(l.id);
                 let sketched = blocks.iter().any(|b| b.kind == BlockKind::Events);
+                let events = if sketched {
+                    doc.shown_lane_events(l.id)
+                } else {
+                    Arc::from([])
+                };
+                let regions = events
+                    .iter()
+                    .filter(|e| e.kind == EventKindRow::AudioRegion)
+                    .filter(|e| {
+                        near.is_none_or(|(from, to)| {
+                            e.tick < to && e.tick.saturating_add(e.duration.max(0)) >= from
+                        })
+                    })
+                    .map(|e| {
+                        let rows = media.get_or_insert_with(|| doc.media_rows());
+                        let file = e
+                            .media
+                            .and_then(|id| rows.iter().find(|m| m.id == id))
+                            .map(|m| m.name.as_str());
+                        RegionState {
+                            row: e.clone(),
+                            name: region_name(e, file),
+                            look: doc.region_wave_in(e, rows, axis.ticks_per_point()),
+                        }
+                    })
+                    .collect();
                 RowState {
                     index,
                     name: l.name.clone(),
-                    events: if sketched {
-                        doc.shown_lane_events(l.id)
-                    } else {
-                        Arc::from([])
-                    },
+                    events,
                     blocks,
+                    regions,
                 }
             })
             .collect();
@@ -823,6 +892,8 @@ struct Prepared {
     time: TimeLayer,
     separators: Vec<f32>,
     blocks: Vec<BlockDraw>,
+    /// The waveforms to ask for (not held for the slice in view).
+    wants: Vec<RegionWant>,
 }
 
 /// The time parts every editor canvas draws (Swift `EditorCanvas`): the
@@ -973,6 +1044,8 @@ struct BlockDraw {
     selected: bool,
     label: Option<String>,
     sketch: Vec<Rect>,
+    /// Its audio regions in view.
+    regions: Vec<RegionDraw>,
 }
 
 impl Scene {
@@ -993,8 +1066,15 @@ impl Scene {
         };
 
         let g = &self.geometry;
+        let window_rect = |r: &Rect| {
+            Bounds::new(
+                point(bounds.origin.x + px(r.x), bounds.origin.y + px(r.y)),
+                size(px(r.width), px(r.height)),
+            )
+        };
         let mut separators = vec![];
         let mut blocks = vec![];
+        let mut wants = vec![];
         for row in &state.rows {
             let i = row.index;
             let top = RULER_HEIGHT + g.row_top(i);
@@ -1002,31 +1082,106 @@ impl Scene {
                 continue;
             }
             separators.push(top + g.lane_height - 1.);
+            // The row's blocks, then its regions (Swift
+            // `ArrangementView.accessibilityItems`).
+            let mut regions = vec![];
             for b in row.blocks.iter() {
                 let mut rect = g.block_rect(b, i, axis);
                 rect.y += RULER_HEIGHT;
                 if !rect.intersects(&body) {
                     continue;
                 }
-                let drawn = self.block(b, rect, row, state);
+                let mut drawn = self.block(b, rect, row, state);
                 recorder.record(
                     "button",
                     &a11y_label_in(b, &row.name, &state.bars),
-                    Bounds::new(
-                        point(bounds.origin.x + px(rect.x), bounds.origin.y + px(rect.y)),
-                        size(px(rect.width), px(rect.height)),
-                    ),
+                    window_rect(&rect),
                     true,
                     drawn.selected,
                 );
+                if b.kind == BlockKind::Events {
+                    for r in row.regions.iter().filter(|r| b.events.contains(&r.row.id)) {
+                        if let Some(d) = self.region(r, i, &body, state, &mut wants) {
+                            regions.push((r, d.rect, d.selected, d.offline));
+                            drawn.regions.push(d);
+                        }
+                    }
+                }
                 blocks.push(drawn);
+            }
+            for (r, rect, selected, offline) in regions {
+                recorder.record_value(
+                    "button",
+                    &region_a11y_label(&r.row, &r.name, &row.name, &state.bars, offline),
+                    window_rect(&rect),
+                    selected,
+                    r.look.state.as_str(),
+                );
             }
         }
         Prepared {
             time: TimeLayer::new(axis, &state.bars, w, h, self.range, state.playhead),
             separators,
             blocks,
+            wants,
         }
+    }
+
+    /// Audio region `r` of row `i`, when it shows in `body`; what it
+    /// needs read joins `wants`.
+    fn region(
+        &self,
+        r: &RegionState,
+        i: usize,
+        body: &Rect,
+        state: &ArrangementState,
+        wants: &mut Vec<RegionWant>,
+    ) -> Option<RegionDraw> {
+        let axis = &self.axis;
+        let g = &self.geometry;
+        let e = &r.row;
+        // Swift `ArrangementGeometry.regionRect`.
+        let len = e.duration.max(0);
+        let end = e.tick.saturating_add(len);
+        let x0 = axis.x(e.tick);
+        let inset = Geometry::BLOCK_INSET + 1.;
+        let rect = Rect {
+            x: x0,
+            y: RULER_HEIGHT + g.row_top(i) + inset,
+            width: (axis.x(end) - x0).max(Geometry::MIN_BLOCK_WIDTH),
+            height: (g.lane_height - 2. * inset).max(1.),
+        };
+        rect.intersection(body)?;
+        let offline = r.look.state == WaveState::Offline;
+        if !offline {
+            // The visible ticks, in ticks so a scroll that keeps the whole
+            // region in view asks nothing new.
+            let from = e.tick.max(axis.tick_at(body.x));
+            let to = end.min(axis.tick_at(body.max_x())).max(from + 1);
+            let width = ((to - from) as f64 / axis.ticks_per_point()) as f32;
+            let visible = TickRange {
+                start: from,
+                end: to,
+            };
+            if Slice::of(visible, width).is_some_and(|s| r.look.needs(s)) {
+                wants.push(RegionWant {
+                    region: e.clone(),
+                    visible,
+                    width,
+                });
+            }
+        }
+        let wave = r.look.held.as_ref().filter(|_| !offline).map(|h| {
+            let w = wave_rect(rect, axis.x(h.slice.from_tick), axis.x(h.slice.to_tick));
+            (w, h.rows.clone())
+        });
+        Some(RegionDraw {
+            row: e.clone(),
+            rect,
+            offline,
+            selected: state.selected_events.contains(&e.id),
+            wave,
+        })
     }
 
     fn block(
@@ -1052,6 +1207,7 @@ impl Scene {
             } else {
                 vec![]
             },
+            regions: vec![],
         }
     }
 }
@@ -1075,6 +1231,9 @@ impl Prepared {
             }
             for b in &self.blocks {
                 paint_block(b, &rect, window, cx);
+                for r in &b.regions {
+                    paint_region(r, o, window, cx);
+                }
             }
             self.time.paint_overlay(o, window);
         });
@@ -1527,6 +1686,20 @@ impl DocumentWindow {
     }
 
     /// A zoom button: the zoom times `factor`, the origin kept.
+    /// The view asks for the waveforms it does not hold: the store runs
+    /// the reads off the UI thread and the window redraws when they land.
+    fn want_region_waves(
+        &mut self,
+        ticks_per_point: f64,
+        wants: &[RegionWant],
+        cx: &mut Context<Self>,
+    ) {
+        let doc = self.doc();
+        self.app().clone().update(cx, |s, _| {
+            s.store.want_region_waves(doc, ticks_per_point, wants);
+        });
+    }
+
     fn zoom_by(&mut self, factor: f64, cx: &mut Context<Self>) {
         let a = &mut self.arrangement;
         a.axis = a.axis.with_zoom(a.axis.ticks_per_point() * factor);

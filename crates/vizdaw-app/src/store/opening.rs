@@ -349,6 +349,7 @@ pub struct Landed {
 
 enum ReadAnswer {
     Sources(crate::lane_inputs::SourcesRead),
+    Waves(Vec<crate::region_waves::WaveReply>),
     Dawproject(Result<DawprojectInfoRow, VizError>),
     Aaf(Result<AafInfoRow, VizError>),
     Midi(Result<MidiFileInfoRow, VizError>),
@@ -361,6 +362,8 @@ pub(super) enum ReadFor {
     InputSources(DocId),
     /// The launch warm-up of the picker's sources.
     WarmSources,
+    /// Region waveforms of document `doc` (each reply has its generation).
+    Waves(DocId),
     OpenDawproject(String),
     OpenAaf(String),
     /// The Import AAF sheet's read of document `doc`, the `generation`th.
@@ -998,6 +1001,39 @@ impl DocumentStore {
         });
     }
 
+    /// The view of document `doc` shows `wants` at `ticks_per_point`: the
+    /// waveform reads they need run off the UI thread, landing in the
+    /// document's cache (render only reads what it holds). How many reads
+    /// were asked for.
+    pub fn want_region_waves(
+        &mut self,
+        doc: DocId,
+        ticks_per_point: f64,
+        wants: &[crate::region_waves::RegionWant],
+    ) -> usize {
+        let n = self
+            .documents
+            .get_mut(&doc)
+            .map_or(0, |d| d.want_region_waves(ticks_per_point, wants));
+        self.start_wave_reads(doc);
+        n
+    }
+
+    /// Runs document `doc`'s waiting waveform reads off the UI thread.
+    pub(crate) fn start_wave_reads(&mut self, doc: DocId) {
+        let Some(reads) = self
+            .documents
+            .get_mut(&doc)
+            .map(crate::DocumentModel::take_wave_reads)
+            .filter(|r| !r.is_empty())
+        else {
+            return;
+        };
+        self.read(ReadFor::Waves(doc), move || {
+            ReadAnswer::Waves(reads.into_iter().map(|r| r.run()).collect())
+        });
+    }
+
     /// Reads the MIDI sources and the device's channels once, off the UI
     /// thread, for the documents opened from now on (the app at launch;
     /// Swift `warmSources`).
@@ -1078,6 +1114,11 @@ impl DocumentStore {
                 }
             }
             (ReadFor::WarmSources, ReadAnswer::Sources(r)) => self.keep_sources(r),
+            (ReadFor::Waves(doc), ReadAnswer::Waves(r)) => {
+                if let Some(d) = self.documents.get_mut(&doc) {
+                    d.land_waves(r);
+                }
+            }
             (ReadFor::OpenDawproject(path), ReadAnswer::Dawproject(r)) => {
                 self.dawproject_read(path, r)
             }

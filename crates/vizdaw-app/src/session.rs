@@ -51,6 +51,9 @@ pub struct IdleNews {
     /// New problem lines (a file not moved to the Trash, a failed
     /// autosave).
     pub problems: Vec<String>,
+    /// Some overview or sample window became available: waveforms that
+    /// answered `Pending` or `Coarse` are asked again.
+    pub overviews_changed: bool,
 }
 
 /// What the app logic needs from a core session. The real `Session`
@@ -332,6 +335,16 @@ pub trait DocSession: Send + Sync {
         to: u64,
         columns: u32,
     ) -> Result<OverviewRows, VizError>;
+    /// `columns` columns (1–8192) of audio region `event` over ticks
+    /// `[from_tick, to_tick)`, with its gain and fades applied by the
+    /// core (a memory lookup; still never called on the UI thread).
+    fn region_waveform(
+        &self,
+        event: u64,
+        from_tick: i64,
+        to_tick: i64,
+        columns: u32,
+    ) -> Result<OverviewRows, VizError>;
     /// The recordings offered for recovery (package-relative paths).
     fn recovered_recordings(&self) -> Result<Vec<String>, VizError>;
     /// Moves record arm to the next or previous track, one undo step
@@ -443,6 +456,7 @@ impl DocSession for Session {
             params_changed: u.params_changed,
             editor_resize: u.editor_resize,
             problems: u.problems,
+            overviews_changed: u.overviews_changed,
         })
     }
     fn lanes(&self, seq: u64) -> Result<Vec<LaneRow>, VizError> {
@@ -796,6 +810,15 @@ impl DocSession for Session {
         columns: u32,
     ) -> Result<OverviewRows, VizError> {
         Session::recording_waveform(self, lane, from, to, columns)
+    }
+    fn region_waveform(
+        &self,
+        event: u64,
+        from_tick: i64,
+        to_tick: i64,
+        columns: u32,
+    ) -> Result<OverviewRows, VizError> {
+        Session::region_waveform(self, event, from_tick, to_tick, columns)
     }
     fn recovered_recordings(&self) -> Result<Vec<String>, VizError> {
         Session::recovered_recordings(self)

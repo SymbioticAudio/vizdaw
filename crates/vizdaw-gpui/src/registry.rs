@@ -321,6 +321,30 @@ impl ChildRecorder {
             .borrow_mut()
             .record_with(&path, role, label, bounds, enabled, None, false, selected);
     }
+
+    /// As [`record`](Self::record), with the node's `value`.
+    pub fn record_value(
+        &mut self,
+        role: &str,
+        label: &str,
+        bounds: Bounds<Pixels>,
+        selected: bool,
+        value: &str,
+    ) {
+        let mut path = self.path.clone();
+        path.push(self.next);
+        self.next += 1;
+        self.registry.borrow_mut().record_with(
+            &path,
+            role,
+            label,
+            bounds,
+            true,
+            Some(value),
+            false,
+            selected,
+        );
+    }
 }
 
 impl RegistryScope {

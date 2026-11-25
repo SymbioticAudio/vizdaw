@@ -24,6 +24,7 @@ pub mod panes;
 pub mod piano_roll;
 pub mod plugin_windows;
 pub mod record_popover;
+pub mod region_drawing;
 pub mod registry;
 pub mod screenshot;
 pub mod sheet_host;

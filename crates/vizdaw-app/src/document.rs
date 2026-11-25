@@ -123,6 +123,8 @@ pub struct DocumentModel {
     pub(crate) record: crate::record::RecordModel,
     /// The track inputs: picker sources, meters, the opening note.
     pub(crate) inputs: crate::lane_inputs::LaneInputs,
+    /// The audio regions' waveforms (rows held, reads to run).
+    pub(crate) waves: crate::region_waves::DocWaves,
     /// Step entry: its state and target (off: none).
     pub(crate) step: crate::step_entry::StepEntryModel,
     /// The Relink sheet's offer.
@@ -231,7 +233,9 @@ impl DocumentModel {
         // Read once; a missing or damaged `ui.json` is the default layout
         // (and stays on disk until the next save).
         let editor = EditorModel::new(session.ui_layout().ok().flatten().as_deref());
+        let waves = crate::region_waves::DocWaves::new(session.clone());
         let mut model = DocumentModel {
+            waves,
             session,
             selected_seq: first_sequence(&snapshot),
             snapshot,
@@ -314,6 +318,9 @@ impl DocumentModel {
                 s.lane_revs.iter().any(|r| r.seq == *seq && r.lane == *lane)
             });
         }
+        if moved {
+            self.waves.cache.document_changed();
+        }
         self.snapshot = s;
         // A selected strip can go with no mixer showing (an Undo of Add
         // Bus): no refetch prunes the selection then.
@@ -394,6 +401,10 @@ impl DocumentModel {
             .plugin_news
             .take(news.params_changed, news.editor_resize)
         {
+            arrived = true;
+        }
+        if news.overviews_changed {
+            self.waves.cache.overviews_changed();
             arrived = true;
         }
         if news.media_changed {

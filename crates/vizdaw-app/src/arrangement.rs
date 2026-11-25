@@ -594,3 +594,60 @@ pub fn a11y_label_in(b: &BlockRow, lane_name: &str, bars: &MeterBars) -> String 
         }
     }
 }
+
+/// What a region is called (Swift `RegionA11y.name`): its own name, else
+/// its file's (`media_name`), else "audio".
+pub fn region_name(r: &EventRow, media_name: Option<&str>) -> String {
+    match r.region_name.as_deref() {
+        Some(n) if !n.is_empty() => n.to_owned(),
+        _ => media_name.unwrap_or("audio").to_owned(),
+    }
+}
+
+/// A region gain's label (Swift `RegionHandles.gainLabel`): "+3.0 dB",
+/// "0.0 dB", "-6.5 dB".
+pub fn region_gain_label(db: f32) -> String {
+    if db.abs() < 0.05 {
+        "0.0 dB".into()
+    } else {
+        format!("{db:+.1} dB")
+    }
+}
+
+/// An audio region's label (Swift `RegionA11y.label`): "Region <name> on
+/// <track>, bar(s) …, gain …[, crossfade][, fades][, offline][, muted]".
+pub fn region_a11y_label(
+    r: &EventRow,
+    name: &str,
+    lane_name: &str,
+    bars: &MeterBars,
+    offline: bool,
+) -> String {
+    let len = r.duration.max(1);
+    let end = r.tick.checked_add(len - 1).unwrap_or(i64::MAX);
+    let first = bars.bar_at(r.tick).number;
+    let last = bars.bar_at(end.max(r.tick)).number;
+    let span = if first == last {
+        format!("bar {first}")
+    } else {
+        format!("bars {first} to {last}")
+    };
+    let mut s = format!(
+        "Region {name} on {lane_name}, {span}, gain {}",
+        region_gain_label(r.gain_db)
+    );
+    // A crossfade says so; its fade in is not one of the fades.
+    if r.crossfade {
+        s.push_str(", crossfade");
+    }
+    if (!r.crossfade && r.fade_in.length > 0) || r.fade_out.length > 0 {
+        s.push_str(", fades");
+    }
+    if offline {
+        s.push_str(", offline");
+    }
+    if r.mute {
+        s.push_str(", muted");
+    }
+    s
+}
