@@ -20,7 +20,7 @@
 //! menu, and the zoom buttons. The maths and the drag are
 //! `vizdaw_app`'s; this canvas only feeds them pointer events.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -41,14 +41,16 @@ use vizdaw_app::arrangement::{
     hit_test, label_every, region_a11y_label, region_name, sketch,
 };
 use vizdaw_app::editor::{DetailEditorKind, Division, EditorTarget, Snap, Tool};
+use vizdaw_app::growing_take::{GrowingTake, HeldPiece, TakeView};
 use vizdaw_app::region_waves::{RegionWant, Slice, WaveLook, WaveState};
 use vizdaw_app::transport::TransportModel;
+use vizdaw_ffi::OverviewRows;
 use vizdaw_ffi::blocks::{BlockKind, BlockRow};
 use vizdaw_ffi::edit::{EditCommand, EventEdit};
 use vizdaw_ffi::events::{EventKindRow, EventRow};
 use vizdaw_ffi::selection::TickRange;
 
-use crate::region_drawing::{RegionDraw, paint_region, wave_rect};
+use crate::region_drawing::{RegionDraw, paint_region, paint_waveform, wave_rect};
 use crate::registry::{ChildRecorder, RegistryScope};
 use crate::shell::DocumentWindow;
 use crate::transport_bar::{self, colors as bar_colors};
@@ -68,6 +70,9 @@ pub const DOTTED: &str = "Dotted";
 pub const OPEN_IN_PIANO_ROLL: &str = "Open in Piano Roll";
 pub const OPEN_IN_LIST: &str = "Open in List";
 pub const DELETE: &str = "Delete";
+/// A take being recorded, in the tree (a new label: Swift's view had
+/// none; plan 8c Task 5).
+pub const RECORDING_TAKE: &str = "Recording take";
 /// The zoom buttons' row above the headers and the canvas.
 pub const TOOLBAR_HEIGHT: f32 = 32.;
 
@@ -108,6 +113,9 @@ pub mod colors {
     /// A region's fade lines (Swift `RegionPalette.fadeLine`, the
     /// secondary label colour).
     pub const FADE_LINE: u32 = TICK;
+    /// A recording take's body: the record colour (a theme token) at
+    /// this alpha, outlined in it (Swift `drawGrowingTakes`).
+    pub const TAKE_ALPHA: f32 = 0.18;
     pub const RADIUS: f32 = 4.;
     /// The piano keyboard's keys and labels (fixed until themes land).
     pub const WHITE_KEY: u32 = 0xe6e6ea;
@@ -141,6 +149,8 @@ pub struct Arrangement {
     layout: Rc<Cell<Bounds<Pixels>>>,
     /// The playhead's x in the canvas at the last draw, when shown.
     playhead: Rc<Cell<Option<f32>>>,
+    /// The waveforms the last frame drew: a test seam.
+    drawn: Rc<RefCell<Vec<DrawnWave>>>,
     rows_built: Cell<usize>,
     _auto_scroll: Option<Task<()>>,
     /// Presses below the ruler (Swift `ToolMachine`).
@@ -184,6 +194,7 @@ impl Arrangement {
             drag: None,
             layout: Rc::default(),
             playhead: Rc::default(),
+            drawn: Rc::default(),
             rows_built: Cell::new(0),
             _auto_scroll: None,
             machine: ToolMachine::new(),
@@ -235,6 +246,13 @@ impl Arrangement {
     #[doc(hidden)]
     pub fn rows_built(&self) -> usize {
         self.rows_built.get()
+    }
+
+    /// The waveforms the last frame drew, takes first, in canvas points:
+    /// a test seam.
+    #[doc(hidden)]
+    pub fn drawn_waves(&self) -> Vec<DrawnWave> {
+        self.drawn.borrow().clone()
     }
 
     /// The rows of `count` tracks the body shows, partly or wholly, for a
@@ -333,6 +351,7 @@ impl Arrangement {
         };
         let layout = self.layout.clone();
         let playhead = self.playhead.clone();
+        let drawn = self.drawn.clone();
         let weak = cx.entity().downgrade();
         let grown = weak.clone();
         let painter = canvas(
@@ -346,8 +365,22 @@ impl Arrangement {
                     });
                 }
                 layout.set(bounds);
+                // The record poll cuts the takes from the view as laid
+                // out: it is handed over when it changes.
+                let take_view = TakeView {
+                    axis: view.axis,
+                    width: f32::from(bounds.size.width),
+                };
+                if state.take_view != Some(take_view) {
+                    let hand = grown.clone();
+                    cx.defer(move |cx| {
+                        hand.update(cx, |this, cx| this.set_take_view(take_view, cx))
+                            .ok();
+                    });
+                }
                 let mut prepared = view.prepare(&state, bounds, &mut recorder);
                 playhead.set(prepared.time.playhead);
+                *drawn.borrow_mut() = prepared.drawn_waves();
                 // The waveforms not held yet are asked for after the
                 // frame, off the UI thread (render reads none).
                 let wants = std::mem::take(&mut prepared.wants);
@@ -760,6 +793,27 @@ pub struct ArrangementState {
     pub playhead: Option<f64>,
     /// Playing the shown sequence.
     pub playing: bool,
+    /// The takes being recorded on the rows in view, as the record poll
+    /// holds them.
+    pub takes: Vec<TakeState>,
+    /// The view the record poll cuts the takes from.
+    pub take_view: Option<TakeView>,
+}
+
+/// A take being recorded on row `index`, with its pieces' rows.
+pub struct TakeState {
+    pub index: usize,
+    pub take: GrowingTake,
+    pub pieces: Arc<[HeldPiece]>,
+}
+
+/// A waveform a frame drew: whose (`take` or `region`), its rect in
+/// canvas points and its rows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DrawnWave {
+    pub kind: &'static str,
+    pub wave: Rect,
+    pub rows: Arc<OverviewRows>,
 }
 
 /// One track's row.
@@ -791,6 +845,8 @@ impl ArrangementState {
             selected_events: vec![],
             playhead: None,
             playing: false,
+            takes: vec![],
+            take_view: None,
         }
     }
 
@@ -810,6 +866,18 @@ impl ArrangementState {
         let lanes = doc.lanes();
         let near = (width > 0.).then(|| (axis.tick_at(-width), axis.tick_at(2. * width)));
         let mut media = None;
+        let takes = doc
+            .held_takes()
+            .iter()
+            .filter_map(|h| {
+                let index = lanes.iter().position(|l| l.id == h.take.lane)?;
+                visible.contains(&index).then(|| TakeState {
+                    index,
+                    take: h.take,
+                    pieces: h.pieces.clone(),
+                })
+            })
+            .collect();
         let rows = lanes
             .get(visible.clone())
             .unwrap_or_default()
@@ -875,6 +943,8 @@ impl ArrangementState {
             selected_events: doc.selection().events.clone(),
             playhead,
             playing,
+            takes,
+            take_view: doc.take_view(),
         }
     }
 }
@@ -894,6 +964,15 @@ struct Prepared {
     blocks: Vec<BlockDraw>,
     /// The waveforms to ask for (not held for the slice in view).
     wants: Vec<RegionWant>,
+    /// The takes being recorded, over the blocks.
+    takes: Vec<TakeDraw>,
+}
+
+/// A take being recorded, laid out for painting: its body and its
+/// pieces' waveforms.
+struct TakeDraw {
+    rect: Rect,
+    waves: Vec<(Rect, Arc<OverviewRows>)>,
 }
 
 /// The time parts every editor canvas draws (Swift `EditorCanvas`): the
@@ -1119,11 +1198,38 @@ impl Scene {
                 );
             }
         }
+        // The takes being recorded (Swift `drawGrowingTakes`), after the
+        // rows' blocks and regions.
+        let mut takes = vec![];
+        for t in state.takes.iter() {
+            let (x, width) = t.take.x_span(axis);
+            let inset = Geometry::BLOCK_INSET + 1.;
+            let rect = Rect {
+                x,
+                y: RULER_HEIGHT + g.row_top(t.index) + inset,
+                width,
+                height: (g.lane_height - 2. * inset).max(1.),
+            };
+            if rect.intersection(&body).is_none() {
+                continue;
+            }
+            recorder.record("image", RECORDING_TAKE, window_rect(&rect), true, false);
+            let waves = t
+                .pieces
+                .iter()
+                .map(|p| {
+                    let wave = wave_rect(rect, axis.x(p.from_tick), axis.x(p.to_tick));
+                    (wave, p.rows.clone())
+                })
+                .collect();
+            takes.push(TakeDraw { rect, waves });
+        }
         Prepared {
             time: TimeLayer::new(axis, &state.bars, w, h, self.range, state.playhead),
             separators,
             blocks,
             wants,
+            takes,
         }
     }
 
@@ -1217,6 +1323,27 @@ pub(crate) fn hsla(c: u32, alpha: f32) -> Hsla {
 }
 
 impl Prepared {
+    /// The waveforms this frame draws, takes first.
+    fn drawn_waves(&self) -> Vec<DrawnWave> {
+        let takes = self.takes.iter().flat_map(|t| {
+            t.waves.iter().map(|(wave, rows)| DrawnWave {
+                kind: "take",
+                wave: *wave,
+                rows: rows.clone(),
+            })
+        });
+        let regions = self.blocks.iter().flat_map(|b| {
+            b.regions.iter().filter_map(|r| {
+                r.wave.as_ref().map(|(wave, rows)| DrawnWave {
+                    kind: "region",
+                    wave: *wave,
+                    rows: rows.clone(),
+                })
+            })
+        });
+        takes.chain(regions).collect()
+    }
+
     fn paint(self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         let o = bounds.origin;
         let rect = |x: f32, y: f32, w: f32, h: f32| canvas_rect(o, x, y, w, h);
@@ -1235,10 +1362,51 @@ impl Prepared {
                     paint_region(r, o, window, cx);
                 }
             }
+            for t in &self.takes {
+                paint_take(t, o, window);
+            }
             self.time.paint_overlay(o, window);
         });
         self.time.paint_ruler(o, window, cx);
     }
+}
+
+/// A take being recorded (Swift `drawGrowingTakes`): a body in the
+/// record colour, and, clipped to it, its pieces' waveforms drawn as an
+/// audio region's (the same colour and wave rect), so it is the same
+/// waveform when Stop places the region.
+fn paint_take(t: &TakeDraw, o: Point<Pixels>, window: &mut Window) {
+    let r = t.rect;
+    let record = crate::strip_palette::tokens().state_record;
+    let body = canvas_rect(
+        o,
+        r.x + 0.5,
+        r.y + 0.5,
+        (r.width - 1.).max(0.),
+        (r.height - 1.).max(0.),
+    );
+    window
+        .paint_quad(fill(body, hsla(record, colors::TAKE_ALPHA)).corner_radii(px(colors::RADIUS)));
+    let inside = canvas_rect(o, r.x, r.y, r.width, r.height);
+    window.with_content_mask(Some(ContentMask { bounds: inside }), |window| {
+        for (wave, rows) in &t.waves {
+            paint_waveform(
+                rows,
+                *wave,
+                o,
+                hsla(colors::REGION_LINE, colors::WAVEFORM_ALPHA),
+                window,
+            );
+        }
+    });
+    window.paint_quad(quad(
+        body,
+        px(colors::RADIUS),
+        gpui::transparent_black(),
+        px(1.),
+        rgb(record),
+        BorderStyle::Solid,
+    ));
 }
 
 fn paint_block(
@@ -1685,7 +1853,15 @@ impl DocumentWindow {
         cx.notify();
     }
 
-    /// A zoom button: the zoom times `factor`, the origin kept.
+    /// The arrangement's view as laid out, for the record poll to cut the
+    /// takes from (no redraw: the next poll reads with it).
+    fn set_take_view(&mut self, view: TakeView, cx: &mut Context<Self>) {
+        let doc = self.doc();
+        self.app().clone().update(cx, |s, _| {
+            s.store.with_document(doc, |d, _| d.set_take_view(view));
+        });
+    }
+
     /// The view asks for the waveforms it does not hold: the store runs
     /// the reads off the UI thread and the window redraws when they land.
     fn want_region_waves(
@@ -1700,6 +1876,7 @@ impl DocumentWindow {
         });
     }
 
+    /// A zoom button: the zoom times `factor`, the origin kept.
     fn zoom_by(&mut self, factor: f64, cx: &mut Context<Self>) {
         let a = &mut self.arrangement;
         a.axis = a.axis.with_zoom(a.axis.ticks_per_point() * factor);

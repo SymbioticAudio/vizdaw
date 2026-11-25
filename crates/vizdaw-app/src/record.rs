@@ -21,6 +21,7 @@ use crate::alerts::error_message;
 use crate::commands::{self, Ran, check_names, from_viz, ran};
 use crate::document::DocumentModel;
 use crate::editor::GESTURE_OPEN;
+use crate::growing_take::GrowingRows;
 use crate::mixer::commands::{control_args, thrown};
 use crate::transport_fields::{TransportField, commit_field, field_text};
 
@@ -107,6 +108,9 @@ pub struct RecordModel {
     bar_punch_draft: Option<(TransportField, String)>,
     /// What the core last reported.
     state: Option<RecordStateRow>,
+    /// The takes the poll holds while a pass records, and the view they
+    /// are cut for.
+    pub(crate) growing: GrowingRows,
 }
 
 impl Default for RecordModel {
@@ -127,6 +131,7 @@ impl RecordModel {
             punch_drafts: HashMap::new(),
             bar_punch_draft: None,
             state: None,
+            growing: GrowingRows::default(),
         }
     }
 
@@ -357,8 +362,10 @@ impl DocumentModel {
     /// app calls it for a new document).
     pub fn apply_record_defaults(&mut self, d: RecordDefaults) {
         let state = self.record.state.take();
+        let growing = std::mem::take(&mut self.record.growing);
         self.record = RecordModel {
             state,
+            growing,
             ..RecordModel::new(d)
         };
     }
@@ -564,6 +571,8 @@ impl DocumentModel {
                 let ended = self.record.is_recording() && !s.recording;
                 self.record.state = Some(s);
                 if ended {
+                    // The take's rows go at Stop: the placed region draws it.
+                    self.record.growing.clear_takes();
                     self.take_landed_snapshot();
                 }
             }
@@ -588,8 +597,9 @@ impl DocumentModel {
     }
 
     /// The poll's part after a good transport read: the record state while
-    /// playing, recording or counting in, and a held recovery offer shown
-    /// again. True when what the window shows changed.
+    /// playing, recording or counting in, the growing takes' rows
+    /// ([`DocumentModel::poll_growing_takes`]), and a held recovery offer
+    /// shown again. True when what the window shows changed.
     pub fn poll_record(&mut self) -> bool {
         let t = self.last_transport();
         let mut changed = false;
@@ -597,6 +607,9 @@ impl DocumentModel {
             let before = self.record.state.clone();
             self.refresh_record(false);
             changed = before != self.record.state;
+        }
+        if self.record.is_recording() || !self.held_takes().is_empty() {
+            changed |= self.poll_growing_takes();
         }
         self.reoffer_if_held() || changed
     }

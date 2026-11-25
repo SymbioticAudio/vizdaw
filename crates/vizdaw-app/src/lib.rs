@@ -18,6 +18,7 @@ pub mod document;
 pub mod editor;
 pub mod for_daw;
 pub mod formats;
+pub mod growing_take;
 pub mod interchange;
 pub mod interchange_commands;
 pub mod jobs;

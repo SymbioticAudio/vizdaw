@@ -350,6 +350,7 @@ pub struct Landed {
 enum ReadAnswer {
     Sources(crate::lane_inputs::SourcesRead),
     Waves(Vec<crate::region_waves::WaveReply>),
+    Takes(crate::growing_take::TakeReply),
     Dawproject(Result<DawprojectInfoRow, VizError>),
     Aaf(Result<AafInfoRow, VizError>),
     Midi(Result<MidiFileInfoRow, VizError>),
@@ -364,6 +365,8 @@ pub(super) enum ReadFor {
     WarmSources,
     /// Region waveforms of document `doc` (each reply has its generation).
     Waves(DocId),
+    /// The recording takes' pieces of document `doc`.
+    Takes(DocId),
     OpenDawproject(String),
     OpenAaf(String),
     /// The Import AAF sheet's read of document `doc`, the `generation`th.
@@ -1034,6 +1037,19 @@ impl DocumentStore {
         });
     }
 
+    /// Runs document `doc`'s waiting read of its recording takes' pieces
+    /// off the UI thread.
+    pub(crate) fn start_take_reads(&mut self, doc: DocId) {
+        let Some(read) = self
+            .documents
+            .get_mut(&doc)
+            .and_then(crate::DocumentModel::take_growing_read)
+        else {
+            return;
+        };
+        self.read(ReadFor::Takes(doc), move || ReadAnswer::Takes(read.run()));
+    }
+
     /// Reads the MIDI sources and the device's channels once, off the UI
     /// thread, for the documents opened from now on (the app at launch;
     /// Swift `warmSources`).
@@ -1117,6 +1133,11 @@ impl DocumentStore {
             (ReadFor::Waves(doc), ReadAnswer::Waves(r)) => {
                 if let Some(d) = self.documents.get_mut(&doc) {
                     d.land_waves(r);
+                }
+            }
+            (ReadFor::Takes(doc), ReadAnswer::Takes(r)) => {
+                if let Some(d) = self.documents.get_mut(&doc) {
+                    d.land_growing_read(r);
                 }
             }
             (ReadFor::OpenDawproject(path), ReadAnswer::Dawproject(r)) => {

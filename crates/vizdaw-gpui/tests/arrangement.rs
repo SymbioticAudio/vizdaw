@@ -1608,3 +1608,161 @@ fn a_zoom_asks_again(cx: &mut TestAppContext) {
     assert_eq!(asks.len(), 2, "{asks:?}");
     assert_eq!(asks[1].3, (BAR as f64 / tpp).ceil() as u32);
 }
+
+// ---------------------------------------------------------------------
+// The take drawn while it records (plan 8c Task 5)
+
+use vizdaw_ffi::edit::LaneInputRow;
+use vizdaw_gpui::RunCommand;
+use vizdaw_gpui::arrangement::{DrawnWave, RECORDING_TAKE};
+
+/// The demo with Vox (row 2) armed on mono input 1, recording.
+fn armed_vox(cx: &mut TestAppContext) -> Setup {
+    let f = demo_fake();
+    let mut lanes = f.lanes(3).unwrap();
+    let mut vox = lane_row(VOX, "Vox", false);
+    vox.audio_out = Some(7);
+    vox.arm = true;
+    vox.input = Some(LaneInputRow::Audio {
+        first: 0,
+        stereo: false,
+        return_of: None,
+    });
+    lanes.push(vox);
+    f.set_lanes(3, lanes);
+    f.set_media(vec![media_row(5, None)]);
+    let mut s = setup(cx, f);
+    s.cx.dispatch_action(RunCommand::new("transport.record"));
+    s.cx.run_until_parked();
+    s
+}
+
+/// Mono rows of `columns` columns, every one −0.5…0.5.
+fn take_rows(columns: u32) -> OverviewRows {
+    OverviewRows {
+        state: OverviewStateRow::Ready,
+        channels: 1,
+        columns,
+        min: vec![-0.5; columns as usize],
+        max: vec![0.5; columns as usize],
+    }
+}
+
+impl Setup {
+    /// `frames` of the take written, then one fast poll (33 ms).
+    fn written(&mut self, frames: u64) {
+        self.fake.with_pass(|r| r.frames = frames);
+        self.cx.executor().advance_clock(Duration::from_millis(40));
+        self.cx.run_until_parked();
+    }
+
+    fn drawn_waves(&mut self) -> Vec<DrawnWave> {
+        self.window
+            .read_with(&self.cx, |v, _| v.arrangement().drawn_waves())
+            .unwrap()
+    }
+}
+
+/// The tree shows `Recording take` on the armed track, growing with what
+/// is written, poll by poll; it is gone after Stop. The pass never
+/// locates.
+#[gpui::test]
+fn the_recording_take_grows_on_its_track_and_goes_at_stop(cx: &mut TestAppContext) {
+    let mut s = armed_vox(cx);
+    assert!(s.find("image", RECORDING_TAKE).is_none(), "nothing written");
+    s.fake.set_recording_waveform(take_rows(40));
+    // 0.5 s: 15 360 ticks, 40 points at the default zoom.
+    s.written(24_000);
+    let canvas = s.canvas().bounds;
+    let take = s.element("image", RECORDING_TAKE);
+    assert_eq!(take.bounds.origin.x, canvas.origin.x);
+    assert_eq!(
+        take.bounds.origin.y,
+        canvas.origin.y + px(RULER + 96. + 3.),
+        "on Vox's row"
+    );
+    assert_eq!(take.bounds.size.width, px(40.));
+    s.written(48_000);
+    assert_eq!(
+        s.element("image", RECORDING_TAKE).bounds.size.width,
+        px(80.)
+    );
+    s.cx.dispatch_action(RunCommand::new("transport.record"));
+    s.cx.run_until_parked();
+    assert!(s.find("image", RECORDING_TAKE).is_none(), "gone after Stop");
+    assert!(s.locates().is_empty(), "{:?}", s.fake.calls());
+    assert!(!s.fake.calls().iter().any(|c| c.starts_with("locate")));
+}
+
+/// Render reads nothing: the poll reads each piece once, frames read
+/// none.
+#[gpui::test]
+fn the_take_is_read_per_poll_not_per_frame(cx: &mut TestAppContext) {
+    let mut s = armed_vox(cx);
+    s.written(48_000);
+    let reads = s.fake.reads("recording_waveform");
+    assert_eq!(reads, 2, "two 40-point pieces, read in the poll");
+    s.redraw(3);
+    assert_eq!(s.fake.reads("recording_waveform"), reads);
+}
+
+/// At Stop the take turns into the same waveform: the bars drawn for the
+/// take's last poll are the placed region's after Stop, and the region
+/// reads `ready`.
+#[gpui::test]
+fn at_stop_the_take_becomes_the_same_waveform(cx: &mut TestAppContext) {
+    let mut s = armed_vox(cx);
+    // 0.75 s: 23 040 ticks, 60 points, one piece.
+    s.fake.set_recording_waveform(take_rows(60));
+    s.written(36_000);
+    let take: Vec<DrawnWave> = s
+        .drawn_waves()
+        .into_iter()
+        .filter(|w| w.kind == "take")
+        .collect();
+    assert_eq!(take.len(), 1, "{take:?}");
+    // Stop places the region the take was.
+    let mut region = audio_region(KICK, 0, 23_040, 5);
+    region.frames = 36_000;
+    s.fake
+        .set_blocks(3, VOX, vec![events_block(0, 23_040, &[KICK])]);
+    s.fake.set_events(3, VOX, vec![region]);
+    s.fake.set_region_waveform(
+        KICK,
+        ScriptedWave {
+            state: OverviewStateRow::Ready,
+            channels: 1,
+            min: -0.5,
+            max: 0.5,
+        },
+    );
+    s.cx.dispatch_action(RunCommand::new("transport.record"));
+    s.cx.run_until_parked();
+    s.redraw(1);
+    let label = "Region kick.wav on Vox, bar 1, gain 0.0 dB";
+    assert_eq!(s.value("button", label).as_deref(), Some("ready"));
+    let after = s.drawn_waves();
+    assert!(after.iter().all(|w| w.kind == "region"), "{after:?}");
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].wave, take[0].wave, "the same wave rect");
+    assert_eq!(
+        waveform_bars(&after[0].rows, after[0].wave),
+        waveform_bars(&take[0].rows, take[0].wave),
+        "no visual jump"
+    );
+}
+
+/// The painter joins side-by-side equal bars (one path, fewer
+/// rectangles): what is covered is the same.
+#[test]
+fn equal_bars_side_by_side_join() {
+    use vizdaw_gpui::region_drawing::merge_runs;
+    let bars = waveform_bars(
+        &rows(1, &[-0.5, -0.5, -0.5, 0.], &[0.5, 0.5, 0.5, 1.]),
+        r(0., 0., 40., 20.),
+    );
+    assert_eq!(
+        merge_runs(bars),
+        vec![r(0., 5., 30., 10.), r(30., 0., 10., 10.)]
+    );
+}

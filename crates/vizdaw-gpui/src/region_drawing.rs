@@ -182,9 +182,41 @@ pub fn paint_waveform(
     ) {
         return;
     }
-    for b in waveform_bars(rows, wave) {
-        window.paint_quad(fill(canvas_rect(o, b.x, b.y, b.width, b.height), colour));
+    // One path for all the bars, a run of equal bars as one rectangle: a
+    // quad per bar costs too much per frame while a take grows (plan 8c
+    // Task 5).
+    let mut p = PathBuilder::fill();
+    let mut any = false;
+    for b in merge_runs(waveform_bars(rows, wave)) {
+        let (x0, y0) = (o.x + px(b.x), o.y + px(b.y));
+        let (x1, y1) = (x0 + px(b.width), y0 + px(b.height));
+        p.add_polygon(
+            &[point(x0, y0), point(x1, y0), point(x1, y1), point(x0, y1)],
+            true,
+        );
+        any = true;
     }
+    if any && let Ok(path) = p.build() {
+        window.paint_path(path, colour);
+    }
+}
+
+/// `bars` with each run of side-by-side bars of the same top and height
+/// joined into one rectangle (what is covered is the same).
+pub fn merge_runs(bars: Vec<Rect>) -> Vec<Rect> {
+    let mut out: Vec<Rect> = Vec::with_capacity(bars.len());
+    for b in bars {
+        if let Some(last) = out.last_mut()
+            && last.y == b.y
+            && last.height == b.height
+            && (last.max_x() - b.x).abs() < 1e-3
+        {
+            last.width = b.max_x() - last.x;
+            continue;
+        }
+        out.push(b);
+    }
+    out
 }
 
 /// One audio region, laid out for painting.

@@ -166,6 +166,9 @@ struct Windows {
     sounds: Vec<(u64, BuiltinSound)>,
 }
 
+/// A scripted tempo map: the seconds at a tick.
+type SecondsMap = Arc<dyn Fn(i64) -> f64 + Send + Sync>;
+
 /// The fake's recording side: a pass while `pass` is some, its fates,
 /// the owed save, the click and the input.
 #[derive(Default)]
@@ -184,6 +187,11 @@ struct Rec {
     /// The peaks the next `input_levels` answers.
     levels: Vec<f32>,
     waveform: Option<OverviewRows>,
+    /// Every `recording_waveform(lane, from, to, columns)` answered.
+    waveform_asks: Vec<(u64, u64, u64, u32)>,
+    /// The tempo map `seconds_at` follows (none: the transport's ticks
+    /// per second throughout).
+    seconds_map: Option<SecondsMap>,
     /// What the next `step_entry` calls answer, in turn.
     steps: VecDeque<StepResultRow>,
     step_inputs: Vec<(u64, u64, StepInputRow)>,
@@ -1591,6 +1599,26 @@ impl FakeSession {
         self.st().rec.waveform = Some(rows);
     }
 
+    /// Every `recording_waveform` answered: (track, from frame, to frame,
+    /// columns).
+    pub fn recording_waveform_asks(&self) -> Vec<(u64, u64, u64, u32)> {
+        self.st().rec.waveform_asks.clone()
+    }
+
+    /// Changes the pass recording now (as the core reports it next).
+    pub fn with_pass(&self, f: impl FnOnce(&mut RecordStateRow)) {
+        if let Some(r) = self.st().rec.pass.as_mut() {
+            f(r);
+        }
+    }
+
+    /// The tempo map `seconds_at` follows from now on (`None`: the
+    /// transport's ticks per second throughout); `ticks_at` keeps the
+    /// constant rate.
+    pub fn set_seconds_at_map(&self, map: Option<SecondsMap>) {
+        self.st().rec.seconds_map = map;
+    }
+
     /// What the next `step_entry` answers (queued).
     pub fn script_step(&self, result: StepResultRow) {
         self.st().rec.steps.push_back(result);
@@ -2267,6 +2295,9 @@ impl DocSession for FakeSession {
         Self::scripted(&mut s, "seconds_at")?;
         s.calls.push(format!("seconds_at({seq})"));
         let per_second = s.transport.ticks_per_second;
+        if let Some(map) = &s.rec.seconds_map {
+            return Ok(ticks.into_iter().map(|t| map(t)).collect());
+        }
         Ok(ticks.into_iter().map(|t| t as f64 / per_second).collect())
     }
     fn ticks_at(&self, seq: u64, seconds: Vec<f64>) -> Result<Vec<i64>, VizError> {
@@ -3038,6 +3069,7 @@ impl DocSession for FakeSession {
         if !r.lanes.iter().any(|l| l.lane == lane && l.audio) {
             return Err(bad(format!("track {lane} records no audio in this pass")));
         }
+        s.rec.waveform_asks.push((lane, from, to, columns));
         Ok(s.rec.waveform.clone().unwrap_or_else(|| OverviewRows {
             state: OverviewStateRow::Ready,
             channels: 1,
