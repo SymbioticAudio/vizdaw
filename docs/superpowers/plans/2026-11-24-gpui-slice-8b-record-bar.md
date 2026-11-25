@@ -189,3 +189,36 @@
 - Backlog: close "Idle problems never reach the user", and add the quit-wording row (Task 1) and the Main View » popover row (Task 4).
 - The controller runs the Linux GPUI tests and e2e over ssh and makes the macOS on-screen checks. Screenshots go to the owner only when the bar resembles the approved look.
 - [ ] Commit `docs: slice 8b manual checks, checklist and backlog`.
+
+## Outcome (2026-11-24)
+
+All seven tasks done (commits on `next` from ffc3d3e0 to dc782828; H2 merged in at 84d1f456). The transport bar draws the recording views on 8a's models: Faults with its popover (idle problems now reach the user), the close question in Swift's words, Record, Replace/Overdub, Count-in, the Step Entry summary, the Record Options popover, Punch In and Out with measured labels and » opening at a field, Click with Level/Mode, DSP Load, Audio Device, command buttons, the Transport check marks and the Step menu. Evidence: vizdaw-app 1016 and vizdaw-gpui 589 green on the Mac at Task 6; after the H2 merge, 3198 workspace tests on the Mac and app+gpui+core-host 1927/1927 on Linux; GPUI e2e 35/36 on the Mac (the screenshot test needs the screenshot build); CI runs the Linux e2e. Final whole-branch review: ready, no Critical/Important.
+
+**Not yet seen on screen:** every look item in the slice 8b section of `docs/testing/manual-checks.md` (26 rows), including whether the standard bar fits at 1440 with the real font and the native Step menu keys.
+
+### Rulings
+
+- Task 1: review clean (no Critical/Important). Rulings (implementer, accepted): Faults tint in ui.tree; Faults takes no room while hidden; folded Faults opens under »; extra redraw in app_state.rs; Esc in the Mixer closes the document's Faults popover — costs in task-1-report.md
+- Task 2: review clean. Rulings (implementer, accepted): cluster fold width counts readouts after Record (per-character estimate); summary takes a fixed 260 px for folding; summary » entry is a menuitem 'Step Entry' with Swift's value text; press-on-Record test fakes the draft via bar_punch_typed until Task 4 — cost: items may fold slightly early
+- Task 3: Ruling: R with a popover punch field focused types 'r' (text-gated, Swift) — the draft refusal is tested from the bar button, menu and channel — cost: none
+- Task 3: review clean (click outside can't commit a draft; writes go to the window's own document). Rulings (implementer, accepted): no backdrop — a press outside closes and acts (Swift transient); Esc in a punch field drops the draft and closes; window losing key/closing closes the popover; » entry opens the popover directly
+- Task 4: review clean (every end of a bar punch edit clears the draft, incl. window close and the field folding away). Rulings (implementer, accepted): all five field labels measured; channel go_punch focuses Punch In only on the row (Swift), U opens » at a folded field; » field popover found by existing » titles; one bar punch draft per document shared by document and Mixer windows (unreachable: one window holds the keyboard)
+- Task 5: review clean. Rulings (implementer, accepted): the tests' 'nothing folds' width 1440 → 1600 (Swift's figure) since Click no longer fits 1440 in the test font; command buttons greyed when the GPUI app can't run the command yet; submenus open on click; no command-button icons (backlog)
+- Task 6: review clean. Rulings (implementer, accepted): Step menu items dispatch StepKey{from_menu:true}; hand-written PartialEq ignores from_menu so macOS shows the StepEntry-context keys with no second binding; menu items skip the held-key check; bar step buttons take the same path
+
+### Carried
+
+- Task 1: carry to Tasks 2-5: e2e must still see Faults unfolded once more bar items exist; e2e runs need VIZDAW_E2E_APP=target/debug/vizdaw-gpui (tell implementers)
+- Task 2: carry to Task 3: the popover-close half of the Record rule (Record refusal must not close the Record Options popover)
+- Task 3: carry to Task 4: bar Punch In/Out share labels with the popover's — lookups go through the 'Record Options' group
+- Task 3: carry to Task 7: manual rows — Record pressed in the Mixer while the document window's popover holds a draft records at the current punch (Swift same); popover look (chevron, layout, steppers, disabled, caret kept on Record press)
+- Task 4: carry to Task 7: look check of the measured labels with the real font; e2e step 7 written after the code (never seen failing)
+- Task 5: carry to Task 7: look check — does the standard bar fit at 1440 with the real Mac font (Pane Toggles may fold)
+- Task 6: carry to Task 7: manual rows for the native Step menu — shown keys (T, 1–6, ., /, =, 0, ⌫), disabled items show no key, no key fires twice, and with step entry off . / 2 / Delete do their global commands
+
+### Deferred minors
+
+- Task 2: minor (deferred): 7 Minors in task-2-review.md
+- Task 3: minor (deferred): stale punch field writes into the other window's popover for one frame (channel only); popover stays open in the model with its draft when the bar disappears; other Minors in task-3-review.md
+- Task 5: minor (deferred): no test that a command:file.bounce button opens the Bounce sheet (aDialogCommandFallsThroughToItsMenuItem)
+- Final: the rest are in the backlog row "GPUI slice 8b: review leftovers"

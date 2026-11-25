@@ -185,7 +185,7 @@ resembles the approved look.
 | macOS | controller | The Click menu: check mark, Level › and Mode › (they open on a click here, not on hover; see the backlog), the bar and » forms agree | open |
 | macOS | controller | DSP Load digits change without moving the row, and the Audio Device text shows the device name and rate | open |
 | macOS | controller | Command button faces (Mixer, Piano Roll, List, Drum Grid, Loop, Record): label only, greyed when the app cannot run the command yet | open |
-| macOS | controller | The Faults ⚠ glyph and tint appear when a problem arrives and clear when dismissed; its popover lists the lines (a failed plug-in, an autosave failure) | open |
+| macOS | controller | The Faults ⚠ glyph and tint appear when a problem arrives; the popover lists the lines and closes on Esc, a click outside or the button; the lines stay until the document closes (a failed plug-in, an autosave failure) | open |
 | macOS | controller | The stop-reason line in Faults: unplug an interface mid-recording and read "Recording stopped: the audio device went away; what was recorded is kept." (README 136, at 1218) | open |
 | macOS | controller | Transport menu check marks: Overdub, Punch and Click show a mark when on, and the mark follows the bar | open |
 | macOS | controller | The native Step menu shows its keys (T, 1–6, ., /, =, 0, ⌫) | open |
