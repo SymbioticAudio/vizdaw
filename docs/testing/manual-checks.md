@@ -201,3 +201,44 @@ resembles the approved look.
 | Linux | owner | The Record Options popover opens under its chevron, takes the keyboard, closes on a press outside and on Esc | open |
 | Linux | owner | The Step and Transport menus: check marks and keys shown as the platform writes them; Ctrl-digit and plain digit keys do what the Step menu says | open |
 | Linux | owner | Record with a real input device (needs host track H3; until then the offline device) and the stop-reason line in Faults | open |
+
+### Inputs, meters, waveforms and markers (GPUI slice 8c)
+
+A GPUI build from `next`. The input model, the header and strip pickers, the
+meters, the region waveforms, the growing take and the Markers pane are tested
+headless and by the control channel (`gpui_arms_meters_counts_in_and_draws_the_take`,
+`gpui_records_audio_loop_takes_and_midi`, `window_views_and_panes_over_the_channel`
+step for markers). What's left is how it looks and feels with the real font,
+real screen and real devices. **Controller** rows Claude runs on the Mac with
+screen control; **owner** rows need the owner's Linux desktop. Linux real
+input is host track H3. Screenshots go to the owner only when the header and
+the take resemble the approved look.
+
+| Platform | Who | What | Status |
+|---|---|---|---|
+| macOS | controller | The monitor button's letters and tints (off, on, auto), in the header and in the strip; both strip buttons agree; the tint is readable in every theme | open |
+| macOS | controller | The input row's truncation (a long channel or port name ends in an ellipsis, not over the badge) and its badge | open |
+| macOS | controller | The input picker: its sections (audio channels, MIDI sources, none), the checked entry, and its anchoring under the header's input row and under the strip's input control; Escape and a click outside close it | open |
+| macOS | controller | The input picker's list cannot scroll in a short window: shrink the window and note which entries cannot be reached (known gap, see the backlog) | open |
+| macOS | controller | The meter's fall rate after a loud signal, and the 2 s clip mark (it holds, then clears; a click or a new peak behaves as in Swift) | open |
+| macOS | controller | The meter hides on short track rows and returns when the row grows | open |
+| macOS | controller | Region waveform colour against each theme's region fill (SVP Light, Cubase Dark, Metro UI, Realistic, SymbioticAudio), selected and muted regions included | open |
+| macOS | controller | Region waveforms: mono is one band, stereo is two bands; gain and fades shape the drawing; the crossfade X draws and the earlier region's tail is as the backlog says | open |
+| macOS | controller | Zoom in close: `Coarse` rows sharpen into `Ready` ones; after a zoom the waveform is briefly blank, then fills in; `Pending` regions fill in without a flicker | open |
+| macOS | controller | No blink or hitch while scrolling a long region and a long project, vertically and horizontally | open |
+| macOS | controller | An offline region: the hatching (0xf0883e at 0.55, a stand-in for Swift's offline colour; the owner may pick another) and the "Offline" pill read clearly on every theme; relinking removes both | open |
+| macOS | controller | The take while recording: its colour, the peaks growing in step with the playhead, and no lag in the UI while it grows | open |
+| macOS | controller | At Stop the take turns into the same waveform on the placed region: compare a screenshot just before and just after Stop; no flash, shift or blank | open |
+| macOS | controller | Recording speed: rerun `gpui_records_audio_loop_takes_and_midi` and `gpui_arms_meters_counts_in_and_draws_the_take` on an UNLOCKED Mac and note both times (earlier runs were made with the screen locked, so the drawing cost is unproven); record the times here | open |
+| macOS | controller | Record a long take by hand (several minutes, a few tracks armed) and watch for UI lag, a late playhead or a control channel that times out | open |
+| macOS | controller | The Markers pane: row spacing and colours, the name label and the position digits aligned in a column (Swift monospaced), the selected or current row, and the pane's empty state | open |
+| macOS | controller | The Markers pane: hovering a row shows the "Go to <name>" tooltip; a click moves the playhead to the marker (also while playing) | open |
+| macOS | controller | The Markers pane with many markers (50 or more): the list scrolls to the last one; a failed move shows "Go to Marker Failed:" with the reason | open |
+| macOS | controller | A real input device on the Mac: its channel names fill the picker; choosing it while closed shows "Opening the audio input… If macOS asks…" and the microphone prompt appears; after Allow, the meter moves with sound; after Don't Allow, the track says so and nothing crashes | open |
+| macOS | controller | A real MIDI source (a keyboard) listed in the picker, chosen on a track; notes light the meter or the track and record; unplugging it leaves the track's choice and shows it offline | open |
+| Linux | owner | The monitor button, input row, picker and meter on the owner's desktop with the system font: nothing clipped, tints readable | open |
+| Linux | owner | Region waveforms on the owner's desktop: colour against each theme's fill, stereo bands, offline hatching with its pill, no hitch scrolling a long project, the brief blank after a zoom | open |
+| Linux | owner | The growing take and its hand-over at Stop look the same just before and after; no UI lag during a long take | open |
+| Linux | owner | The Markers pane on the owner's desktop: rows, position digits, the "Go to <name>" tooltip, scrolling many markers | open |
+| Linux | owner | The GPUI e2e `gpui_arms_meters_counts_in_and_draws_the_take` and the markers step run green in Linux CI under Xvfb (Linux run pending) | open |
+| Linux | owner | A real input device and a real MIDI source in the picker, with the audio permission text where the system asks (needs host track H3; until then the offline device) | open |

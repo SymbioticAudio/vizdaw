@@ -208,8 +208,8 @@ item (false: keys, the Keys settings and the control channel only).
 
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
-| lane.set_input | Track | Set Track Input |  | false | S8c | S8c |
-| lane.set_monitor | Track | Set Track Monitor |  | false | S8c | S8c |
+| lane.set_input | Track | Set Track Input |  | false | S8c | S8c (Linux run pending) |
+| lane.set_monitor | Track | Set Track Monitor |  | false | S8c | S8c (Linux run pending) |
 | lane.set_output | Track | Set Track Output |  | false | | |
 | lane.set_input_fx | Track | Set Input Effects |  | false | | |
 | lane.set_mpe | Track | Set Track MPE |  | false | | |
@@ -492,6 +492,7 @@ a group of by-eye steps the GPUI app must pass.
 | Fader groups, VCAs and the transport bar (README 439-456) | | |
 | Hand checks from the plan's reviews | | |
 | Small fixes (README 457-464) | | |
+| Inputs, meters, waveforms and markers (GPUI slice 8c) | | |
 
 ### `app/README.md` headings
 
@@ -553,7 +554,7 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 | drives_the_mixer_from_a_kontrol_mk3 | | |
 | bounces_the_demo_and_checks_the_file | | |
 | edits_a_region_through_the_stub_editor | | |
-| window_views_and_panes_over_the_channel | S6a (views and panes; mixer-window step later), S8c (markers step) | S6a (views via ui.view_*; ⌃2 is ⌘2 on Linux), S8c (markers step) |
+| window_views_and_panes_over_the_channel | S6a (views and panes; mixer-window step later), S8c (markers step) | S6a (views via ui.view_*; ⌃2 is ⌘2 on Linux), S8c (markers step; Linux run pending) |
 | themes_and_the_strip_over_the_channel | | |
 | edits_a_region_in_the_audio_editor | | |
 | transport_jumps_readouts_and_fields_over_the_channel | S3 (steps 0–6), S8b (step 7) | S3 (steps 0–6); step 7 S8b, Linux run pending |
