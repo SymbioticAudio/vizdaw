@@ -34,6 +34,7 @@ use gpui::{
 use vizdaw_app::alerts::{AlertItem, error_message};
 use vizdaw_app::commands;
 use vizdaw_app::editor::{MainView, PaneSide, PaneView, ViewLayouts};
+use vizdaw_app::marker_list::{MarkerList, MarkerListRow};
 use vizdaw_app::mixer::MixerPlacement;
 use vizdaw_app::record::PopoverHost;
 use vizdaw_app::transport::Shuttle;
@@ -692,6 +693,14 @@ impl DocumentWindow {
                 d.set_status(Some(error_message(&e)));
             }
         });
+        self.app.update(cx, |s, _| s.poll(doc));
+    }
+
+    /// A Markers row's click: the transport moves there (a refusal is the
+    /// status line's) and the readouts read it now.
+    pub(crate) fn go_to_marker(&mut self, row: &MarkerListRow, cx: &mut Context<Self>) {
+        let doc = self.doc;
+        self.with_model(cx, |d| MarkerList::go(row, d));
         self.app.update(cx, |s, _| s.poll(doc));
     }
 
@@ -1679,7 +1688,7 @@ impl DocumentWindow {
                     cx,
                 )
             } else {
-                panes::content(view, host, &mut scope.container())
+                panes::content(view, host, &mut scope.container(), cx)
             };
             sides.push(panes::frame(
                 side,
@@ -1726,7 +1735,7 @@ impl DocumentWindow {
                         let content = mixer_view::render(view, &mut inner, window, cx);
                         panes::mixer(content, &inner)
                     }
-                    None => panes::content(host.setup.bottom.view, host, &mut inner),
+                    None => panes::content(host.setup.bottom.view, host, &mut inner, cx),
                 }
             });
             let content = div()

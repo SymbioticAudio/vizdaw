@@ -2,19 +2,22 @@
 //! `PaneGeometry`): the left, centre, bottom and right regions from the
 //! layout of the current main view, the Mix view's centre, the frame-only
 //! hiding of a small window, the dividers' drags, the pane pickers, and the
-//! transport bar's Main View and pane toggles, driven through GPUI's test
-//! platform with the scripted session.
+//! transport bar's Main View and pane toggles, and the right pane's
+//! Markers view, driven through GPUI's test platform with the scripted
+//! session.
 
 use std::sync::Arc;
+
+use core_control::registry::ArgValue;
 
 use gpui::{
     Bounds, Entity, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
     Point, TestAppContext, VisualTestContext, WindowHandle, point, px, size,
 };
-use vizdaw_app::DocumentStore;
 use vizdaw_app::editor::{DetailEditorKind, MainView, PaneSide, PaneView};
 use vizdaw_app::testing::{FakeSession, demo_fake};
 use vizdaw_app::transport_bar::TransportLayout;
+use vizdaw_app::{DocSession, DocumentStore};
 use vizdaw_ffi::edit::{EditCommand, LaneEdit};
 use vizdaw_gpui::panes;
 use vizdaw_gpui::registry::Element;
@@ -25,6 +28,7 @@ const BOTTOM: &str = "Bottom Pane";
 const RIGHT: &str = "Right Pane";
 const STRIP_NOTE: &str = "Select a track to see its channel strip.";
 const CONTROLLERS_NOTE: &str = "Select a track to see its controllers.";
+const BAR: i64 = 61_440;
 const CHORDS: &str = "MIDI track, Chords, no destination";
 
 struct Setup {
@@ -217,6 +221,46 @@ impl Setup {
             })
             .collect()
     }
+}
+
+/// The right pane's Markers view (slice 8c Task 6; Swift `MarkersPane`):
+/// the empty note; a marker added and a locator set show as rows in time
+/// order, each a button with its name and position; a click moves the
+/// transport there.
+#[gpui::test]
+fn the_markers_view_lists_and_moves(cx: &mut TestAppContext) {
+    let mut s = setup(cx);
+    s.run_menu("ui.toggle_right");
+    s.click_picker(RIGHT);
+    s.click("menuitem", "Markers");
+    assert!(s.find("text", "No markers or locators.").is_some());
+    let seq = s.model(|d| d.selected_seq().unwrap()) as i64;
+    s.update_model(|d| {
+        let add = [
+            ("seq".to_owned(), ArgValue::Int(seq)),
+            ("tick".to_owned(), ArgValue::Int(2 * BAR)),
+            ("name".to_owned(), ArgValue::Text("Verse".into())),
+        ];
+        vizdaw_app::commands::run("marker.add", &add, d).unwrap();
+    });
+    assert!(s.find("text", "No markers or locators.").is_none());
+    assert_eq!(s.element("button", "Verse").value.as_deref(), Some("3.1.0"));
+    s.fake.locate(BAR).unwrap();
+    s.update_model(|d| {
+        vizdaw_app::commands::run("locator.set_2", &[], d).unwrap();
+    });
+    let right = s.group(RIGHT).unwrap();
+    let locator = s.element("button", "Locator 2");
+    let verse = s.element("button", "Verse");
+    assert!(right.contains(&verse.bounds.center()));
+    assert!(
+        locator.bounds.center().y < verse.bounds.center().y,
+        "in time order"
+    );
+    assert_eq!(locator.value.as_deref(), Some("2.1.0"));
+    s.click("button", "Verse");
+    assert_eq!(s.fake.transport().unwrap().tick, 2 * BAR);
+    assert_eq!(s.model(|d| d.status().map(String::from)), None);
 }
 
 #[gpui::test]
@@ -465,10 +509,7 @@ fn pane_pickers_choose_views(cx: &mut TestAppContext) {
     );
     s.click("menuitem", "Markers");
     assert_eq!(s.pane(PaneSide::Right).view, PaneView::Markers);
-    assert!(
-        s.find("text", "Markers comes in a later version.")
-            .is_some()
-    );
+    assert!(s.find("text", "No markers or locators.").is_some());
 
     // The bottom pane lists the editors, then its other views.
     s.click_picker(BOTTOM);

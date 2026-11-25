@@ -16,6 +16,7 @@ use gpui::{
 use vizdaw_app::editor::{
     DetailEditorKind, EditorLayout, MainView, PaneSetup, PaneSide, PaneView, ViewLayouts,
 };
+use vizdaw_app::marker_list::{self, MarkerList, MarkerListRow};
 use vizdaw_app::{DocumentModel, view};
 
 use crate::registry::RegistryScope;
@@ -346,6 +347,9 @@ pub struct HostState {
     pub nothing_focused: bool,
     /// What the left pane's Channel Strip view shows.
     pub left_strip: LeftStrip,
+    /// The Markers view's rows, read only while the right pane shows it:
+    /// they follow the snapshot's markers and the layout's locators.
+    pub markers: Vec<MarkerListRow>,
 }
 
 /// What the left pane's Channel Strip view shows (Swift `LeftStripPane`).
@@ -392,12 +396,18 @@ impl LeftStrip {
 impl HostState {
     pub fn of(d: &DocumentModel) -> Self {
         let l = d.layout();
+        let right = l.views.current().right;
         HostState {
             main: l.views.main,
             setup: *l.views.current(),
             current: PaneSide::ALL.map(|s| Choice::current(s, l)),
             nothing_focused: d.focus_lanes().is_empty(),
             left_strip: LeftStrip::of(d),
+            markers: if right.shown && right.view == PaneView::Markers {
+                MarkerList::of(d)
+            } else {
+                vec![]
+            },
         }
     }
 
@@ -414,6 +424,7 @@ impl HostState {
             ],
             nothing_focused: true,
             left_strip: LeftStrip::Nothing,
+            markers: vec![],
         }
     }
 
@@ -767,12 +778,80 @@ pub fn note(view: PaneView, nothing_focused: bool) -> String {
 }
 
 /// A pane's content for `view` (not the bottom pane's editor): the mixer's
-/// group, or the view's note. `scope` is its own container.
-pub(crate) fn content(view: PaneView, state: &HostState, scope: &mut RegistryScope) -> AnyElement {
-    if view == PaneView::Mixer {
-        return mixer(div().into_any_element(), scope);
+/// group, the Markers view, or the view's note. `scope` is its own
+/// container.
+pub(crate) fn content(
+    view: PaneView,
+    state: &HostState,
+    scope: &mut RegistryScope,
+    cx: &mut Context<DocumentWindow>,
+) -> AnyElement {
+    match view {
+        PaneView::Mixer => mixer(div().into_any_element(), scope),
+        PaneView::Markers => markers(&state.markers, scope, cx),
+        _ => note_view(&note(view, state.nothing_focused), scope),
     }
-    note_view(&note(view, state.nothing_focused), scope)
+}
+
+/// The Markers view (Swift `MarkersPane`): the note with nothing to list;
+/// else a row per marker and set locator, its name and its position, a
+/// button (labelled with its name, its position the value, its help
+/// "Go to <name>") that moves the transport there.
+fn markers(
+    rows: &[MarkerListRow],
+    scope: &mut RegistryScope,
+    cx: &mut Context<DocumentWindow>,
+) -> AnyElement {
+    if rows.is_empty() {
+        return note_view(marker_list::EMPTY, scope);
+    }
+    let mut list = div()
+        .id("markers")
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .py(px(4.));
+    for (i, row) in rows.iter().enumerate() {
+        let go = row.clone();
+        let item = crate::sheet_host::with_help(
+            div().id(("marker-row", i)),
+            format!("Go to {}", row.name),
+        );
+        list = list.child(
+            item.relative()
+                .flex()
+                .flex_row()
+                .flex_none()
+                .items_center()
+                .gap(px(8.))
+                .px(px(8.))
+                .h(px(22.))
+                .cursor_pointer()
+                .text_xs()
+                .text_color(rgb(colors::TEXT))
+                .hover(|s| s.bg(rgb(colors::BUTTON)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(row.name.clone()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(rgb(colors::DIM))
+                        .child(row.position.clone()),
+                )
+                .child(scope.control_with("button", &row.name, true, Some(&row.position), false))
+                .on_click(cx.listener(move |this, _, _, cx| this.go_to_marker(&go, cx))),
+        );
+    }
+    list.into_any_element()
 }
 
 /// A pane's note, centred (Swift `PaneNote`).

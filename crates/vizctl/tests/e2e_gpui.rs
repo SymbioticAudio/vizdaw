@@ -1334,7 +1334,8 @@ fn gpui_touch_writes_a_fader_over_the_channel() {
 
 /// Ported from `window_views_and_panes_over_the_channel`: the defaults,
 /// hostile `ui.pane` calls that change nothing and open no dialog, the
-/// main-view keys, a pane set for the other view, the mixer in the bottom
+/// main-view keys, a pane set for the other view, the Markers view (its
+/// note, a marker added and clicked), the mixer in the bottom
 /// pane and in its own window (with its own transport bar), and the
 /// layout saved per document. Dropped: the bar's Record and Record
 /// Options (the recording slice draws them); the Swift wait on the Mix
@@ -1478,6 +1479,27 @@ fn gpui_window_views_and_panes_over_the_channel() {
         (json!(true), json!("markers"), json!(300.0)),
         "{l}"
     );
+    // The Markers view (slice 8c): the note, then a marker added at bar
+    // 3; a click on it moves the transport there.
+    app.call(
+        "command.run",
+        json!({"id": "ui.pane", "params": {"pane": "right", "view": "markers"}, "window": window}),
+    );
+    wait_for_node(&mut app, &window, "No markers or locators.");
+    let doc = app.call("state.get", json!({"target": "document", "window": window}));
+    let seq = doc["selected_seq"].clone();
+    let bar3 = 2 * 61_440;
+    app.call(
+        "command.run",
+        json!({"id": "marker.add", "params": {"seq": seq, "tick": bar3, "name": "Verse"}, "window": window}),
+    );
+    let verse = wait_for_node(&mut app, &window, "Verse");
+    assert_eq!(verse["value"], "3.1.0", "{verse}");
+    app.call(
+        "ui.click",
+        json!({"window": window, "element": verse["id"]}),
+    );
+    wait_for_tick(&mut app, &window, bar3);
 
     // 5. The mixer in arrange's bottom pane.
     app.call(

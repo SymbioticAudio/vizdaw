@@ -800,6 +800,70 @@ impl FakeSession {
         s.lanes.get_mut(&seq)?.iter_mut().find(|l| l.id == lane)
     }
 
+    /// What `sequence_info(seq)` answers: the scripted info, else 4/4
+    /// with the sequence's name and length and no markers.
+    fn info_of(s: &State, seq: u64) -> Result<SequenceInfo, VizError> {
+        if let Some(i) = s.infos.get(&seq) {
+            return Ok(i.clone());
+        }
+        let row = s.snap.sequences.iter().find(|q| q.id == seq).cloned();
+        let Some(row) = row else {
+            return Err(VizError::Model {
+                message: format!("There is no sequence {seq}."),
+            });
+        };
+        Ok(SequenceInfo {
+            id: seq,
+            name: row.name,
+            comment: String::new(),
+            keyboard_slot: None,
+            start_offset: 0,
+            length_ticks: row.length_ticks,
+            tempo: vec![],
+            meter: vec![MeterEntryRow {
+                tick: 0,
+                num: 4,
+                den: 4,
+                sharps: 0,
+                minor: false,
+            }],
+            markers: vec![],
+            generated: false,
+        })
+    }
+
+    /// `marker.add`'s marker joins the sequence's info, as the core's
+    /// does (in tick order).
+    fn add_marker(s: &mut State, args: &[ControlArg]) {
+        let int = |n: &str| {
+            args.iter()
+                .find(|a| a.name == n)
+                .and_then(|a| match a.value {
+                    ControlValue::Int { value } => Some(value),
+                    _ => None,
+                })
+        };
+        let name = args
+            .iter()
+            .find(|a| a.name == "name")
+            .and_then(|a| match &a.value {
+                ControlValue::Text { value } => Some(value.clone()),
+                _ => None,
+            });
+        let (Some(seq), Some(tick), Some(name)) = (int("seq"), int("tick"), name) else {
+            return;
+        };
+        let Ok(seq) = u64::try_from(seq) else {
+            return;
+        };
+        let Ok(mut info) = Self::info_of(s, seq) else {
+            return;
+        };
+        let at = info.markers.partition_point(|m| m.tick <= tick);
+        info.markers.insert(at, MarkerRow { tick, name });
+        s.infos.insert(seq, info);
+    }
+
     fn command_result(s: &mut State) -> DocSnapshot {
         match s.next_snapshot.take() {
             Some(n) => s.snap = n,
@@ -2172,33 +2236,7 @@ impl DocSession for FakeSession {
     fn sequence_info(&self, seq: u64) -> Result<SequenceInfo, VizError> {
         let mut s = self.st();
         s.info_reads += 1;
-        if let Some(i) = s.infos.get(&seq) {
-            return Ok(i.clone());
-        }
-        let row = s.snap.sequences.iter().find(|q| q.id == seq).cloned();
-        let Some(row) = row else {
-            return Err(VizError::Model {
-                message: format!("There is no sequence {seq}."),
-            });
-        };
-        Ok(SequenceInfo {
-            id: seq,
-            name: row.name,
-            comment: String::new(),
-            keyboard_slot: None,
-            start_offset: 0,
-            length_ticks: row.length_ticks,
-            tempo: vec![],
-            meter: vec![MeterEntryRow {
-                tick: 0,
-                num: 4,
-                den: 4,
-                sharps: 0,
-                minor: false,
-            }],
-            markers: vec![],
-            generated: false,
-        })
+        Self::info_of(&s, seq)
     }
     fn blocks(&self, seq: u64, lane: u64, _rule: BlockRule) -> Result<Vec<BlockRow>, VizError> {
         let s = self.st();
@@ -3294,6 +3332,9 @@ impl DocSession for FakeSession {
             "marker.remove" => Some("Remove Marker"),
             _ => None,
         };
+        if id == "marker.add" {
+            Self::add_marker(&mut s, &args);
+        }
         s.rec.chores.push((id, args));
         Self::command_result(&mut s);
         if let Some(label) = label {
