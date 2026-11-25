@@ -10,6 +10,7 @@ use vizdaw_ffi::blocks::{BlockRow, BlockRule};
 use vizdaw_ffi::control::ControlArg;
 use vizdaw_ffi::edit::EditCommand;
 use vizdaw_ffi::events::{AutomationTargetRow, LaneEvents, MarkerRow, SequenceInfo};
+use vizdaw_ffi::live::InputChannelsRow;
 use vizdaw_ffi::mixer::{DestRow, MidiMixRow, MixerLevels, MixerSnapshot, SendRow, SwatchRow};
 use vizdaw_ffi::record::{RecordSpecRow, RecordStateRow, RecoveredFileRow};
 use vizdaw_ffi::selection::{SelectionRow, TickRange};
@@ -904,6 +905,19 @@ pub trait CoreCalls: Send + Sync {
     /// process's, read from the core).
     fn audio_settings(&self) -> AudioSettingsRow {
         vizdaw_ffi::audio::audio_settings()
+    }
+    /// The chosen input device's channels and names for the input picker
+    /// (core `audio_input_channels`), read without opening the device.
+    /// `None` when unknown; off macOS `None` unless offline with the fake
+    /// input. Slow (a HAL read): call it off the UI thread.
+    fn audio_input_channels(&self) -> Option<InputChannelsRow> {
+        vizdaw_ffi::host::audio_input_channels()
+    }
+    /// The MIDI sources a MIDI track's input picker offers (core
+    /// `midi_source_ports`): none offline or off macOS. Slow (a CoreMIDI
+    /// listing): call it off the UI thread.
+    fn midi_source_ports(&self) -> Vec<String> {
+        vizdaw_ffi::host::midi_source_ports()
     }
     /// Turns `plugins` off in the app's plug-in settings (the Plugin
     /// Manager's catalog, saved), the crash question's "Disable <names>".

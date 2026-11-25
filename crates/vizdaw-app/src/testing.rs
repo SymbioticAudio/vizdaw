@@ -20,6 +20,7 @@ use vizdaw_ffi::events::AutomationTargetRow;
 use vizdaw_ffi::events::{
     EventKindRow, EventRow, LaneEvents, MarkerRow, MeterEntryRow, SequenceInfo, TempoPointRow,
 };
+use vizdaw_ffi::live::InputChannelsRow;
 use vizdaw_ffi::mixer::{
     BusRow, DestRow, GroupRow, MidiMixRow, MixerLevels, MixerSnapshot, StripColourRow,
     StripKindRow, StripRow, SwatchRow, VcaRow,
@@ -45,8 +46,8 @@ use vizdaw_ffi::{
     OpenOptions, ProjectFormatRow, ProjectInfoRow, RecoveryInfo, ReportRow, SmfExportRequestRow,
     SnapshotRow, SongInfoRow,
 };
+use vizdaw_ffi::{AudioSettingsRow, ClickRow, InputInfoRow, OverviewRows, OverviewStateRow};
 use vizdaw_ffi::{BuiltinSound, EditorResize, EditorSize};
-use vizdaw_ffi::{ClickRow, InputInfoRow, OverviewRows, OverviewStateRow};
 
 struct State {
     snap: DocSnapshot,
@@ -3537,6 +3538,59 @@ struct CoreState {
     recovery: HashMap<String, RecoveryInfo>,
     /// The plug-ins `disable_plugins` turned off, in order.
     disabled: Vec<(vizdaw_ffi::snapshot::PluginFormatTag, String)>,
+    /// What `audio_input_channels` answers (default `None`, as off macOS).
+    input_channels: Option<InputChannelsRow>,
+    /// What `midi_source_ports` answers (default none, as off macOS).
+    midi_sources: Vec<String>,
+    /// What `audio_settings` answers (`None`: the core's).
+    audio_settings: Option<AudioSettingsRow>,
+    /// Holds for the next reads of a source call, by call name (queued).
+    holds: HashMap<String, VecDeque<Arc<ReadHold>>>,
+    /// The thread each source read ran on, by call name, in order.
+    read_threads: HashMap<String, Vec<std::thread::ThreadId>>,
+}
+
+/// A hold on one source read of the fake core ([`FakeCore::hold`]): the
+/// read takes its answer when it starts, then waits until [`release`]d,
+/// so a test can show the read runs off the UI thread and that a later
+/// read may finish first. A read waits at most [`ReadHold::CAP`], so a
+/// failing test cannot hang its background thread for ever.
+///
+/// [`release`]: ReadHold::release
+#[derive(Default)]
+pub struct ReadHold {
+    st: Mutex<(bool, bool)>,
+    cv: std::sync::Condvar,
+}
+
+impl ReadHold {
+    /// The longest a held read waits for its release.
+    pub const CAP: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// Lets the held read answer.
+    pub fn release(&self) {
+        self.st.lock().unwrap().1 = true;
+        self.cv.notify_all();
+    }
+
+    /// True once the held read has started (and taken its answer).
+    pub fn started(&self) -> bool {
+        self.st.lock().unwrap().0
+    }
+
+    /// Waits up to `timeout` for the held read to start; true if it has.
+    pub fn wait_started(&self, timeout: std::time::Duration) -> bool {
+        let g = self.st.lock().unwrap();
+        let (g, _) = self.cv.wait_timeout_while(g, timeout, |s| !s.0).unwrap();
+        g.0
+    }
+
+    fn hold(&self) {
+        let mut g = self.st.lock().unwrap();
+        g.0 = true;
+        self.cv.notify_all();
+        let _ = self.cv.wait_timeout_while(g, Self::CAP, |s| !s.1).unwrap();
+    }
 }
 
 /// A scripted `CoreCalls` (constructors and free functions): a call log,
@@ -3610,6 +3664,79 @@ impl FakeCore {
     /// The plug-ins `disable_plugins` turned off, by format and ID.
     pub fn disabled_plugins(&self) -> Vec<(vizdaw_ffi::snapshot::PluginFormatTag, String)> {
         self.st().disabled.clone()
+    }
+
+    /// What `audio_input_channels` answers from now on.
+    pub fn set_input_channels(&self, row: Option<InputChannelsRow>) {
+        self.st().input_channels = row;
+    }
+
+    /// What `midi_source_ports` answers from now on.
+    pub fn set_midi_sources(&self, ports: Vec<String>) {
+        self.st().midi_sources = ports;
+    }
+
+    /// What `audio_settings` answers from now on (`None`: the core's).
+    pub fn set_audio_settings(&self, row: Option<AudioSettingsRow>) {
+        self.st().audio_settings = row;
+    }
+
+    /// Scripts `audio_settings` as the core's with Software Monitoring
+    /// `on`.
+    pub fn set_software_monitoring(&self, on: bool) {
+        let row = AudioSettingsRow {
+            software_monitoring: on,
+            ..vizdaw_ffi::audio::audio_settings()
+        };
+        self.set_audio_settings(Some(row));
+    }
+
+    /// Holds the next read of `call` (`audio_input_channels`,
+    /// `midi_source_ports`, `audio_settings`; queued, one read per hold)
+    /// until the returned hold is released.
+    pub fn hold(&self, call: &str) -> Arc<ReadHold> {
+        let h = Arc::new(ReadHold::default());
+        self.st()
+            .holds
+            .entry(call.to_owned())
+            .or_default()
+            .push_back(h.clone());
+        h
+    }
+
+    /// How many times `call` was made (as logged in [`calls`]).
+    ///
+    /// [`calls`]: FakeCore::calls
+    pub fn call_count(&self, call: &str) -> usize {
+        self.st().calls.iter().filter(|c| *c == call).count()
+    }
+
+    /// The thread each read of `call` ran on, in order.
+    pub fn read_threads(&self, call: &str) -> Vec<std::thread::ThreadId> {
+        self.st()
+            .read_threads
+            .get(call)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// One source read: logs `call` and its thread, takes the answer, then
+    /// waits on the call's next hold, if any, outside the lock.
+    fn source<T>(&self, call: &str, pick: impl FnOnce(&CoreState) -> T) -> T {
+        let (answer, hold) = {
+            let mut s = self.st();
+            s.calls.push(call.to_owned());
+            s.read_threads
+                .entry(call.to_owned())
+                .or_default()
+                .push(std::thread::current().id());
+            let hold = s.holds.get_mut(call).and_then(VecDeque::pop_front);
+            (pick(&s), hold)
+        };
+        if let Some(h) = hold {
+            h.hold();
+        }
+        answer
     }
 
     /// What `recovery_check(path)` answers (default: nothing to ask).
@@ -3741,6 +3868,16 @@ impl CoreCalls for FakeCore {
     }
     fn bounce_settings(&self) -> BounceSettingsRow {
         vizdaw_ffi::bounce_settings()
+    }
+    fn audio_settings(&self) -> AudioSettingsRow {
+        self.source("audio_settings", |s| s.audio_settings.clone())
+            .unwrap_or_else(vizdaw_ffi::audio::audio_settings)
+    }
+    fn audio_input_channels(&self) -> Option<InputChannelsRow> {
+        self.source("audio_input_channels", |s| s.input_channels.clone())
+    }
+    fn midi_source_ports(&self) -> Vec<String> {
+        self.source("midi_source_ports", |s| s.midi_sources.clone())
     }
     fn disable_plugins(&self, plugins: &[PluginRefRow]) -> Result<(), VizError> {
         let mut s = self.st();

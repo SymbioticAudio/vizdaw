@@ -9,6 +9,7 @@ use vizdaw_app::testing::{FakeCore, FakeSession, demo_fake, lane_row};
 use vizdaw_app::{CoreCalls, DocSession, LiveCore};
 use vizdaw_ffi::control::{ControlArg, ControlValue};
 use vizdaw_ffi::edit::{EditCommand, LaneEdit, LaneInputRow};
+use vizdaw_ffi::live::InputChannelsRow;
 use vizdaw_ffi::step::{NoteValueRow, StepInputRow, StepNoteRow, StepResultRow};
 use vizdaw_ffi::tracks::TrackKindRow;
 use vizdaw_ffi::{
@@ -630,4 +631,101 @@ fn the_fake_core_answers_the_free_functions() {
     assert_eq!(core.step_state_new(15), step_state_new(15));
     assert_eq!(core.step_parse_pitches("C4".into()).unwrap(), [60]);
     assert_eq!(core.audio_settings(), vizdaw_ffi::audio::audio_settings());
+}
+
+// ---- the picker sources and Software Monitoring (slice 8c Task 1) ------
+
+/// Offline with the fake input, the real core offers the fake input's
+/// three channels, named as it names them, and no MIDI sources; the seam
+/// answers what the core's free functions answer.
+#[test]
+fn the_real_core_answers_the_picker_sources_offline() {
+    let _one = offline();
+    let fake = InputChannelsRow {
+        channels: 3,
+        names: vec!["Fake In 1".into(), "Fake In 2".into(), "Fake In 3".into()],
+    };
+    assert_eq!(LiveCore.audio_input_channels(), Some(fake));
+    assert_eq!(
+        LiveCore.audio_input_channels(),
+        vizdaw_ffi::host::audio_input_channels()
+    );
+    assert!(LiveCore.midi_source_ports().is_empty());
+    assert_eq!(
+        LiveCore.audio_settings().software_monitoring,
+        vizdaw_ffi::audio::audio_settings().software_monitoring
+    );
+}
+
+/// The fake core answers as off macOS until scripted, then its script,
+/// and counts each read.
+#[test]
+fn the_fake_core_scripts_the_picker_sources_and_software_monitoring() {
+    let core = FakeCore::new();
+    assert_eq!(core.audio_input_channels(), None);
+    assert!(core.midi_source_ports().is_empty());
+
+    let two = InputChannelsRow {
+        channels: 2,
+        names: vec!["Mic".into(), "Line".into()],
+    };
+    core.set_input_channels(Some(two.clone()));
+    core.set_midi_sources(vec!["Keys In".into(), "Pads In".into()]);
+    assert_eq!(core.audio_input_channels(), Some(two));
+    assert_eq!(core.midi_source_ports(), ["Keys In", "Pads In"]);
+
+    let on = core.audio_settings().software_monitoring;
+    core.set_software_monitoring(!on);
+    assert_eq!(core.audio_settings().software_monitoring, !on);
+    assert_eq!(
+        core.audio_settings().buffer_frames,
+        vizdaw_ffi::audio::audio_settings().buffer_frames,
+        "the rest is the core's"
+    );
+    core.set_audio_settings(None);
+    assert_eq!(core.audio_settings(), vizdaw_ffi::audio::audio_settings());
+
+    assert_eq!(core.call_count("audio_input_channels"), 2);
+    assert_eq!(core.call_count("midi_source_ports"), 2);
+    assert_eq!(core.call_count("audio_settings"), 4);
+}
+
+/// A held read takes its answer when it starts and waits for its release
+/// on its own thread, so a later read, of a newer script, finishes first.
+#[test]
+fn a_held_source_read_finishes_after_a_later_one() {
+    let core = Arc::new(FakeCore::new());
+    core.set_midi_sources(vec!["Old".into()]);
+    let hold = core.hold("midi_source_ports");
+    let reader = {
+        let core = core.clone();
+        std::thread::spawn(move || core.midi_source_ports())
+    };
+    assert!(hold.wait_started(Duration::from_secs(5)));
+    core.set_midi_sources(vec!["New".into()]);
+    assert_eq!(
+        core.midi_source_ports(),
+        ["New"],
+        "the later read is not held"
+    );
+    std::thread::sleep(Duration::from_millis(20));
+    assert!(!reader.is_finished(), "the held read waits for its release");
+    hold.release();
+    assert_eq!(reader.join().unwrap(), ["Old"]);
+
+    let threads = core.read_threads("midi_source_ports");
+    assert_eq!(threads.len(), 2);
+    assert_ne!(threads[0], std::thread::current().id());
+    assert_eq!(threads[1], std::thread::current().id());
+
+    // A hold per call: one on the channels does not hold the sources.
+    let ch = core.hold("audio_input_channels");
+    assert_eq!(core.midi_source_ports(), ["New"]);
+    assert!(!ch.started());
+    ch.release();
+    assert_eq!(
+        core.audio_input_channels(),
+        None,
+        "a released hold waits not"
+    );
 }
