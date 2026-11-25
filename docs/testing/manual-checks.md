@@ -229,7 +229,7 @@ the take resemble the approved look.
 | macOS | controller | An offline region: the hatching (0xf0883e at 0.55, a stand-in for Swift's offline colour; the owner may pick another) and the "Offline" pill read clearly on every theme; relinking removes both | open |
 | macOS | controller | The take while recording: its colour, the peaks growing in step with the playhead, and no lag in the UI while it grows | open |
 | macOS | controller | At Stop the take turns into the same waveform on the placed region: compare a screenshot just before and just after Stop; no flash, shift or blank | open |
-| macOS | controller | Recording speed: rerun `gpui_records_audio_loop_takes_and_midi` and `gpui_arms_meters_counts_in_and_draws_the_take` on an UNLOCKED Mac and note both times (earlier runs were made with the screen locked, so the drawing cost is unproven); record the times here | open |
+| macOS | controller | Recording speed: rerun `gpui_records_audio_loop_takes_and_midi` and `gpui_arms_meters_counts_in_and_draws_the_take` on an UNLOCKED Mac and note both times (earlier runs were made with the screen locked, so the drawing cost is unproven); record the times here | done 2026-11-25: unlocked, `gpui_records_audio_loop_takes_and_midi` 36.2 s (35.8 s locked; the time is the takes playing in real time: record to the end, three loop passes, a MIDI take), `gpui_arms_meters_counts_in_and_draws_the_take` 4.2 s |
 | macOS | controller | Record a long take by hand (several minutes, a few tracks armed) and watch for UI lag, a late playhead or a control channel that times out | open |
 | macOS | controller | The Markers pane: row spacing and colours, the name label and the position digits aligned in a column (Swift monospaced), the selected or current row, and the pane's empty state | open |
 | macOS | controller | The Markers pane: hovering a row shows the "Go to <name>" tooltip; a click moves the playhead to the marker (also while playing) | open |
@@ -240,5 +240,5 @@ the take resemble the approved look.
 | Linux | owner | Region waveforms on the owner's desktop: colour against each theme's fill, stereo bands, offline hatching with its pill, no hitch scrolling a long project, the brief blank after a zoom | open |
 | Linux | owner | The growing take and its hand-over at Stop look the same just before and after; no UI lag during a long take | open |
 | Linux | owner | The Markers pane on the owner's desktop: rows, position digits, the "Go to <name>" tooltip, scrolling many markers | open |
-| Linux | owner | The GPUI e2e `gpui_arms_meters_counts_in_and_draws_the_take` and the markers step run green in Linux CI under Xvfb (Linux run pending) | open |
+| Linux | owner | The GPUI e2e `gpui_arms_meters_counts_in_and_draws_the_take` and the markers step run green in Linux CI under Xvfb | done 2026-11-25 (CI run 45553218877) |
 | Linux | owner | A real input device and a real MIDI source in the picker, with the audio permission text where the system asks (needs host track H3; until then the offline device) | open |
