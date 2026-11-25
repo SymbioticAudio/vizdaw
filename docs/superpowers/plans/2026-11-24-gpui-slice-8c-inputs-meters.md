@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A track can be given an input and a monitor mode, and shows its input meter, in the GPUI app, as in the Swift app. The track header gets the monitor button (`A` / `I` / `–`), the input picker and the input meter with its clip mark. The mixer strip gets its input picker. The take draws itself on the arrangement while it records, and the right pane's Markers view lists the markers and set locators. `lane.set_input` and `lane.set_monitor` work on the channel. `state.get input` keeps its own peak hold, apart from the meters'. After 8c, `gpui_arms_meters_counts_in_and_draws_the_take` passes on the Mac and on Linux with the offline device (fake input). Takes (choose/rename/delete) come in a later slice.
+**Goal:** A track can be given an input and a monitor mode, and shows its input meter, in the GPUI app, as in the Swift app. The track header gets the monitor button (`A` / `I` / `–`), the input picker and the input meter with its clip mark. The mixer strip gets its input picker. Every audio region on the arrangement draws its waveform. The take draws itself in the same way while it records, so it looks the same during and after recording, and the right pane's Markers view lists the markers and set locators. `lane.set_input` and `lane.set_monitor` work on the channel. `state.get input` keeps its own peak hold, apart from the meters'. After 8c, `gpui_arms_meters_counts_in_and_draws_the_take` passes on the Mac and on Linux with the offline device (fake input). Takes (choose/rename/delete) come in a later slice.
 
-**Architecture:** A new `vizdaw-app` model `LaneInputs` (Swift `M/LaneInputs.swift`) sits on the document. It holds the picker sources (read off the main thread), the meters (read in the poll) and the opening note. `GrowingTake` (Swift `M/GrowingTake.swift`) computes the take's pieces. The record poll reads their waveform rows, so render reads only held data. `MarkerList` (Swift `M/PaneContent.swift:191-229`) builds the Markers pane's rows. GPUI draws these in `track_headers.rs`, `mixer_view.rs`, `arrangement.rs` and `panes.rs`. The picker is an anchored menu, following the » menu's `deferred(anchored())` pattern, and it shows in `ui.tree`. `audio_input_channels` and `midi_source_ports` join the seam (8a Task 1 left them off).
+**Architecture:** A new `vizdaw-app` model `LaneInputs` (Swift `M/LaneInputs.swift`) sits on the document. It holds the picker sources (read off the main thread), the meters (read in the poll) and the opening note. `RegionWaves` (Swift `MediaModel.waveform`, `E/RegionDrawing.swift`, `WaveformGeometry`) reads each visible region's `region_waveform` off the UI thread into a cache. `GrowingTake` (Swift `M/GrowingTake.swift`) computes the take's pieces, and the record poll reads their waveform rows. Render reads only held data, and one drawing function draws both. `MarkerList` (Swift `M/PaneContent.swift:191-229`) builds the Markers pane's rows. GPUI draws these in `track_headers.rs`, `mixer_view.rs`, `arrangement.rs` and `panes.rs`. The picker is an anchored menu, following the » menu's `deferred(anchored())` pattern, and it shows in `ui.tree`. `audio_input_channels` and `midi_source_ports` join the seam (8a Task 1 left them off).
 
 **Tech Stack:** Rust 2024; GPUI at the slice 1 pin; `core-ffi`, `core-control`, `vizctl`.
 
-**Spec:** `docs/superpowers/specs/2026-11-20-cross-platform-27-1-design.md`. Parity rows: `docs/superpowers/specs/2026-11-22-parity-checklist.md` ("### Track" `lane.set_input`, `lane.set_monitor`; e2e `arms_meters_counts_in_and_draws_the_take`, `window_views_and_panes_over_the_channel` markers step; "Linux gaps" live input row). Swift reference with exact strings and file:line: the slice 8 inventory (`slice8-inventory.md` §2.1–2.3, §3, §5 rows `LaneInputsTests`, `RecordUiCarryTests`, `GrowingTakeTests`, §7 row "8c", §8.3, the 8c list in §8.4). Plans 8a and 8b Outcomes (every 8c carry is a step below). Swift sources are still in the tree for reading: `app/Sources/VizDAWAppModel/{LaneInputs,GrowingTake,PaneContent}.swift`, `app/Sources/VizDAWEditors/{LaneHeaderView,ArrangementLayout,ArrangementView}.swift`, `app/Sources/VizDAW/{StripInputView,PaneViews}.swift`, tests in `app/Tests/VizDAWAppModelTests/`.
+**Spec:** `docs/superpowers/specs/2026-11-20-cross-platform-27-1-design.md`. Parity rows: `docs/superpowers/specs/2026-11-22-parity-checklist.md` ("### Track" `lane.set_input`, `lane.set_monitor`; e2e `arms_meters_counts_in_and_draws_the_take`, `window_views_and_panes_over_the_channel` markers step; "Linux gaps" live input row). Swift reference with exact strings and file:line: the slice 8 inventory (`slice8-inventory.md` §2.1–2.3, §3, §5 rows `LaneInputsTests`, `RecordUiCarryTests`, `GrowingTakeTests`, §7 row "8c", §8.3, the 8c list in §8.4). Plans 8a and 8b Outcomes (every 8c carry is a step below). Swift sources are still in the tree for reading: `app/Sources/VizDAWAppModel/{LaneInputs,GrowingTake,PaneContent}.swift`, `app/Sources/VizDAWEditors/{LaneHeaderView,ArrangementLayout,ArrangementView,RegionDrawing,RegionEditing}.swift`, `app/Sources/VizDAWAppModel/MediaModel.swift:269-277`, `app/Sources/VizDAW/{StripInputView,PaneViews}.swift`, tests in `app/Tests/VizDAWAppModelTests/`.
 
 ## Global Constraints
 
@@ -31,7 +31,14 @@
 - Input and monitor changes are lane edits, one undo step each: `Set Input`, and the monitor's step as the mixer's `cycle_monitor` names it today. While recording, the core answers Busy, and the status line says so.
 - Look: the meter and clip colours, the monitor button's per-mode tint (Swift `StripPalette.monitor`) and the take's fill are theme tokens, not literals. Show-finished-UI rule: screenshots go to the owner only once the header and the take resemble the approved look. The controller runs Linux over ssh and makes the on-screen macOS checks; every look item gets a manual-check row.
 - Review pace: fix crash, data loss and wrong overwrite; log other edge cases to the backlog.
-- OWNER (decide before Task 4): the GPUI arrangement draws no waveforms on placed audio regions yet. They are plain blocks; nothing in `vizdaw-gpui` reads `OverviewRows`. So the growing take shows peaks while it records, then becomes a plain block at Stop. The recommendation is to accept that for 8c and log "region waveforms in the GPUI arrangement" to the backlog. The alternative is to draw the take as a plain growing block too, without the `recording_waveform` read.
+- Owner ruling (2026-11-24): audio regions draw waveforms in 8c, for Swift parity, so a take looks the same during and after recording.
+  - Swift's behaviour (`ArrangementView.swift:264-290`, `RegionDrawing.swift`, `RegionEditing.swift:196-230`, `MediaModel.swift:272-277`):
+    - The core picks the overview level. `region_waveform(event, from_tick, to_tick, columns)` is asked for the region's visible ticks at one column per point, at most 8192 columns. It uses the 256-frame peaks, or exact samples below 256 frames per column, which answer `Coarse` until they are read.
+    - The core applies the region's gain and fades. The app does not.
+    - Channels are stacked top to bottom (mono one band, stereo two). Each column is a bar from max to min around its band's centre, clipped to ±1. Silence and non-finite values draw a hairline.
+    - Bars are drawn under the gain band in the region-line colour at 0.65 alpha, only for `Ready` or `Coarse`. `Pending` draws nothing and is asked again after `IdleUpdate.overviews_changed`.
+    - An offline region is hatched with an `Offline` pill and is never asked for.
+  - The GPUI app adds what Swift did on the main thread: the reads run on the background executor with a generation counter (the 7a pattern, `crates/vizdaw-app/src/aaf.rs` `generation`). Rows are cached per region, media and zoom (ticks per point) and visible slice. The cache is dropped on media change (`media_changed`), overview news, a snapshot that changes the region, or a zoom change.
 
 ## Review Focus
 
@@ -39,7 +46,8 @@
 2. Poll: fast while any shown track meters, even when stopped and not recording (`record_polls_fast`). Never fast with no meter (`noMeterNoFastPoll`). Meters, levels and clip marks clear when the last meter goes, and so does the opening note (only if the status is still that note).
 3. Off-main reads: an older, slower source read never overwrites a newer one (the generation guard). A new document's first picker lists the sources warmed at launch. No `midi_source_ports` or `audio_input_channels` call runs on the UI thread.
 4. The growing take: nothing is drawn before the roll or in another sequence. A saturated file frame draws nothing and never traps (no overflow or panic in tick/frame maths). At most 32 pieces and 8192 columns. The take is not a Locate during the pass.
-5. The picker: choosing the current input is a no-op (no undo step); a choice while recording shows Busy and changes nothing; a return track keeps its synth (`return_of`).
+5. Region waveforms: no `region_waveform` call on the UI thread or in render; an older read never replaces a newer one; offline media is never asked; `Pending` asks again only after overview news (no busy loop).
+6. The picker: choosing the current input is a no-op (no undo step); a choice while recording shows Busy and changes nothing; a return track keeps its synth (`return_of`).
 
 ---
 
@@ -125,7 +133,32 @@
   - Mixer: the strip picker's title with a shared path, `Input of <track>`, and the monitor's a11y.
   - Then implement and commit `gpui: monitor button, input picker and meter on the track headers and strips`.
 
-### Task 4: the take drawn while it records
+### Task 4: waveforms on audio regions
+
+**Files:** `crates/vizdaw-app/src/session.rs` and `testing.rs` (`region_waveform` on the seam; `IdleNews.overviews_changed`), `crates/vizdaw-app/src/region_waves.rs` (new: requests, cache, generation counter), `crates/vizdaw-app/src/document.rs` (the cache per document; overview and media news), `crates/vizdaw-gpui/src/region_drawing.rs` (new: `waveform_bars`, as Swift `WaveformGeometry.bars`, plus the hatch and pill), `crates/vizdaw-gpui/src/arrangement.rs` (the regions of each audio block drawn and in the tree); tests `crates/vizdaw-app/tests/region_waves.rs`, `crates/vizdaw-gpui/tests/arrangement.rs`.
+**Produces:**
+- `DocSession::region_waveform(event, from_tick, to_tick, columns) -> OverviewRows`. The fake scripts rows and states per event, counts calls, and can hold a read.
+- `IdleNews.overviews_changed` carries the core's `IdleUpdate` flag.
+- `RegionWaves::want(region, media, visible ticks, width)` gives the request: the visible ticks, columns = width in points rounded up, at most 8192.
+  - It asks nothing for offline media (`media` rows' offline flag), an empty slice or zero width.
+  - It runs the read on the background executor, tagged with the generation. A reply older than the newest is dropped.
+  - Rows are held by (event, media, ticks per point, slice). `Pending` is kept as pending and asked again after `overviews_changed`; `Coarse` is drawn and asked again after it too.
+  - The cache is dropped on `media_changed`, on a snapshot that changes the region (gain, fades, offset, length), and on a zoom change.
+- Drawing (`E/RegionDrawing.swift` `draw`): the body as today, then, clipped to it:
+  - An offline region is hatched with an `Offline` pill when there is room.
+  - Otherwise the waveform bars, for `Ready` or `Coarse` rows, in the wave rect under the gain band, in the region-line colour at 0.65 alpha (a theme token).
+  - Then the fade lines and the outline as today.
+- Each drawn audio region is a tree element labelled as Swift `RegionA11y.label` (`Region <name> on <track>, bar(s) …, gain …[, crossfade][, fades][, offline][, muted]`). Its value is the waveform state: `ready`, `coarse`, `pending`, `offline` or `none`.
+- The arrangement redraws when rows arrive.
+- [ ] Tests:
+  - Model: the request per zoom (columns follow the visible width and cap at 8192; a zoom change asks again at the new ticks per point, a scroll at the same zoom asks only for the new slice).
+  - Model: offline media asks nothing and is `offline`; `Pending` then `overviews_changed` asks again once; `media_changed` drops the cache.
+  - Model: an older held read released after a newer one changes nothing (generation); no read runs on the calling thread (the fake's held read).
+  - Geometry: Swift `WaveformGeometry` rows: mono and stereo bands, clipping at ±1, a hairline for silence and non-finite values, short arrays draw nothing.
+  - GPUI: an audio region's tree element carries `pending`, then `ready` after the scripted read and a redraw. An offline region reads `offline` with its label `…, offline`, and no read was made. Render makes no `region_waveform` call (call count unchanged across frames).
+  - Then implement and commit `app, gpui: waveforms on audio regions`.
+
+### Task 5: the take drawn while it records
 
 **Files:** `crates/vizdaw-app/src/growing_take.rs` (new; Swift `M/GrowingTake.swift`), `crates/vizdaw-app/src/record.rs` (the waveform rows read in the poll), `crates/vizdaw-gpui/src/arrangement.rs` (drawing the pieces); tests `crates/vizdaw-app/tests/growing_take.rs`, `crates/vizdaw-gpui/tests/arrangement.rs`.
 **Produces:**
@@ -133,15 +166,16 @@
 - `slice(rect, visible, from, to)` gives the visible frames and columns (≤ 8192 shared by the pieces). Pieces are 64 pt wide, at most 32.
 - The record poll asks `recording_waveform(lane, from, to, columns)` for each piece, using the arrangement's last visible rect, which the view hands over on layout. It keeps the rows by lane. Render draws only held rows.
 - A failed read keeps the last rows; the rows go at Stop.
-- The arrangement draws the take as a block in the record colour with its peaks over it, under the playhead, with a11y `Recording take` (a new label, not a Swift string; Swift's view had none). The tree shows it, so the e2e can wait for it. Name the label in the plan's Outcome.
+- The arrangement draws the take with Task 4's region drawing (`waveform_bars`, the same colours and wave rect), in a body in the record colour, so it becomes the same waveform at Stop. It is drawn under the playhead, with a11y `Recording take` (a new label, not a Swift string; Swift's view had none). The tree shows it, so the e2e can wait for it. Name the label in the plan's Outcome.
 - The take is not a Locate: no `transport.locate` runs during the pass.
 - [ ] Tests (Swift `GrowingTakeTests`, 9):
   - `theTakeRunsFromTheRangeStartToWhatIsWritten`, `thePunchOutEndsIt`, `nothingGrowsBeforeTheRollOrInAnotherSequence`, `aReturnLaneIsPlacedByItsReturnLatency`, `aNegativeAnchorStartsLater`, `aSaturatedFileFrameDrawsNothingAndNeverTraps`, `theArrangementDrawsItFromTheLivePeaks`, `aGrowingTakeFollowsATempoChange`, `theVisibleSliceAsksForItsFramesAndAtMost8192Columns`.
   - GPUI: with a scripted pass and `FakeSession::set_recording_waveform`, the tree shows `Recording take` on the armed track with a width that grows across two polls, and it is gone after Stop.
   - Render makes no session call (the fake counts `recording_waveform` calls per poll, not per frame).
+  - At Stop the take turns into the same waveform: with the same scripted peaks for `recording_waveform` and the placed region's `region_waveform`, the bars drawn for the take's last poll and for the region after Stop are the same (the same `waveform_bars` output for the same rect), and the region's tree element reads `ready`.
   - Then implement and commit `app, gpui: the take drawn while it records`.
 
-### Task 5: the Markers pane
+### Task 6: the Markers pane
 
 **Files:** `crates/vizdaw-app/src/marker_list.rs` (new; Swift `MarkerList`), `crates/vizdaw-gpui/src/panes.rs` (the `Markers` view replaces its note), `crates/vizctl/tests/e2e_gpui.rs`; tests `crates/vizdaw-app/tests/marker_list.rs`, `crates/vizdaw-gpui/tests/panes.rs`.
 **Produces:**
@@ -156,7 +190,7 @@
   - e2e: extend `gpui_window_views_and_panes_over_the_channel` step 4 (the checklist's "markers steps later"). With the right pane on Markers: the empty note, then `marker.add` at bar 3 named `Verse`, then a `ui.click` on `Verse`, after which `state.get transport` `tick` is at bar 3.
   - Then implement and commit `app, gpui: the Markers pane`.
 
-### Task 6: e2e `gpui_arms_meters_counts_in_and_draws_the_take`
+### Task 7: e2e `gpui_arms_meters_counts_in_and_draws_the_take`
 
 **Files:** `crates/vizctl/tests/e2e_gpui.rs`, `docs/superpowers/specs/2026-11-22-parity-checklist.md`.
 **Produces:**
@@ -166,15 +200,15 @@
   3. The `audio.set` steps are skipped (Settings slice), with a comment saying so.
   4. `record.set {count_in: 1, loop: false, replace: true}`, then `transport.record`: `counting_in` true, `playing` false, tick 0, and `record` gives `recording` true with `frames` 0.
   5. `wait_for_record` until `frames ≥ 48_000` and the peak is > 0.2: the peak is ≈0.251 (±0.01) and `pass_start_tick` is 0. The tree shows `Recording take` on `Mic`.
-  6. `transport.record` stops it. Then `wait_for_undo` `Record`, and the media item's `peak` is ≈0.251. `Recording take` is gone.
+  6. `transport.record` stops it. Then `wait_for_undo` `Record`, and the media item's `peak` is ≈0.251. `Recording take` is gone, and the placed region's tree element on `Mic` reads `ready` (Task 4).
 - The test runs on Linux CI as it is: fake input, no device.
 - Checklist:
   - Tick `arms_meters_counts_in_and_draws_the_take` "S8c" on Mac and Linux, with the `audio.set` steps noted as waiting for Settings.
   - Tick `lane.set_input` and `lane.set_monitor`, and the `window_views_and_panes` markers step.
   - The Linux-gaps live-input row stands: it gains "the picker offers two unnamed channels until H3".
-- [ ] Write the test, see it fail at step 2 or 5 before Tasks 3–4 if you run it out of order, run it green on the Mac (env in Global Constraints) and on Linux, then commit `e2e: gpui arms, meters, counts in and draws the take`.
+- [ ] Write the test, see it fail at step 2 or 5 before Tasks 3–5 if you run it out of order, run it green on the Mac (env in Global Constraints) and on Linux, then commit `e2e: gpui arms, meters, counts in and draws the take`.
 
-### Task 7: manual checks, checklist and backlog
+### Task 8: manual checks, checklist and backlog
 
 **Files:** `docs/testing/manual-checks.md`, `docs/superpowers/specs/2026-11-22-parity-checklist.md`, `docs/feature-backlog.md`.
 **Produces:**
@@ -184,7 +218,8 @@
   - The picker's sections and its anchoring in the header and the strip.
   - The meter's fall and the 2 s clip mark.
   - The meter hiding on short rows.
-  - The take's colour, peaks and growth against the playhead, and that it hands over to the placed region at Stop.
+  - Region waveforms: mono and stereo bands, the colour against each theme's region fill, gain and fades shaping them, `Coarse` sharpening when zoomed in close, `Pending` filling in, offline hatching with its pill, and no hitch when scrolling a long project.
+  - The take's colour, peaks and growth against the playhead, and that at Stop it turns into the same waveform on the placed region.
   - The Markers pane rows and click.
   - On the Mac: a real input device (channel names, `Opening the audio input… If macOS asks…` with the microphone prompt) and a real MIDI source in the picker. These are owner or controller rows. Linux real input is H3.
 - Checklist ticks for the rows that pass.
