@@ -4027,6 +4027,14 @@ fn gpui_record_recover_trash_over_the_channel() {
         // The line stays for the user: Faults lists it (slice 8b Task 1).
         let line = "Media/Recorded/Left Behind.caf: not moved to the Trash (this platform \
                     has no Trash support yet)";
+        // A short bar keeps Faults on the row whatever the window's width
+        // (the Linux CI window is narrower and folds it into ».)
+        run_in(
+            &mut app,
+            &w,
+            "ui.set_transport_bar",
+            json!({"items": "cluster,faults"}),
+        );
         let faults = wait_in_tree(&mut app, &w, "Faults button", |nodes| {
             nodes
                 .as_array()?
@@ -4066,8 +4074,13 @@ fn gpui_transport_bar_click_and_command_buttons() {
         "ui.set_transport_bar",
         json!({"items": "cluster,command:window.mixer"}),
     );
+    // The menu bar has a "Mixer" menu too: look for the bar's button.
     let button = wait_in_tree(&mut app, &w, "the Mixer button", |nodes| {
-        find_node(nodes, "Mixer").filter(|n| n["role"] == "button")
+        nodes
+            .as_array()?
+            .iter()
+            .find(|n| n["role"] == "button" && n["label"] == "Mixer")
+            .cloned()
     });
     assert_eq!(button["enabled"], true, "{button}");
     app.call("ui.click", json!({"window": w, "element": button["id"]}));

@@ -22,6 +22,18 @@ jobs:
         os: [macos-15, ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
+      - name: Free disk space (macOS)
+        # The workspace's test binaries outgrow the hosted runner's free
+        # space ("ld: write() failed, errno=28"): drop preinstalled
+        # toolchains this project never uses.
+        if: runner.os == 'macOS'
+        run: |
+          df -h /
+          sudo rm -rf "$ANDROID_HOME" "$ANDROID_SDK_ROOT" /Users/runner/Library/Android \
+            /usr/local/share/dotnet /Users/runner/.dotnet || true
+          xcrun simctl delete all >/dev/null 2>&1 || true
+          sudo rm -rf /Users/runner/Library/Developer/CoreSimulator/Caches || true
+          df -h /
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
