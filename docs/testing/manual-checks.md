@@ -175,21 +175,21 @@ resembles the approved look.
 
 | Platform | Who | What | Status |
 |---|---|---|---|
-| macOS | controller | The Record button: red when armed to record, its label changes to Stop Recording while recording, and the readouts after it take their colours | open |
-| macOS | controller | The Record cluster's summary pill, the separator, the disabled » entries while recording, and the tooltips | open |
-| macOS | controller | The Record Options popover: anchored under the chevron at its width, layout, steppers, and every field disabled while recording; the caret stays in a field when Record is pressed (and the refused Record leaves the popover open) | open |
+| macOS | controller | The Record button: red when armed to record, its label changes to Stop Recording while recording, and the readouts after it take their colours | done 2026-11-25 (controller, offline device + fake input) |
+| macOS | controller | The Record cluster's summary pill, the separator, the disabled » entries while recording, and the tooltips | done 2026-11-25 (controller, offline device + fake input) |
+| macOS | controller | The Record Options popover: anchored under the chevron at its width, layout, steppers, and every field disabled while recording; the caret stays in a field when Record is pressed (and the refused Record leaves the popover open) | done 2026-11-25 (controller, offline device + fake input); layout and greyed punch fields checked, the caret-in-field part still open |
 | macOS | controller | Record pressed in the Mixer window while the document window's popover holds a draft records at the current punch, not the draft (Swift does the same) | open |
 | macOS | controller | The five field labels (Position, Edit In, Edit Out, Punch In, Punch Out) fit with the real font, and the measured widths leave no clipped or loose label | open |
-| macOS | controller | The standard bar at 1440 pt with the real Mac font: nothing folds except possibly Pane Toggles; at 1600 pt nothing folds | open |
+| macOS | controller | The standard bar at 1440 pt with the real Mac font: nothing folds except possibly Pane Toggles; at 1600 pt nothing folds | done 2026-11-25 (controller, offline device + fake input) at 1440; 1600 not run |
 | macOS | controller | Punch In and Out fields: type a value, Tab through the five fields in order, U opens » at a folded field | open |
 | macOS | controller | The Click menu: check mark, Level › and Mode › (they open on a click here, not on hover; see the backlog), the bar and » forms agree | open |
 | macOS | controller | DSP Load digits change without moving the row, and the Audio Device text shows the device name and rate | open |
-| macOS | controller | Command button faces (Mixer, Piano Roll, List, Drum Grid, Loop, Record): label only, greyed when the app cannot run the command yet | open |
-| macOS | controller | The Faults ⚠ glyph and tint appear when a problem arrives; the popover lists the lines and closes on Esc, a click outside or the button; the lines stay until the document closes (a failed plug-in, an autosave failure) | open |
+| macOS | controller | Command button faces (Mixer, Piano Roll, List, Drum Grid, Loop, Record): label only, greyed when the app cannot run the command yet | done 2026-11-25 (controller, offline device + fake input) |
+| macOS | controller | The Faults ⚠ glyph and tint appear when a problem arrives; the popover lists the lines and closes on Esc, a click outside or the button; the lines stay until the document closes (a failed plug-in, an autosave failure) | done 2026-11-25 (controller, offline device + fake input); the line reads the raw engine name ("clipped"), as in Swift (backlog) |
 | macOS | controller | The stop-reason line in Faults: unplug an interface mid-recording and read "Recording stopped: the audio device went away; what was recorded is kept." (README 136, at 1218) | open |
-| macOS | controller | Transport menu check marks: Overdub, Punch and Click show a mark when on, and the mark follows the bar | open |
+| macOS | controller | Transport menu check marks: Overdub, Punch and Click show a mark when on, and the mark follows the bar | done 2026-11-25 (controller, offline device + fake input) (Overdub mark, keys shown) |
 | macOS | controller | The native Step menu shows its keys (T, 1–6, ., /, =, 0, ⌫) | open |
-| macOS | controller | Step menu: disabled items show no key; no key fires twice (one press, one step) | open |
+| macOS | controller | Step menu: disabled items show no key; no key fires twice (one press, one step) | done 2026-11-25 (controller, offline device + fake input) (disabled items show no key; the double-fire part open) |
 | macOS | controller | With step entry off, `.` is Next Marker, `2` goes to locator 2 and Delete deletes the selection (not the Step commands) | open |
 | macOS | controller | ⌥⇧ and a digit clears that locator on a US layout (`alt-@` aliases ⌥⇧2); other layouts have no key (from slice 8a) | open |
 | macOS | controller | README 130–142: record and monitor, loopback calibration, a separate input device, a MIDI keyboard, loop passes, crash recovery, unplug mid-recording, `state record`, input only while needed, synth measure and record to the end, as far as the bar shows them | open |
@@ -216,24 +216,24 @@ the take resemble the approved look.
 
 | Platform | Who | What | Status |
 |---|---|---|---|
-| macOS | controller | The monitor button's letters and tints (off, on, auto), in the header and in the strip; both strip buttons agree; the tint is readable in every theme | open |
+| macOS | controller | The monitor button's letters and tints (off, on, auto), in the header and in the strip; both strip buttons agree; the tint is readable in every theme | done 2026-11-25 (controller, offline device + fake input) in the header on the dark theme; other themes wait for Settings |
 | macOS | controller | The input row's truncation (a long channel or port name ends in an ellipsis, not over the badge) and its badge | open |
-| macOS | controller | The input picker: its sections (audio channels, MIDI sources, none), the checked entry, and its anchoring under the header's input row and under the strip's input control; Escape and a click outside close it | open |
+| macOS | controller | The input picker: its sections (audio channels, MIDI sources, none), the checked entry, and its anchoring under the header's input row and under the strip's input control; Escape and a click outside close it | done 2026-11-25 (controller, offline device + fake input) (header picker; Escape closes) |
 | macOS | controller | The input picker's list cannot scroll in a short window: shrink the window and note which entries cannot be reached (known gap, see the backlog) | open |
 | macOS | controller | The meter's fall rate after a loud signal, and the 2 s clip mark (it holds, then clears; a click or a new peak behaves as in Swift) | open |
 | macOS | controller | The meter hides on short track rows and returns when the row grows | open |
 | macOS | controller | Region waveform colour against each theme's region fill (SVP Light, Cubase Dark, Metro UI, Realistic, SymbioticAudio), selected and muted regions included | open |
-| macOS | controller | Region waveforms: mono is one band, stereo is two bands; gain and fades shape the drawing; the crossfade X draws and the earlier region's tail is as the backlog says | open |
-| macOS | controller | Zoom in close: `Coarse` rows sharpen into `Ready` ones; after a zoom the waveform is briefly blank, then fills in; `Pending` regions fill in without a flicker | open |
+| macOS | controller | Region waveforms: mono is one band, stereo is two bands; gain and fades shape the drawing; the crossfade X draws and the earlier region's tail is as the backlog says | done 2026-11-25 (controller, offline device + fake input) for mono and stereo; gain, fades and crossfades open |
+| macOS | controller | Zoom in close: `Coarse` rows sharpen into `Ready` ones; after a zoom the waveform is briefly blank, then fills in; `Pending` regions fill in without a flicker | done 2026-11-25 (controller, offline device + fake input); found and fixed a zoom that left waveforms blank until another frame (ffd246d2) |
 | macOS | controller | No blink or hitch while scrolling a long region and a long project, vertically and horizontally | open |
 | macOS | controller | An offline region: the hatching (0xf0883e at 0.55, a stand-in for Swift's offline colour; the owner may pick another) and the "Offline" pill read clearly on every theme; relinking removes both | open |
-| macOS | controller | The take while recording: its colour, the peaks growing in step with the playhead, and no lag in the UI while it grows | open |
-| macOS | controller | At Stop the take turns into the same waveform on the placed region: compare a screenshot just before and just after Stop; no flash, shift or blank | open |
+| macOS | controller | The take while recording: its colour, the peaks growing in step with the playhead, and no lag in the UI while it grows | done 2026-11-25 (controller, offline device + fake input) |
+| macOS | controller | At Stop the take turns into the same waveform on the placed region: compare a screenshot just before and just after Stop; no flash, shift or blank | done 2026-11-25 (controller, offline device + fake input) |
 | macOS | controller | Recording speed: rerun `gpui_records_audio_loop_takes_and_midi` and `gpui_arms_meters_counts_in_and_draws_the_take` on an UNLOCKED Mac and note both times (earlier runs were made with the screen locked, so the drawing cost is unproven); record the times here | done 2026-11-25: unlocked, `gpui_records_audio_loop_takes_and_midi` 36.2 s (35.8 s locked; the time is the takes playing in real time: record to the end, three loop passes, a MIDI take), `gpui_arms_meters_counts_in_and_draws_the_take` 4.2 s |
 | macOS | controller | Record a long take by hand (several minutes, a few tracks armed) and watch for UI lag, a late playhead or a control channel that times out | open |
-| macOS | controller | The Markers pane: row spacing and colours, the name label and the position digits aligned in a column (Swift monospaced), the selected or current row, and the pane's empty state | open |
-| macOS | controller | The Markers pane: hovering a row shows the "Go to <name>" tooltip; a click moves the playhead to the marker (also while playing) | open |
-| macOS | controller | The Markers pane with many markers (50 or more): the list scrolls to the last one; a failed move shows "Go to Marker Failed:" with the reason | open |
+| macOS | controller | The Markers pane: row spacing and colours, the name label and the position digits aligned in a column (Swift monospaced), the selected or current row, and the pane's empty state | done 2026-11-25 (controller, offline device + fake input) (ellipsis, right-aligned positions); colours per theme wait for Settings |
+| macOS | controller | The Markers pane: hovering a row shows the "Go to <name>" tooltip; a click moves the playhead to the marker (also while playing) | done 2026-11-25 (controller, offline device + fake input) for the click; found and fixed a locate that landed short while a track was armed (84ca0056); tooltip open |
+| macOS | controller | The Markers pane with many markers (50 or more): the list scrolls to the last one; a failed move shows "Go to Marker Failed:" with the reason | done 2026-11-25 (controller, offline device + fake input) (61 markers scroll to the last) |
 | macOS | controller | A real input device on the Mac: its channel names fill the picker; choosing it while closed shows "Opening the audio input… If macOS asks…" and the microphone prompt appears; after Allow, the meter moves with sound; after Don't Allow, the track says so and nothing crashes | open |
 | macOS | controller | A real MIDI source (a keyboard) listed in the picker, chosen on a track; notes light the meter or the track and record; unplugging it leaves the track's choice and shows it offline | open |
 | Linux | owner | The monitor button, input row, picker and meter on the owner's desktop with the system font: nothing clipped, tints readable | open |
