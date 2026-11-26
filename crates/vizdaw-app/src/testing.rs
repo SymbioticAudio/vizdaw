@@ -3776,6 +3776,13 @@ struct CoreState {
     audio_settings: Option<AudioSettingsRow>,
     /// What `audio_input_device_list` answers (default none, as off macOS).
     input_devices: Vec<vizdaw_ffi::host::InputDeviceRow>,
+    /// What `default_eq_note` answers.
+    eq_note: Option<String>,
+    /// What `eq_choices` answers.
+    eq_choices: Vec<vizdaw_ffi::bundled::DefaultEqRow>,
+    /// The build has no bundled EQ / no bundled AU.
+    no_bundled_eq: bool,
+    no_bundled_au: bool,
     /// Holds for the next reads of a source call, by call name (queued).
     holds: HashMap<String, VecDeque<Arc<ReadHold>>>,
     /// The thread each source read ran on, by call name, in order.
@@ -3857,6 +3864,24 @@ impl FakeCore {
     /// refuse with `e` (queued): same as [`FakeCore::fail_next`].
     pub fn refuse_next(&self, call: &str, e: VizError) {
         self.fail_next(call, e);
+    }
+
+    /// What `default_eq_note` answers from now on.
+    pub fn set_eq_note(&self, note: Option<&str>) {
+        self.st().eq_note = note.map(str::to_owned);
+    }
+
+    /// What `eq_choices` answers from now on.
+    pub fn set_eq_choices(&self, rows: Vec<vizdaw_ffi::bundled::DefaultEqRow>) {
+        self.st().eq_choices = rows;
+    }
+
+    /// The bundled EQ's name (`None`: the build has none) and whether the
+    /// build has the AU. A fresh fake has both.
+    pub fn set_bundled(&self, name: Option<&str>, au: bool) {
+        let mut s = self.st();
+        s.no_bundled_eq = name.is_none();
+        s.no_bundled_au = !au;
     }
 
     /// What `audio_input_device_list` answers from now on.
@@ -4176,6 +4201,48 @@ impl CoreCalls for FakeCore {
             "set_automation_settings",
             format!("{:?},{},{:?}", row.after_write, row.return_ms, row.thinning),
         )
+    }
+    fn set_new_channel_eq(&self, on: bool) {
+        self.st().calls.push(format!("set_new_channel_eq({on})"));
+    }
+    fn set_default_eq(&self, choice: Option<vizdaw_ffi::bundled::DefaultEqRow>) {
+        let what = match choice {
+            None => "multi-q".to_owned(),
+            Some(r) => {
+                use vizdaw_ffi::snapshot::PluginFormatTag::{Au, Clap, Vst3};
+                let f = match r.format {
+                    Au => "au",
+                    Clap => "clap",
+                    Vst3 => "vst3",
+                };
+                format!("{f}:{}", r.id)
+            }
+        };
+        self.st().calls.push(format!("set_default_eq({what})"));
+    }
+    fn default_eq_note(&self) -> Option<String> {
+        self.source("default_eq_note", |s| s.eq_note.clone())
+    }
+    fn bundled_eq_name(&self) -> Option<String> {
+        self.source("bundled_eq_name", |s| {
+            (!s.no_bundled_eq).then(|| "Multi-Q".to_owned())
+        })
+    }
+    fn bundled_au_present(&self) -> bool {
+        self.source("bundled_au_present", |s| !s.no_bundled_au)
+    }
+    /// Logged even when refused, so a test sees what was asked.
+    fn install_multiq(&self, dest: Option<String>, replace: bool) -> Result<String, VizError> {
+        let mut s = self.st();
+        s.calls.push(format!("install_multiq({dest:?},{replace})"));
+        Self::scripted(&mut s, "install_multiq")?;
+        Ok(format!(
+            "{}/Multi-Q.component",
+            dest.unwrap_or_else(|| "/Library/Audio/Plug-Ins/Components".into())
+        ))
+    }
+    fn eq_choices(&self) -> Vec<vizdaw_ffi::bundled::DefaultEqRow> {
+        self.source("eq_choices", |s| s.eq_choices.clone())
     }
     fn disable_plugins(&self, plugins: &[PluginRefRow]) -> Result<(), VizError> {
         let mut s = self.st();

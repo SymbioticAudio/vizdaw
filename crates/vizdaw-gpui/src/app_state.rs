@@ -93,6 +93,8 @@ pub struct AppState {
     /// Settings › Automation.
     pub automation: vizdaw_app::automation_prefs::AutomationPrefs,
     pub editing: vizdaw_app::editing_prefs::EditingPrefs,
+    /// Settings › Plug-ins: the new-channel EQ, pushed to the core at launch.
+    pub plugins: vizdaw_app::plugin_prefs::PluginPrefs,
     /// The keyboard layout id the windows use instead of the platform's
     /// (tests; `None`: `cx.keyboard_layout().id()`).
     pub keyboard_layout_override: Option<String>,
@@ -133,6 +135,7 @@ impl AppState {
             appearance: Default::default(),
             automation: Default::default(),
             editing: Default::default(),
+            plugins: Default::default(),
             keyboard_layout_override: None,
             transports: HashMap::new(),
             windows: Vec::new(),
@@ -204,13 +207,14 @@ impl AppState {
     /// the core now (call it before any document opens, so the first
     /// engine opens with them), and new documents start from the record
     /// defaults.
-    pub fn set_prefs(&mut self, prefs: Prefs) {
+    pub fn set_prefs(&mut self, mut prefs: Prefs) {
         self.store.set_default_format(prefs.default_format());
         let core = self.store.core();
         self.audio = vizdaw_app::audio_prefs::AudioPrefs::load(&prefs);
         self.audio.apply_at_launch(core.as_ref());
         self.automation = vizdaw_app::automation_prefs::AutomationPrefs::load(&prefs);
         self.automation.apply_at_launch(core.as_ref());
+        self.plugins = vizdaw_app::plugin_prefs::PluginPrefs::load(&mut prefs, core.as_ref());
         self.editing = vizdaw_app::editing_prefs::EditingPrefs::load(&prefs);
         self.store.set_record_defaults(self.audio.record_defaults());
         self.appearance = vizdaw_app::appearance_prefs::AppearancePrefs::load(&prefs);
