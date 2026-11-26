@@ -89,10 +89,6 @@ use crate::transport_fields::NO_FIELDS;
 
 pub(crate) mod files;
 
-/// The theme `state.get windows` names: the one fixed look the GPUI app
-/// draws until themes are ported (its dark palette).
-pub const THEME: &str = "studio-dark";
-
 thread_local! {
     static CHANNEL_CLICK: Cell<bool> = const { Cell::new(false) };
 }
@@ -829,6 +825,8 @@ fn app_wide(
             // A setting that took changes the record defaults too.
             s.store.set_record_defaults(s.audio.record_defaults());
             ran
+        } else if id == "ui.theme" {
+            s.run_ui_theme(args, cx)
         } else {
             commands::run_app(id, args, &mut s.prefs)
         };
@@ -1109,7 +1107,7 @@ fn windows_state(cx: &mut App) -> Value {
         .chain(app.read(cx).store.alert())
         .map(|a| json!({ "title": a.title, "message": a.message }))
         .collect();
-    json!({ "windows": rows, "alerts": alerts, "theme": THEME })
+    json!({ "windows": rows, "alerts": alerts, "theme": app.read(cx).theme_id() })
 }
 
 /// `ui.click {element}`: a mouse down and up at the element's centre,

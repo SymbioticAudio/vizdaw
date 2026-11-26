@@ -1263,11 +1263,90 @@ fn state_get_transport_has_click(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn state_get_windows_has_theme(cx: &mut TestAppContext) {
+fn state_get_windows_reports_the_theme(cx: &mut TestAppContext) {
     let s = setup(cx, demo_fake());
     let w = ok(call(&s, cx, "state.get", json!({"target": "windows"})));
-    assert_eq!(w["theme"], "studio-dark", "{w}");
+    assert_eq!(w["theme"], "classic-light", "{w}");
+    // The saved id is the answer; an id that names no theme is Classic Light.
+    cx.update(|cx| {
+        let state = AppState::global(cx);
+        state.update(cx, |s, cx| {
+            let mut prefs = vizdaw_app::Prefs::in_memory();
+            prefs
+                .set_raw("appearance", json!({"theme": "console"}))
+                .unwrap();
+            s.set_prefs(prefs);
+            cx.notify();
+        });
+    });
+    let w = ok(call(&s, cx, "state.get", json!({"target": "windows"})));
+    assert_eq!(w["theme"], "console", "{w}");
     assert!(core_control::registry::THEME_IDS.contains(&w["theme"].as_str().unwrap()));
+    cx.update(|cx| {
+        let state = AppState::global(cx);
+        state.update(cx, |s, _| {
+            let mut prefs = vizdaw_app::Prefs::in_memory();
+            prefs
+                .set_raw("appearance", json!({"theme": "neon"}))
+                .unwrap();
+            s.set_prefs(prefs);
+        });
+    });
+    let w = ok(call(&s, cx, "state.get", json!({"target": "windows"})));
+    assert_eq!(w["theme"], "classic-light", "{w}");
+}
+
+#[gpui::test]
+fn ui_theme_switches_every_window_without_opening_one(cx: &mut TestAppContext) {
+    let s = setup(cx, demo_fake());
+    assert_eq!(documents(cx), 0);
+    let before = vizdaw_gpui::strip_palette::tokens().surface_panel;
+    for id in core_control::registry::THEME_IDS {
+        let r = ok(call(
+            &s,
+            cx,
+            "command.run",
+            json!({"id": "ui.theme", "params": {"theme": id}}),
+        ));
+        assert_eq!(r["command"], "ui.theme");
+        assert_eq!(r["status"], format!("theme {id}"));
+        assert!(r["doc"].is_null() && r["window"].is_null(), "{r}");
+        let w = ok(call(&s, cx, "state.get", json!({"target": "windows"})));
+        assert_eq!(w["theme"], *id);
+        let (cur, panel) = cx.update(|cx| {
+            (
+                vizdaw_gpui::current_theme(cx).id.clone(),
+                vizdaw_gpui::strip_palette::tokens().surface_panel,
+            )
+        });
+        assert_eq!(cur, *id);
+        assert_eq!(
+            panel,
+            vizdaw_app::theme::theme(id).unwrap().surface.panel.rgb
+        );
+    }
+    assert_ne!(before, vizdaw_gpui::strip_palette::tokens().surface_panel);
+    assert_eq!(documents(cx), 0);
+    // Hostile calls change nothing.
+    for params in [
+        json!({}),
+        json!({"theme": "svp-light"}),
+        json!({"theme": 7}),
+        json!({"theme": "flat", "extra": true}),
+        json!({"theme": "user.nope"}),
+    ] {
+        let e = call(
+            &s,
+            cx,
+            "command.run",
+            json!({"id": "ui.theme", "params": params}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidParams, "{params}");
+    }
+    let w = ok(call(&s, cx, "state.get", json!({"target": "windows"})));
+    assert_eq!(w["theme"], "eg13");
+    assert_eq!(documents(cx), 0);
 }
 
 #[gpui::test]

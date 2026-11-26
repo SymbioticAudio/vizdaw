@@ -196,6 +196,7 @@ pub const APP_COMMANDS: &[&str] = &[
     "ui.reset_transport_bar",
     "automation.suspend",
     "audio.set",
+    "ui.theme",
 ];
 
 /// Why a bare transport key does nothing while a field is typed in.

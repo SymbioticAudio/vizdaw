@@ -3,6 +3,7 @@
 
 pub mod aaf;
 pub mod alerts;
+pub mod appearance_prefs;
 pub mod arrangement;
 pub mod audio_format;
 pub mod audio_prefs;

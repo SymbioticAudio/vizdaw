@@ -2,6 +2,7 @@
 
 pub mod alerts;
 pub mod app_state;
+pub mod appearance;
 pub mod arrangement;
 pub mod banners;
 mod channel_strip_pane;
@@ -46,6 +47,7 @@ use vizdaw_app::store::Opened;
 use vizdaw_app::{DocId, DocumentStore};
 
 pub use app_state::{AppState, WindowKind};
+pub use appearance::current_theme;
 pub use menus::{
     AppFileCommand, CloseWindow, FileCommand, NewDemo, NewDocument, OpenDocument, OpenSettings,
     PlayStop, Quit, RunCommand, Save, SaveAs, StopAndReturn,

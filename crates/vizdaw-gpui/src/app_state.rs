@@ -89,6 +89,8 @@ pub struct AppState {
     /// Settings › Audio and Recording, over `prefs` (handed to the core
     /// at launch, changed core first).
     pub audio: vizdaw_app::audio_prefs::AudioPrefs,
+    /// Settings › Appearance: the theme and the colour bars, over `prefs`.
+    pub appearance: vizdaw_app::appearance_prefs::AppearancePrefs,
     /// Settings › Automation.
     pub automation: vizdaw_app::automation_prefs::AutomationPrefs,
     /// The keyboard layout id the windows use instead of the platform's
@@ -121,11 +123,13 @@ impl Global for GlobalAppState {}
 
 impl AppState {
     pub fn new(store: DocumentStore) -> Self {
+        crate::appearance::set_current(vizdaw_app::theme::DEFAULT_THEME_ID);
         AppState {
             store,
             keymap: Keymap::default(),
             prefs: Prefs::in_memory(),
             audio: Default::default(),
+            appearance: Default::default(),
             automation: Default::default(),
             keyboard_layout_override: None,
             transports: HashMap::new(),
@@ -153,6 +157,28 @@ impl AppState {
         cx.set_global(GlobalAppState(state));
     }
 
+    /// The theme's id `state.get windows` reports: the saved one, or
+    /// `classic-light` when it names no theme.
+    pub fn theme_id(&self) -> &'static str {
+        &self.appearance.resolved().id
+    }
+
+    /// `ui.theme`: sets and saves the theme and redraws every window.
+    /// `invalid_params` and no change for an id that names no theme.
+    pub fn run_ui_theme(
+        &mut self,
+        args: &[(String, core_control::registry::ArgValue)],
+        cx: &mut gpui::App,
+    ) -> Result<vizdaw_app::commands::Ran, core_control::ControlError> {
+        let ran = vizdaw_app::appearance_prefs::run_ui_theme(
+            args,
+            &mut self.appearance,
+            &mut self.prefs,
+        )?;
+        crate::appearance::apply(&self.appearance.theme, cx);
+        Ok(ran)
+    }
+
     /// Takes `prefs` as the app's preferences; new projects are made in
     /// their default format. The saved audio and automation settings go to
     /// the core now (call it before any document opens, so the first
@@ -166,6 +192,8 @@ impl AppState {
         self.automation = vizdaw_app::automation_prefs::AutomationPrefs::load(&prefs);
         self.automation.apply_at_launch(core.as_ref());
         self.store.set_record_defaults(self.audio.record_defaults());
+        self.appearance = vizdaw_app::appearance_prefs::AppearancePrefs::load(&prefs);
+        crate::appearance::set_current(&self.appearance.theme);
         self.prefs = prefs;
     }
 
