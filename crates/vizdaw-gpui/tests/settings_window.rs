@@ -606,11 +606,13 @@ fn the_recording_tab_shows_swifts_rows(cx: &mut TestAppContext) {
     s.click("menu", "Monitoring for new tracks");
     assert_eq!(s.items(), ["Auto", "Input", "Off"]);
     s.click("menuitem", "Off");
-    assert_eq!(
-        s.value("menu", "Monitoring for new tracks").unwrap(),
-        "Off"
+    assert_eq!(s.value("menu", "Monitoring for new tracks").unwrap(), "Off");
+    assert!(
+        s.core
+            .calls()
+            .iter()
+            .any(|c| c.starts_with("set_default_monitor"))
     );
-    assert!(s.core.calls().iter().any(|c| c.starts_with("set_default_monitor")));
     // The steppers stop at Swift's ends: count-in 0-4, pre-roll 0-8.
     assert!(!s.enabled("button", "Decrease Count-in"));
     assert!(!s.enabled("button", "Decrease Pre-roll"));
@@ -663,7 +665,9 @@ fn count_in_applies_to_the_next_new_document_not_open_ones(cx: &mut TestAppConte
     assert!(s.has_text("Count-in: 2 bars"));
     assert!(s.has_text("Pre-roll: 1 bar"));
     assert_eq!(s.value("checkbox", "MIDI passes as takes").unwrap(), "on");
-    let saved = s.app.read_with(&s.cx, |a, _| a.audio.settings().count_in_bars);
+    let saved = s
+        .app
+        .read_with(&s.cx, |a, _| a.audio.settings().count_in_bars);
     assert_eq!(saved, 2);
     // The open document keeps its own; the next one starts from these.
     s.cx.update(|_, cx| vizdaw_gpui::new_demo(cx));
@@ -710,7 +714,9 @@ fn the_automation_tab_shows_swifts_rows(cx: &mut TestAppContext) {
     s.click("button", "Decrease Return time");
     s.click("button", "Decrease Return time");
     assert!(s.has_text("Return time: 200 ms"));
-    let saved = s.app.read_with(&s.cx, |a, _| a.automation.settings().return_ms);
+    let saved = s
+        .app
+        .read_with(&s.cx, |a, _| a.automation.settings().return_ms);
     assert_eq!(saved, 200);
     s.choose("Thinning", "High");
     assert_eq!(s.value("menu", "Thinning").unwrap(), "High");
@@ -749,7 +755,10 @@ fn a_refused_automation_change_shows_the_problem(cx: &mut TestAppContext) {
         .read_with(&s.cx, |a, _| a.automation.settings().after_write.clone());
     assert_eq!(saved, "latch");
     s.choose("After Write", "Touch");
-    assert!(s.find("text", "Stop recording to change automation.").is_none());
+    assert!(
+        s.find("text", "Stop recording to change automation.")
+            .is_none()
+    );
 }
 
 #[gpui::test]

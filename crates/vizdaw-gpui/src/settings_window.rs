@@ -16,8 +16,8 @@ use gpui::{
     WindowBounds, WindowOptions, anchored, deferred, div, point, px, rgb, size,
 };
 use vizdaw_app::audio_prefs::{
-    self, AudioPrefs, BUFFER_SIZES, cache_choices, cache_text, count_text, device_choices, device_tag,
-    round_trip_text, trim_text,
+    self, AudioPrefs, BUFFER_SIZES, cache_choices, cache_text, count_text, device_choices,
+    device_tag, round_trip_text, trim_text,
 };
 use vizdaw_app::automation_prefs::{
     AFTER_WRITE_CHOICES, APPLIES_TEXT, AutomationPrefs, MAX_RETURN_MS, PARAMS_ONLY_HELP,

@@ -6,8 +6,8 @@
 use serde_json::json;
 use vizdaw_app::Prefs;
 use vizdaw_app::audio_prefs::{
-    AudioPrefs, AudioSettings, DISK_TEXT, DeviceChoice, cache_choices, cache_text, count_text, device_choices,
-    round_trip_text, trim_text,
+    AudioPrefs, AudioSettings, DISK_TEXT, DeviceChoice, cache_choices, cache_text, count_text,
+    device_choices, round_trip_text, trim_text,
 };
 use vizdaw_app::testing::FakeCore;
 use vizdaw_ffi::host::InputDeviceRow;
