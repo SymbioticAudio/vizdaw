@@ -59,4 +59,7 @@ ditto "$multiq/Multi-Q.component" "$app/Contents/PlugIns/Multi-Q.component"
 ditto "$multiq/licences" "$licences"
 codesign --force -s - "$app/Contents/PlugIns/Multi-Q.clap"
 codesign --force -s - "$app/Contents/PlugIns/Multi-Q.component"
+# Seal the bundle last, after everything inside it is in place: an
+# unsealed bundle opened from Finder reads as "damaged".
+codesign --force -s - "$app"
 echo "$app"
