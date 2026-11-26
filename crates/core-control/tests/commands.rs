@@ -105,6 +105,40 @@ fn unknown_commands_and_parameters_are_refused() {
     assert!(msg.starts_with("state.get: "), "{msg}");
 }
 
+/// Next small fixes Task 6 (R7): `app.quit` takes an optional Bool
+/// `discard`; anything else is a bad param.
+#[test]
+fn app_quit_takes_only_a_bool_discard() {
+    assert_eq!(
+        ok("app.quit", json!({})),
+        Command::AppQuit { discard: false }
+    );
+    assert_eq!(
+        ok("app.quit", json!({"discard": true})),
+        Command::AppQuit { discard: true }
+    );
+    assert_eq!(
+        ok("app.quit", json!({"discard": false})),
+        Command::AppQuit { discard: false }
+    );
+    assert_eq!(
+        ok("app.quit", json!({"discard": null})),
+        Command::AppQuit { discard: false },
+        "null is absent, as for every parameter"
+    );
+    for bad in [
+        json!("yes"),
+        json!(1),
+        json!("true"),
+        json!({}),
+        json!([true]),
+    ] {
+        let (code, msg) = err("app.quit", json!({ "discard": bad }));
+        assert_eq!(code, ErrorCode::InvalidParams, "{bad}");
+        assert!(msg.contains("discard"), "{msg}");
+    }
+}
+
 #[test]
 fn state_and_tree_read_their_window() {
     assert_eq!(
@@ -563,8 +597,8 @@ fn the_registry_has_unique_ids_and_answers_dialogs_by_parameter() {
     assert_eq!(ids.len(), COMMANDS.len(), "IDs are unique");
     assert_eq!(
         COMMANDS.len(),
-        237,
-        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq; 6g-2 adds plugins.default_eq and mixer.new_bus; 8a adds settings.co_producer and file.open_copy; 5c-2 takes adds track.choose_take, track.rename_take and track.delete_take; 8b adds track.make_mine, mixer.make_mine, mixer.set_colour and window.song_notes, then settings.co_producer_answer; release-fixes adds automation.release_all, lane.set_output, region.set_fade_shape and destination.set_sound; 8c adds modify.quantize_notes, modify.transpose_notes, modify.velocity_notes, marker.add, marker.rename and marker.remove; 8d adds the twelve mixer edits and track.new_plugin_instrument; 8e adds automation.write; 8f adds settings.co_producer_metrics and settings.delete_time_records; groups-vcas-transport adds seven group commands, seven VCA commands, the three click commands, ui.set_transport_bar and ui.reset_transport_bar; Task 12 adds ui.customize_transport"
+        238,
+        "44 before plan 4f; 4f adds 51 transport, locator, record and key-binding commands and 13 step entry; 5a adds Project Settings, Import Audio and Convert Media; 5b adds the media pool's four and the Region menu's four; 5c adds record.set, record.recover, lane.set_input, lane.set_monitor and midi.inject; 5c-2 adds lane.track_synth, destination.set_return_latency and destination.measure_return; 5d-1 adds audio.set and destination.add_midi; 5e-1 adds automation.set_mode, automation.gesture and automation.suspend; 5e-2 adds the six automation.mode commands; 5f-1 adds transport.play, surface.add, surface.remove, surface.inject, surface.learn and surface.unlearn; 5f-2 adds file.bounce; 5f-3 adds region.open_external and region.reload_external; plan 7a: six ui.* commands; plan 7b: ui.theme; plan 7c: editors.audio_editor; plan 7d: transport.rewind and transport.fast_forward; plan tracks: track.new_audio, track.new_instrument, track.new_midi, track.duplicate, track.delete and track.rename; the Drum Grid turns drum.mark_lane's job on by itself, so it is gone (-1); 5g-1 adds lane.set_input_fx; 5g-1b adds destination.set_midi_mix; 5g-2 adds lane.set_mpe and destination.set_mpe; 6a adds file.import_midi, file.export_midi, file.export_midi_clip and file.interchange_report; 6b adds file.export_for_daw; 6c adds region.crossfade and region.remove_crossfade; 6d adds file.import_dawproject and file.export_dawproject; 6f adds file.import_aaf and file.export_aaf; 6g adds plugins.new_channel_eq and plugins.install_multiq; 6g-2 adds plugins.default_eq and mixer.new_bus; 8a adds settings.co_producer and file.open_copy; 5c-2 takes adds track.choose_take, track.rename_take and track.delete_take; 8b adds track.make_mine, mixer.make_mine, mixer.set_colour and window.song_notes, then settings.co_producer_answer; release-fixes adds automation.release_all, lane.set_output, region.set_fade_shape and destination.set_sound; 8c adds modify.quantize_notes, modify.transpose_notes, modify.velocity_notes, marker.add, marker.rename and marker.remove; 8d adds the twelve mixer edits and track.new_plugin_instrument; 8e adds automation.write; 8f adds settings.co_producer_metrics and settings.delete_time_records; groups-vcas-transport adds seven group commands, seven VCA commands, the three click commands, ui.set_transport_bar and ui.reset_transport_bar; Task 12 adds ui.customize_transport; small-fixes Task 4 adds destination.edit_midi"
     );
     for c in COMMANDS {
         // snake_case words (a locator's number too), a dot after the group.
@@ -1326,6 +1360,86 @@ fn synth_commands_check_their_params() {
             "destination.set_return_latency",
             json!({ "dest": 4, "ms": "12", "junk": "x".repeat(100_000) }),
         ),
+        // Task 4 (small fixes): every key is required, the channel is
+        // 1-based, and the name and port are 1 to 255 characters with no
+        // control characters (the app checks the id names an external
+        // MIDI destination).
+        (
+            "destination.edit_midi",
+            json!({ "name": "Juno", "port": "P", "channel": 1 }),
+        ),
+        (
+            "destination.edit_midi",
+            json!({ "dest": -4, "name": "Juno", "port": "P", "channel": 1 }),
+        ),
+        (
+            "destination.edit_midi",
+            json!({ "dest": "Juno", "name": "Juno", "port": "P", "channel": 1 }),
+        ),
+        (
+            "destination.edit_midi",
+            json!({ "dest": u64::MAX, "name": "Juno", "port": "P", "channel": 1 }),
+        ),
+        (
+            "destination.edit_midi",
+            json!({ "dest": 4, "port": "P", "channel": 1 }),
+        ),
+        (
+            "destination.edit_midi",
+            json!({ "dest": 4, "name": "Juno", "channel": 1 }),
+        ),
+        (
+            "destination.edit_midi",
+            json!({ "dest": 4, "name": "Juno", "port": "P" }),
+        ),
+        (
+            "destination.edit_midi",
+            json!({ "dest": 4, "name": "", "port": "P", "channel": 1 }),
+        ),
+        (
+            "destination.edit_midi",
+            json!({ "dest": 4, "name": "   ", "port": "P", "channel": 1 }),
+        ),
+        (
+            "destination.edit_midi",
+            json!({ "dest": 4, "name": "x".repeat(256), "port": "P", "channel": 1 }),
+        ),
+        (
+            "destination.edit_midi",
+            json!({ "dest": 4, "name": "Juno", "port": "x".repeat(256), "channel": 1 }),
+        ),
+        (
+            "destination.edit_midi",
+            json!({ "dest": 4, "name": "Juno", "port": "", "channel": 1 }),
+        ),
+        (
+            "destination.edit_midi",
+            json!({ "dest": 4, "name": "Ju\nno", "port": "P", "channel": 1 }),
+        ),
+        (
+            "destination.edit_midi",
+            json!({ "dest": 4, "name": "Juno", "port": "P\u{7}", "channel": 1 }),
+        ),
+        (
+            "destination.edit_midi",
+            json!({ "dest": 4, "name": "Juno", "port": "P", "channel": 0 }),
+        ),
+        (
+            "destination.edit_midi",
+            json!({ "dest": 4, "name": "Juno", "port": "P", "channel": 17 }),
+        ),
+        (
+            "destination.edit_midi",
+            json!({ "dest": 4, "name": "Juno", "port": "P", "channel": 1.5 }),
+        ),
+        (
+            "destination.edit_midi",
+            json!({ "dest": 4, "name": "Juno", "port": "P", "channel": "1" }),
+        ),
+        (
+            "destination.edit_midi",
+            json!({ "dest": 4, "name": 4, "port": "P", "channel": 1 }),
+        ),
         ("destination.set_midi_mix", json!({ "volume": 90 })),
         ("destination.set_midi_mix", json!({ "dest": 4 })),
         (
@@ -1515,6 +1629,14 @@ fn audio_and_destination_commands_check_their_params() {
         (
             "destination.add_midi",
             json!({ "name": "Juno", "port": "Juno MIDI", "channel": 16 }),
+        ),
+        (
+            "destination.edit_midi",
+            json!({ "dest": 4, "name": " Juno 106 ", "port": "Juno MIDI", "channel": 16 }),
+        ),
+        (
+            "destination.edit_midi",
+            json!({ "dest": 4, "name": "x".repeat(255), "port": "x".repeat(255), "channel": 1 }),
         ),
     ] {
         assert!(
@@ -4114,5 +4236,19 @@ fn customize_transport_only_ever_needs_its_dialog() {
             matches!(code, ErrorCode::InvalidParams | ErrorCode::DialogRequired),
             "{code:?}"
         );
+    }
+}
+
+/// Host track H1 Task 1: a plug-in reference may be `vst3:<class ID>`.
+#[test]
+fn plugin_refs_take_vst3_class_ids() {
+    use core_control::registry::plugin_ref;
+    for instrument in [false, true] {
+        assert_eq!(
+            plugin_ref("vst3:0123456789ABCDEF0123456789ABCDEF", instrument),
+            Ok(())
+        );
+        let why = plugin_ref("vst3:", instrument).unwrap_err();
+        assert!(why.contains("vst3:<class ID>"), "{why}");
     }
 }

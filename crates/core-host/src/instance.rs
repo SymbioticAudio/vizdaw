@@ -35,6 +35,10 @@ pub struct InstanceEvents {
     /// Its state changed in a way the host should save (CLAP
     /// `state.mark_dirty`).
     pub state_dirty: bool,
+    /// Its open editor resized itself (CLAP `gui.request_resize`, accepted
+    /// and clamped by its `adjust_size`) to this size in logical points:
+    /// the window should follow. A refused request reports nothing.
+    pub editor_resize: Option<(u32, u32)>,
 }
 
 /// A plug-in's own presets (plan 5f-4 Ruling 7).
@@ -67,7 +71,8 @@ pub enum OfflineRender {
     Refused,
 }
 
-/// The native view an editor attaches to (an `NSView *` on macOS).
+/// The native view an editor attaches to: an `NSView *` on macOS, an X11
+/// window ID (cast to a pointer) on Linux.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParentView(pub(crate) *mut c_void);
 
@@ -75,8 +80,8 @@ impl ParentView {
     /// Wraps the native parent view.
     ///
     /// # Safety
-    /// `view` must be a valid `NSView *` (or the platform's parent view)
-    /// that stays alive until the editor it is passed to is closed.
+    /// `view` must be a valid `NSView *` on macOS, or an X11 window ID on
+    /// Linux, that stays alive until the editor it is passed to is closed.
     pub unsafe fn new(view: *mut c_void) -> ParentView {
         ParentView(view)
     }
@@ -88,11 +93,30 @@ impl ParentView {
 }
 
 /// A plugin's own editor. Main thread only.
+///
+/// Every size here is in logical points, on every platform: a format whose
+/// window API counts physical pixels (CLAP on X11) converts with the scale
+/// given to [`PluginEditor::set_scale`].
 pub trait PluginEditor {
+    /// The backing scale (physical pixels per point) of the window the
+    /// editor will open in; non-finite or non-positive values count as 1.
+    /// Call it before [`PluginEditor::open`]: it applies at the next open
+    /// (for CLAP, between `create` and `set_parent`, in the order the gui
+    /// extension asks; a window API that already works in points, Cocoa,
+    /// gets no `set_scale`). To follow a window to a screen with another
+    /// scale, set it and open again. The default ignores it (AU editors
+    /// are sized in points by AppKit).
+    fn set_scale(&mut self, scale: f64) {
+        let _ = scale;
+    }
     /// Attaches the editor to `parent` and shows it; returns its size in
-    /// points.
+    /// points. Never runs a nested run loop: an editor whose view arrives
+    /// asynchronously (AU v3) answers [`HostError::Opening`] until it is
+    /// there, and a later `open` (with the parent of that call) attaches
+    /// it; `close` abandons the wait.
     fn open(&mut self, parent: ParentView) -> Result<(u32, u32), HostError>;
-    /// Asks for a new size; returns the size the plugin accepted.
+    /// Asks for a new size in points; returns the size in points the
+    /// plugin accepted.
     fn resize(&mut self, width: u32, height: u32) -> Result<(u32, u32), HostError>;
     /// Whether the user may resize it.
     fn can_resize(&mut self) -> bool;
@@ -118,6 +142,14 @@ pub trait PluginInstance {
     fn is_active(&self) -> bool;
     /// The plugin's full state.
     fn save_state(&mut self) -> Result<Vec<u8>, HostError>;
+    /// Parameters whose latest value [`PluginInstance::save_state`] does
+    /// not hold yet. A VST3 component takes values only in a processed
+    /// block, so values set before its first block are in its controller
+    /// but not in its state. A capture keeps these in the document's
+    /// overlay, so a saved song still has them. None by default.
+    fn unsaved_params(&mut self) -> Vec<ParamId> {
+        Vec::new()
+    }
     /// Restores a state from [`PluginInstance::save_state`].
     fn load_state(&mut self, data: &[u8]) -> Result<(), HostError>;
     /// Sets parameters while inactive (load: state first, then the

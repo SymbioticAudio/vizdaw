@@ -40,6 +40,7 @@ fn ducker() -> PluginInfo {
             stepped: false,
             automatable: true,
             hidden: false,
+            read_only: false,
         }],
         latency: 0,
         tail: Tail::Frames(480),
@@ -116,4 +117,22 @@ fn queues_carry_values_in_and_gestures_out() {
             ParamEvent::End(ParamId(1)),
         ]
     );
+}
+
+#[test]
+fn a_catalog_written_now_has_no_read_only_key() {
+    let p = ducker().params[0].clone();
+    let ro = ParamInfo {
+        read_only: true,
+        ..p.clone()
+    };
+    let json = serde_json::to_string(&ro).unwrap();
+    assert!(!json.contains("read_only"), "{json}");
+    // An old-shape row (no key) still loads, as not read-only.
+    let back: ParamInfo = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+    assert!(!back.read_only);
+    // A row from a build that wrote the key still loads.
+    let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    v["read_only"] = true.into();
+    assert!(serde_json::from_value::<ParamInfo>(v).unwrap().read_only);
 }

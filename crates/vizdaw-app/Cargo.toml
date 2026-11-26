@@ -1,0 +1,23 @@
+[package]
+name = "vizdaw-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+core-control = { path = "../core-control" }
+core-ffi = { path = "../core-ffi" }
+core-model = { path = "../core-model" }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+# The scripted FakeSession (`testing`), for this crate's and the GPUI crate's tests.
+test-support = []
+
+[dev-dependencies]
+vizdaw-app = { path = ".", features = ["test-support"] }
+tempfile = "3"

@@ -27,7 +27,7 @@ use crate::report::{ItemKind, Report};
 use core_model::automation::{AutomationTarget, FULL_SCALE, fader_db, switch_on};
 use core_model::document::{DestKind, Destination};
 use core_model::event::{Event, EventBody, FadeShape, LoopCount, PerNoteKind};
-use core_model::ids::{DestId, EventId, MediaId};
+use core_model::ids::{DestId, EventId, MediaId, VcaId};
 use core_model::meter::MeterMap;
 use core_model::query::{PathStep, ResolvedEvent, seq_length};
 use core_model::time::{BarBeatUnit, Tick};
@@ -124,7 +124,8 @@ pub const PLAY_QUANTIZED: &str = "Play quantize was applied to the notes";
 
 /// The arrangement's track timelines and what they need.
 pub(super) struct Arranged {
-    /// One `Lanes track="t<lane>"` per exported track, in track order.
+    /// One `Lanes track="t<lane>"` per exported track, in track order,
+    /// then the trackless VCA curves (B-001).
     pub(super) lanes: Vec<DpTimeline>,
     /// The audio entries, numbered in first-use order.
     pub(super) audio: Vec<AudioFile>,
@@ -166,6 +167,7 @@ pub(super) fn arrange(
     for (pi, p) in l.parts.iter().enumerate() {
         lanes.push(DpTimeline::Lanes(a.track(pi, p)?));
     }
+    lanes.extend(a.vca_curves()?.into_iter().map(DpTimeline::Points));
     Ok(Arranged {
         lanes,
         audio: a.audio,
@@ -1247,33 +1249,14 @@ impl Arr<'_, '_, '_, '_, '_> {
                         .add(ItemKind::LeftOut, VELOCITY_SCALE_AUTOMATION, Some(p.name()));
                     continue;
                 }
-                // The VCA channel's volume (below); a VCA the document lost
-                // is an unplaced target.
-                AutomationTarget::VcaFader(v) if l.doc.mixer().vca(v).is_err() => {
-                    self.report.add(
-                        ItemKind::LeftOut,
-                        UNPLACED_AUTOMATION,
-                        Some(target.describe()),
-                    );
+                // The VCA channel's volume.
+                AutomationTarget::VcaFader(v) => {
+                    self.vca_point(&mut out, &mut at, v, value, r.tick);
                     continue;
                 }
                 // Listed with the device (Task 4).
                 AutomationTarget::PluginParam(_, q) if u32::try_from(q.0).is_err() => continue,
                 _ => {}
-            }
-            if let AutomationTarget::VcaFader(v) = target {
-                let param = format!("{}v", vca_channel_id(v));
-                let value =
-                    DpPointValue::Real(linear_gain(fader_db(value)), Some(DpInterpolation::Linear));
-                self.point(
-                    &mut out,
-                    &mut at,
-                    param,
-                    Some(DpUnit::Linear),
-                    r.tick,
-                    value,
-                );
-                continue;
             }
             let chan = l.target(pi, target).and_then(|(c, _)| l.chans.get(c));
             let Some(chan) = chan else {
@@ -1323,6 +1306,60 @@ impl Arr<'_, '_, '_, '_, '_> {
                 | AutomationTarget::VcaFader(_) => continue,
             };
             self.point(&mut out, &mut at, param, unit, r.tick, v);
+        }
+        Ok(out)
+    }
+
+    /// A point of VCA `v`'s fader: its channel's volume. A VCA the
+    /// document lost is an unplaced target.
+    fn vca_point(
+        &mut self,
+        out: &mut Vec<DpPoints>,
+        at: &mut BTreeMap<String, usize>,
+        v: VcaId,
+        value: f64,
+        tick: Tick,
+    ) {
+        if self.l.doc.mixer().vca(v).is_err() {
+            self.report.add(
+                ItemKind::LeftOut,
+                UNPLACED_AUTOMATION,
+                Some(AutomationTarget::VcaFader(v).describe()),
+            );
+            return;
+        }
+        let param = format!("{}v", vca_channel_id(v));
+        let value = DpPointValue::Real(linear_gain(fader_db(value)), Some(DpInterpolation::Linear));
+        self.point(out, at, param, Some(DpUnit::Linear), tick, value);
+    }
+
+    /// The curves of the tracks that only move VCA faders (B-001), at the
+    /// arrangement level with no track: one per VCA, in order of first
+    /// use. What a muted reference use holds does not play.
+    fn vca_curves(&mut self) -> Result<Vec<DpPoints>, IoError> {
+        let l = self.l;
+        let mut moves: Vec<(Tick, VcaId, f64)> = Vec::new();
+        for lane in &l.vca_lanes {
+            for r in l.played.get(&lane.id).map_or(&[][..], Vec::as_slice) {
+                self.ticker.tick()?;
+                let in_muted_use =
+                    r.path.len() > 1 && r.path.first().is_some_and(|s| l.muted.contains(&s.event));
+                if let EventBody::Automation {
+                    target: AutomationTarget::VcaFader(v),
+                    value,
+                } = r.body
+                    && !in_muted_use
+                {
+                    moves.push((r.tick, v, value));
+                }
+            }
+        }
+        // Two tracks may move one VCA: its curve is in time order.
+        moves.sort_by_key(|(t, _, _)| *t);
+        let mut out: Vec<DpPoints> = Vec::new();
+        let mut at: BTreeMap<String, usize> = BTreeMap::new();
+        for (tick, v, value) in moves {
+            self.vca_point(&mut out, &mut at, v, value, tick);
         }
         Ok(out)
     }

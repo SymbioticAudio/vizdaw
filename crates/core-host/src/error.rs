@@ -20,6 +20,11 @@ pub enum HostError {
     /// The plugin has no editor, or it could not be shown.
     #[error("editor unavailable: {0}")]
     EditorUnavailable(String),
+    /// The editor is still opening (an AU v3 view controller not delivered
+    /// yet): nothing is attached; call `open` again later (the window's
+    /// next tick) to attach it.
+    #[error("editor opening")]
+    Opening,
     /// The plugin is disabled or blocklisted in the Plugin Manager.
     #[error("disabled: {0}")]
     Disabled(String),

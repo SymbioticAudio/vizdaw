@@ -285,8 +285,10 @@ fn the_list_offers_only_usable_plugins() {
             "clap:vizdaw.test.crasher",
             "clap:vizdaw.test.ducker",
             "clap:vizdaw.test.gain",
+            "clap:vizdaw.test.gui",
             "clap:vizdaw.test.hanger",
             "clap:vizdaw.test.nan",
+            "clap:vizdaw.test.timer",
         ]
     );
     let first = &rows[0];
@@ -595,6 +597,7 @@ fn plugin_results_json() {
                 stepped: false,
                 automatable: true,
                 hidden: false,
+                read_only: false,
             }],
         },
     });
@@ -948,6 +951,7 @@ mod task4 {
             stepped,
             automatable: true,
             hidden,
+            read_only: false,
         }
     }
 
@@ -2651,4 +2655,70 @@ mod groups_vcas {
         s.co_producer_end().unwrap();
         s.close().unwrap();
     }
+}
+
+/// Records a made-up VST3 entry (never loaded), OK.
+fn fake_vst3(id: &str, name: &str, kind: PluginKind) {
+    let src = Source {
+        format: PluginFormat::Vst3,
+        path: PathBuf::from(format!("/fake/{name}.vst3")),
+        version: "1.0.0".into(),
+        mtime: 0,
+    };
+    let entry = CatalogEntry {
+        source: src.clone(),
+        plugin: PluginRef {
+            format: PluginFormat::Vst3,
+            id: id.into(),
+            name: name.into(),
+            vendor: "Maker".into(),
+            version: "1.0.0".into(),
+        },
+        kind: Some(kind),
+        info: None,
+        status: ScanStatus::Ok,
+    };
+    vizdaw_ffi::catalog::with(|c| c.record(&src, vec![entry]));
+}
+
+/// Host track H1 Task 1: `vst3:<32-hex class ID>` names a VST3 plug-in,
+/// in either case; the reference text is written in upper case.
+#[test]
+fn vst3_plugins_resolve_by_class_id() {
+    let _g = serial();
+    const TUID: &str = "0123456789ABCDEF0123456789ABCDEF";
+    fake_vst3(TUID, "Again", PluginKind::Effect);
+    let got = resolve_plugin(&format!("vst3:{TUID}"), PluginKind::Effect).unwrap();
+    assert_eq!(got.format, PluginFormat::Vst3);
+    assert_eq!(got.id, TUID);
+    assert_eq!(plugin_ref_text(&got), format!("vst3:{TUID}"));
+    let lower = resolve_plugin(&format!("vst3:{}", TUID.to_lowercase()), PluginKind::Effect);
+    assert_eq!(lower.unwrap(), got);
+    assert_eq!(
+        refusal(resolve_plugin(
+            &format!("vst3:{TUID}"),
+            PluginKind::Instrument
+        )),
+        "Again is an effect, not an instrument."
+    );
+    for odd in ["vst3:", "vst3:0123", "vst3:vizdaw.test.gain"] {
+        assert!(
+            refusal(resolve_plugin(odd, PluginKind::Effect)).starts_with("No installed plug-in is"),
+            "{odd:?}"
+        );
+    }
+    let rows = co_producer_plugins(None).plugins;
+    let row = rows
+        .iter()
+        .find(|r| r.plugin == format!("vst3:{TUID}"))
+        .expect("the VST3 effect is offered");
+    assert_eq!(row.format, "vst3");
+    assert_eq!(
+        PluginFormatTag::from(PluginFormat::Vst3),
+        PluginFormatTag::Vst3
+    );
+    assert_eq!(
+        PluginFormat::from(PluginFormatTag::Vst3),
+        PluginFormat::Vst3
+    );
 }

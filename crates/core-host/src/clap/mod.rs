@@ -7,7 +7,7 @@ mod handlers;
 mod instance;
 mod processor;
 
-pub use instance::ClapInstance;
+pub use instance::{ClapInstance, editor_api};
 pub use processor::ClapProcessor;
 
 use crate::error::HostError;

@@ -42,17 +42,47 @@ public struct MidiDestinationDraft: Identifiable, Equatable, Sendable {
 }
 
 /// What the destination editor edits (plan release-fixes Task 8): an
-/// external MIDI destination's return latency, typed as text.
+/// external MIDI destination's name, MIDI port and channel (small-fixes
+/// Task 4) and its return latency, typed as text.
 public struct EditDestinationDraft: Equatable, Sendable {
     public var dest: UInt64
-    /// The sheet's title.
-    public let name: String
+    /// The sheet's title: the name when the sheet opened.
+    public let title: String
+    public var name: String
+    /// The MIDI port it plays.
+    public var port: String
+    /// From 1.
+    public var channel: Int
     public var latencyText: String
+    /// The system's MIDI destinations when the sheet opened.
+    public let ports: [String]
+    /// The port it played when the sheet opened (kept as a choice when
+    /// it is offline).
+    public let currentPort: String
 
-    public init(dest: UInt64, name: String, latencyText: String) {
+    public init(
+        dest: UInt64, name: String, port: String = "", channel: Int = 1, latencyText: String, ports: [String] = []
+    ) {
         self.dest = dest
+        self.title = name
         self.name = name
+        self.port = port
+        self.channel = channel
         self.latencyText = latencyText
+        self.ports = ports
+        self.currentPort = port
+    }
+
+    /// The ports the picker offers: the system's, then the current one
+    /// when the system no longer lists it.
+    public var portChoices: [String] {
+        ports.contains(currentPort) || currentPort.isEmpty ? ports : ports + [currentPort]
+    }
+
+    /// What the picker shows for `port`: an offline current port is
+    /// marked "(offline)".
+    public func portTitle(_ port: String) -> String {
+        port == currentPort && !ports.contains(port) ? "\(port) (offline)" : port
     }
 }
 
@@ -81,7 +111,11 @@ public final class SynthSheets {
     public static let newDestinationOnChannel =
         "New MIDI Destination opens a sheet: use destination.add_midi over the control channel."
 
-    public static let editDestinationOnChannel = "Use destination.set_return_latency or destination.measure_return."
+    public static let editDestinationOnChannel =
+        "Use destination.edit_midi, destination.set_return_latency or destination.measure_return."
+
+    /// Why the destination editor's Done did nothing: the name.
+    public static let destinationNameNeeded = "A destination's name is 1 to 255 characters."
 
     init(document: DocumentModel) { self.document = document }
 
@@ -274,23 +308,41 @@ public final class SynthSheets {
         }
         guard let row = SynthCommands.externalDestinations(m).first(where: { $0.id == dest }) else { return }
         if measuring == nil { message = nil }
-        editDestination = EditDestinationDraft(dest: dest, name: row.name, latencyText: Self.msText(row.returnLatencyMs))
+        editDestination = EditDestinationDraft(
+            dest: dest, name: row.name, port: row.port ?? "", channel: Int(row.channel ?? 0) + 1,
+            latencyText: Self.msText(row.returnLatencyMs), ports: Self.ports())
     }
 
-    /// Commits the field (Return or Done): parsed with
-    /// `SynthCommands.parseMs`, 0 to 500 ms, one undo step "Set Return
-    /// Latency" (none when unchanged). False, with no call, for any other
-    /// text, or when the core refused it (the message says why).
+    /// Commits the sheet (Return or Done): first the name, port and channel
+    /// (one undo step "Edit Destination", none when unchanged), then the
+    /// return latency, parsed with `SynthCommands.parseMs`, 0 to 500 ms
+    /// (one undo step "Set Return Latency", none when unchanged). False,
+    /// with no call, for an empty or over-long name or latency text that
+    /// does not parse; false when the core refused either (the message
+    /// says why, and a refused edit skips the latency).
     @discardableResult
-    public func commitLatency() -> Bool {
+    public func commitEdit() -> Bool {
         guard let m = document, let d = editDestination else { return false }
+        let name = d.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, AudioCommands.fitsCore(name) else {
+            message = Self.destinationNameNeeded
+            return false
+        }
+        guard !d.port.isEmpty, (1...16).contains(d.channel) else {
+            message = "Choose a MIDI port and a channel from 1 to 16."
+            return false
+        }
         guard let ms = SynthCommands.parseMs(d.latencyText) else {
             message = "The return latency is 0 to 500 ms."
             return false
         }
-        if returnLatency(d.dest) == ms { return true }
+        let channel = UInt8(d.channel - 1)
+        let row = SynthCommands.externalDestinations(m).first { $0.id == d.dest }
         do {
-            m.apply(try m.session.setReturnLatency(dest: d.dest, ms: ms))
+            if row?.name != name || row?.port != d.port || row?.channel != channel {
+                m.apply(try m.session.editMidiDestination(dest: d.dest, name: name, port: d.port, channel: channel))
+            }
+            if returnLatency(d.dest) != ms { m.apply(try m.session.setReturnLatency(dest: d.dest, ms: ms)) }
             if measuring == nil { message = nil }
             return true
         } catch {

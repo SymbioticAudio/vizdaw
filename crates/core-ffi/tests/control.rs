@@ -712,6 +712,7 @@ fn document_state_reports_the_midi_mix_per_destination() {
         channel: None,
         mpe: None,
         builtin_sound: None,
+        port: None,
     };
     let v = result_json(&ControlResult::Document {
         doc: "D".into(),
@@ -766,6 +767,7 @@ fn document_state_shows_outputs_and_synth_sounds() {
         channel: None,
         mpe: None,
         builtin_sound: sound,
+        port: None,
     };
     let v = result_json(&ControlResult::Document {
         doc: "D".into(),
@@ -1331,6 +1333,7 @@ fn document_state_reports_mpe_per_track_and_destination() {
         channel: Some(0),
         mpe,
         builtin_sound: None,
+        port: None,
     };
     let v = result_json(&ControlResult::Document {
         doc: "D".into(),

@@ -231,7 +231,15 @@ fn co_producer_apply_carries_its_client() {
 fn every_error_code_has_a_distinct_wire_name() {
     let names: std::collections::BTreeSet<_> = ErrorCode::ALL.iter().map(|c| c.as_str()).collect();
     assert_eq!(names.len(), ErrorCode::ALL.len());
-    assert_eq!(ErrorCode::ALL.len(), 16, "plan 8a adds not_allowed");
+    assert_eq!(
+        ErrorCode::ALL.len(),
+        17,
+        "plan 8a adds not_allowed; next small fixes Task 6 adds unsaved_changes"
+    );
+    assert_eq!(
+        ErrorCode::parse("unsaved_changes"),
+        Some(ErrorCode::UnsavedChanges)
+    );
     assert_eq!(ErrorCode::parse("not_allowed"), Some(ErrorCode::NotAllowed));
     assert_eq!(ErrorCode::NotAllowed.as_str(), "not_allowed");
     let e = ControlError::new(ErrorCode::NotAllowed, "no");

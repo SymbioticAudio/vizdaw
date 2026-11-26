@@ -244,6 +244,13 @@ import VizDAWCore
         #expect(VcaStripLabels.mute("Drums") == "Mute VCA Drums")
         #expect(VcaStripLabels.solo("Drums") == "Solo VCA Drums")
         #expect(VcaStripLabels.mode == "VCA automation mode")
+        #expect(VcaStripLabels.fader("VCA 1") == "Fader of VCA 1")
+        #expect(VcaStripLabels.level("VCA 1") == "Level of VCA 1")
+        #expect(VcaStripLabels.mute("VCA 1") == "Mute VCA 1")
+        #expect(VcaStripLabels.solo("VCA 1") == "Solo VCA 1")
+        #expect(VcaStripLabels.fader("Strings") == "Fader of VCA Strings")
+        #expect(VcaStripLabels.title("VCA") == "VCA")
+        #expect(VcaStripLabels.title("VCAs and more") == "VCA VCAs and more")
     }
 
     @Test func aVcaStripsEditsAreSetVca() throws {

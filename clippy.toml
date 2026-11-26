@@ -1,0 +1,3 @@
+# GPUI's dependency tree turns on serde_json's preserve_order workspace-wide, which
+# enlarges serde_json::Value and the error types that hold one.
+large-error-threshold = 256

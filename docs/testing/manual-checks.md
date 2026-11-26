@@ -1,57 +1,76 @@
-# Manual checks
+# Manual checks (owner)
 
-The README's by-eye checks (`app/README.md`, numbered steps) that still need
-a person, and where each stands. Claude runs what it can through the control
-channel (`vizctl`) and screen control, and leaves here what needs the owner's
-hands, ears, hardware or an unlocked screen. Bugs found go in `bugs.md`.
+What the owner checks by hand in the 27.1 app (the GPUI build from `next`),
+on macOS and Linux. Only checks that need your ears, your hands on a real
+key or device, a second display or your Linux desktop are here. Claude's
+own screen-control checks are in `controller-checks.md`; bugs go in
+`bugs.md`. The Swift 26.x beta's checks were dropped on 2026-11-25 (the
+Swift app is retired; see git history for the old list).
 
-Status: **open** (not run), **owner** (needs the owner; Claude ran what it
-could), **pass**, **fail** (see the bug).
+Status: **open**, **pass**, **fail** (with the bug's number).
 
-## Week of 2026-11-23 (owner)
+## Getting the build
 
-Test build: dd36914d (26.0.0), `~/Applications/VizDAW Test.app`.
+- **macOS:** in `~/workspace/vizdaw-next`, run `scripts/make-gpui-app.sh`
+  (or `scripts/make-gpui-app.sh release`), then open
+  `target/VizDAW-GPUI.app`.
+- **Linux:** in `~/vizdaw-next` on the test box, `git pull`, then
+  `cargo run -p vizdaw-gpui --release`.
 
-### Co-Producer, time coaching and close prompts (README 395–438)
+Not in the app yet, so not on this list: Settings (themes, Audio, Keys,
+the Customize Transport Bar sheet), Co-Producer, the Strip Chart, Drum
+Grid and Audio editors, torn-off editor windows, the Plugin Manager and
+Media Pool. Their checks come with their slices.
 
-| Steps | What | Status |
-|---|---|---|
-| 395–420 | Co-Producer: buses, inserts, sends, new tracks, templates, mix help, automation, asks before touching your sound | open |
-| 421–432 | Time records and coaching (Settings › Co-Producer, `Metrics/time.json`, Delete All Time Records) | open |
-| 433–438 | Save prompts on close and quit (red close button, ⌘W, ⌘Q, two edited songs) | open |
+## macOS
 
-### Fader groups, VCAs and the transport bar (README 439–456)
-
-Claude ran these on 2026-11-19 through the control channel. Group/VCA
-setup was done by command, because the mixer reads ⌘ and ⌥ from the real
-keyboard (`NSEvent.modifierFlags`) and synthetic clicks can't hold them.
-
-| Step | What | Status | What's left for you |
+| # | What to do | What should happen | Status |
 |---|---|---|---|
-| 439 | Group three strips, drag one, ⌘Z | pass | Also make the group with ⌘-click + Mixer › Group |
-| 440 | ⌥-drag a grouped fader moves it alone | owner | All of it (needs a real ⌥) |
-| 441 | Group stops when a member hits +12 | pass | — |
-| 442 | Group mute/solo links | pass | Turn the links off from the group tag's menu (Claude used a command) |
-| 443 | VCA at −6: readout and sound | owner | Listen: the sound drops. The readout passed |
-| 444 | VCA mute/solo marks | pass | — |
-| 445 | VCA Touch, then Read playback | owner | All of it; Touch did record (export counted 7 points) |
-| 446 | Delete a member, undo | pass | — |
-| 447 | DAWproject export/import with a VCA and group | pass | — (B-001, the VCA automation track, is in the backlog) |
-| 448 | Customize sheet: drag in/out/along, Command button, Reset | owner | The sheet itself (drag, Escape, per-window). Mixer button and Reset passed |
-| 449 | Bounce… Command button opens the sheet | owner | All of it; with the screen locked it said "can't run from a button right now" |
-| 450 | Narrowest mixer: one row, » lists the rest | owner | Open » and check its list. One row at 459 pt passed |
-| 451 | Quit and reopen: same bar in both windows | owner | All of it (the test channel keeps settings in memory only) |
-| 452 | Click on every beat, downbeat higher, through tempo/meter changes | owner | All of it (by ear) |
-| 453 | Click Record Only, and −24 dB level | owner | All of it (by ear) |
-| 454 | Bounce with Click on has no clicks; settings kept after reopen | owner | All of it |
-| 455 | P/E/U open » at the field | pass | — |
-| 456 | Mixer at 1600 pt shows no » | pass | — |
+| M1 | Mixer: group three strips, hold Option and drag one grouped fader | Only that fader moves | open |
+| M2 | Make a VCA, put a playing track on it, set the VCA to −6 dB | You hear the track drop by about 6 dB | open |
+| M3 | Turn Click on and play over a tempo change and a meter change | A click on every beat, the downbeat higher, following both changes | open |
+| M4 | Click › Mode › Record Only, then play, then record | Silent while playing, clicking while recording | open |
+| M5 | Click › Level › −24 dB | The click is clearly quieter | open |
+| M6 | Bounce with Click on, play the bounced file | No clicks in the file | open |
+| M7 | Play something loud into a track's meter, then stop the sound | The meter falls smoothly; the clip mark holds about 2 s, then clears | open |
+| M8 | Plug in an audio interface and open a track's input picker | Its channel names are listed | open |
+| M9 | Choose one of its inputs | "Opening the audio input… If macOS asks for microphone access, answer its prompt." shows, and macOS asks | open |
+| M10 | Answer Allow, then make sound | The track's meter moves | open |
+| M11 | On another try (reset the permission in System Settings › Privacy › Microphone), answer Don't Allow | The track says it has no access; nothing crashes | open |
+| M12 | Monitor that input (the A / I / – button) and record a take with it | You hear yourself when the mode says so; the take records and plays back | open |
+| M13 | Unplug the interface while recording | Recording stops; Faults (⚠) shows "Recording stopped: the audio device went away; what was recorded is kept."; the take is kept | open |
+| M14 | Plug in a MIDI keyboard and open a MIDI track's input picker | The keyboard is listed | open |
+| M15 | Choose it, play, record | Notes show on the track and record into a take | open |
+| M16 | Unplug the keyboard | The track keeps its choice and shows it as offline | open |
+| M17 | With a second display at a different scale (2× and 1×), drag a plug-in window from one to the other | The editor stays sharp and the same size | open |
+| M18 | Export For Another DAW and Export DAWproject, then open the results in another DAW | The tracks, stems and positions arrive as "What won't transfer" said | open |
 
-### Hand checks from the plan's reviews
+## Linux (your desktop)
 
-| What | Status |
-|---|---|
-| Group tag, VCA strip and "VCA −6.0" offset row look right in each of the 5 themes | open |
-| Customize sheet: drag, Escape cancels, each window keeps its own sheet | open |
-| Press U then E quickly: » opens at Edit In, nothing typed is lost | open |
-| Your own mixer opens at 1600 × 700, not 459 pt (the test copy's narrow size may have been saved) | open |
+| # | What to do | What should happen | Status |
+|---|---|---|---|
+| L1 | File › Open: pick `project.json` inside a `.vizdaw` folder; also a MIDI, a DAWproject and an AAF file | Each opens | open |
+| L2 | Look at the open panels' filters; use Search Folder… and a stems Bounce | The filter label and patterns are right; folder choosers pick only folders | open |
+| L3 | Save As, Bounce, MIDI export, interchange report | The suggested name, folder, and the extension added when you type none | open |
+| L4 | Save over an existing file | The app asks its own replace question; Replace saves, Cancel leaves the file alone | open |
+| L5 | The save-changes, replace and return prompts | Return presses the default button, Esc the cancel one | open |
+| L6 | Close every window, then trigger an alert (for example, open a file that fails to open) | The alert shows in its own small window; OK closes it | open |
+| L7 | Merge With Existing Project…: pick `project.json` inside a `.vizdaw` folder | It merges into that project | open |
+| L8 | The DAWproject return prompt | Return is New Project, Esc is Cancel, Merge With Existing Project… is clickable | open |
+| L9 | Open a plug-in editor in the KDE session (XWayland) and in a plain X11 session | It embeds under the header in both | open |
+| L10 | The gui test plug-in, a DPF plug-in and a heavy open-source instrument, each as CLAP and VST3 | The editor shows, animates and answers the mouse | open |
+| L11 | Move and minimize the document window with a plug-in window open (also opened from the Mixer, and after reopening the project) | The plug-in window goes with it | open |
+| L12 | Type into an editor's text field | The plug-in gets the text | open |
+| L13 | Ctrl-W while the editor has the keyboard | The plug-in window closes and the plug-in stays on its slot | open |
+| L14 | At 2× scale, open an editor; change scale and reopen | It sits under the header and reopens at the new scale | open |
+| L15 | Close and quit with editors open (also right after opening one) | No BadWindow exit, no crash | open |
+| L16 | Look at the editor area | No transparency or garbage | open |
+| L17 | A plug-in with no editor; reopen a project with plug-ins; turn a plug-in off | The parameter list with working sliders; "Loading…" while loading; the reason it's off, not a black area | open |
+| L18 | The transport bar at 1440 and 1600 px | The Record button's colours, the Faults tint, DSP and device text; no clipped label | open |
+| L19 | The Record Options popover (the chevron beside Record) | It opens under the chevron, takes the keyboard, closes on Esc and on a click outside | open |
+| L20 | The Step and Transport menus | Check marks and keys shown; Ctrl-digit and digit keys do what the menu says | open |
+| L21 | A track's monitor button, input row, picker and meter | Nothing clipped; tints readable | open |
+| L22 | Audio regions in a long project: stereo, an offline file, a zoom, scrolling | Two bands for stereo; the hatching and "Offline" pill; a brief blank after a zoom, then the waveform; no hitch scrolling | open |
+| L23 | Record a few minutes with the offline device; compare just before and after Stop | The take looks the same; no lag while it grows | open |
+| L24 | The Markers pane with many markers | Rows and digits aligned; "Go to <name>" on hover; a click moves the playhead; it scrolls to the last | open |
+| L25 | (After host track H3) a real audio interface and MIDI keyboard | As M8–M16 | waits for H3 |

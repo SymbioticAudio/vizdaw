@@ -2304,6 +2304,67 @@ fn a_put_off_save_at_stop_is_made_by_close() {
     );
 }
 
+/// Next small fixes Task 6: a clean song that is recording asks before
+/// it closes (the take is not in the file yet). Only the prompts read
+/// this: autosave and the snapshot's `dirty` still follow the document.
+#[test]
+fn a_clean_song_that_is_recording_has_unsaved_changes() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    let pkg = g.dir.path().join("P.vizdaw");
+    s.save_as(pkg.display().to_string()).unwrap();
+    assert!(!s.has_unsaved_changes().unwrap(), "saved");
+    s.record(d.seq.0, spec()).unwrap();
+    assert!(s.has_unsaved_changes().unwrap(), "recording");
+    assert!(
+        !s.snapshot().unwrap().dirty,
+        "the snapshot (and autosave) still read the document only"
+    );
+    wait_until("audio", || frames(&s) >= 4800);
+    s.stop().unwrap();
+    let _ = s.idle().unwrap();
+    assert!(s.has_unsaved_changes().unwrap(), "the take is not saved");
+    s.save().unwrap();
+    assert!(!s.has_unsaved_changes().unwrap(), "stopped and saved");
+    s.close().unwrap();
+}
+
+/// Next small fixes Task 6 (Review Focus 4): Don't Save on a song that is
+/// recording never saves the pass. A Save made while recording is owed
+/// again at Stop; `cancel_save_after_pass` drops it, so the close that
+/// ends the recording leaves the song on disk as it was.
+#[test]
+fn dont_save_while_recording_leaves_the_file_as_it_was() {
+    let g = serial(Some(FakeInput::Signals));
+    let d = doc(8, false, true);
+    let s = untitled(&g, d.doc.clone());
+    let pkg = g.dir.path().join("P.vizdaw");
+    s.save_as(pkg.display().to_string()).unwrap();
+    s.record(d.seq.0, spec()).unwrap();
+    wait_until("audio", || frames(&s) >= 4800);
+    s.save().unwrap();
+    assert!(s.saves_after_pass().unwrap(), "owed at Stop");
+    let project = pkg.join("project.json");
+    let before = std::fs::read(&project).unwrap();
+    s.cancel_save_after_pass().unwrap();
+    assert!(!s.saves_after_pass().unwrap(), "no longer owed");
+    assert!(
+        s.has_unsaved_changes().unwrap(),
+        "still recording: a close still asks"
+    );
+    s.close().unwrap();
+    assert_eq!(
+        std::fs::read(&project).unwrap(),
+        before,
+        "the song on disk is byte-identical"
+    );
+    assert!(
+        core_model::file::load(&pkg).unwrap().media().is_empty(),
+        "the take was not saved"
+    );
+}
+
 /// Task 10 parked: a stereo take's waveform rows are channel-major
 /// (`channel * columns + column`). The fake input's channel 1 is the
 /// −12 dBFS sine, channel 2 an impulse every half second: two half-second

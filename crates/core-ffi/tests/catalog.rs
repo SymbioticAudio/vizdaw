@@ -41,6 +41,8 @@ fn config(dir: &Path, clap: &Path) -> CatalogConfig {
         // missing plugin, then a panic). The hanger waits the whole
         // timeout in every scan, so this stays well under 20 s.
         timeout_ms: Some(8_000),
+        include_vst3: false,
+        vst3_dirs: Vec::new(),
     }
 }
 
@@ -440,5 +442,95 @@ fn a_scan_that_cannot_save_says_so() {
         std::fs::read_to_string(&path).unwrap(),
         newer,
         "left untouched"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VST3 (host track H1 Task 2): found in the VST3 folders when asked, and
+// each class scanned on its own.
+
+/// A folder with a copy of the VST3 test bundle in a `VST3` subfolder.
+fn vst3_dir(d: &Path) -> PathBuf {
+    let vst3 = d.join("VST3");
+    std::fs::create_dir_all(&vst3).unwrap();
+    test_plugins::copy_vst3_bundle(&vst3.join("VizDAW Test.vst3"));
+    vst3
+}
+
+fn vst3_key(id: &str) -> PluginKey {
+    PluginKey {
+        format: PluginFormatTag::Vst3,
+        id: id.into(),
+    }
+}
+
+#[test]
+fn vst3_bundles_are_scanned_when_asked_and_saved() {
+    let _g = serial();
+    let (d, clap) = plugins_dir();
+    let vst3 = vst3_dir(d.path());
+    let mut cfg = config(d.path(), &clap);
+    cfg.include_vst3 = true;
+    cfg.vst3_dirs = vec![vst3.to_string_lossy().into_owned()];
+    let c = PluginCatalog::open(cfg).unwrap();
+    c.scan(false).unwrap();
+    wait_scan(&c);
+    assert_eq!(
+        c.progress().unwrap().total,
+        2,
+        "one CLAP and one VST3 bundle"
+    );
+    let row = |id: &str| {
+        c.rows()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.plugin.id == id && r.plugin.format == PluginFormatTag::Vst3)
+            .unwrap_or_else(|| panic!("{id} not in the catalog"))
+    };
+    assert_eq!(row(test_plugins::VST3_GAIN_ID).status, PluginStatusRow::Ok);
+    assert_eq!(
+        row(test_plugins::VST3_SYNTH_ID).kind,
+        Some(PluginKindTag::Instrument)
+    );
+    assert_eq!(
+        row(test_plugins::VST3_CRASHER_ID).status,
+        PluginStatusRow::Blocklisted {
+            reason: "crashed (signal 11)".into()
+        }
+    );
+    assert_eq!(
+        c.reveal_path(vst3_key(test_plugins::VST3_GAIN_ID)).unwrap(),
+        Some(vst3.join("VizDAW Test.vst3").to_string_lossy().into_owned())
+    );
+    // Turning a VST3 plug-in off is saved, and read back.
+    c.set_enabled(vst3_key(test_plugins::VST3_GAIN_ID), false)
+        .unwrap();
+    let again = PluginCatalog::open(config(d.path(), &clap)).unwrap();
+    assert!(again.take_problem().unwrap().is_none());
+    let gain = again
+        .rows()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.plugin.id == test_plugins::VST3_GAIN_ID)
+        .unwrap();
+    assert!(!gain.enabled);
+}
+
+#[test]
+fn vst3_folders_are_not_searched_unless_asked() {
+    let _g = serial();
+    let (d, clap) = plugins_dir();
+    let vst3 = vst3_dir(d.path());
+    let mut cfg = config(d.path(), &clap);
+    cfg.vst3_dirs = vec![vst3.to_string_lossy().into_owned()];
+    let c = PluginCatalog::open(cfg).unwrap();
+    c.scan(false).unwrap();
+    wait_scan(&c);
+    assert_eq!(c.progress().unwrap().total, 1);
+    assert!(
+        c.rows()
+            .unwrap()
+            .iter()
+            .all(|r| r.plugin.format == PluginFormatTag::Clap)
     );
 }

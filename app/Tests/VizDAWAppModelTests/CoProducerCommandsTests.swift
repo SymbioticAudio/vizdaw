@@ -778,7 +778,7 @@ import VizDAWCore
 
     @Test func requestsTheGateRefusesAreNotAllowedHereToo() throws {
         let (s, id, _, f) = try demo()
-        let o = run(.quit, s, id)
+        let o = run(.quit(discard: true), s, id)
         #expect(failure(o)?.code == .notAllowed)
         #expect(f.coLog == [])
     }

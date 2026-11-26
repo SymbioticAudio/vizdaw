@@ -2,7 +2,11 @@
 //! cannot show (no GUI, no parent view, not the main thread), and the open
 //! windows are saved with the project and offered again on open. Opening a
 //! real editor needs AppKit on the main thread: platform-macos's
-//! `au_editor` test and the manual checklist cover that.
+//! `au_editor` test and the manual checklist cover that. Editors opened on
+//! the real main thread (scale, resize reports, a real X11 editor) are in
+//! `editors_main.rs`.
+// Proving `Arc<Session>: Send` for the thread below goes deep.
+#![recursion_limit = "256"]
 
 mod common;
 
@@ -59,13 +63,36 @@ fn a_plugin_without_a_gui_has_no_editor() {
     let _g = serial();
     let (s, id) = with_insert(plugin(PluginFormatTag::Clap, "vizdaw.test.gain"));
     assert!(!s.plugin_slots().unwrap()[0].has_editor);
-    unavailable(s.open_editor(id, 0x1000));
-    unavailable(s.open_editor(id, 0));
-    unavailable(s.open_editor(999, 0x1000));
+    unavailable(s.open_editor(id, 0x1000, 1.0));
+    unavailable(s.open_editor(id, 0, 1.0));
+    unavailable(s.open_editor(999, 0x1000, 1.0));
     unavailable(s.resize_editor(id, 100, 100));
     // Closing what is not open is fine.
     s.close_editor(id).unwrap();
     s.close_editor(999).unwrap();
+}
+
+/// On every platform (`pthread_main_np` on macOS, the process's first
+/// thread on Linux): a CLAP editor asked for from another thread is
+/// refused before the plug-in is touched.
+#[test]
+fn a_clap_editor_opens_only_on_the_main_thread() {
+    let _g = serial();
+    let (s, id) = with_insert(plugin(PluginFormatTag::Clap, "vizdaw.test.timer"));
+    assert!(s.plugin_slots().unwrap()[0].has_editor);
+    // A thread of our own: never the main thread, whatever the harness does.
+    let s2 = Arc::clone(&s);
+    let r = std::thread::spawn(move || s2.open_editor(id, 0x1000, 1.0))
+        .join()
+        .unwrap();
+    let m = unavailable(r);
+    assert!(m.contains("main thread"), "{m}");
+    assert_eq!(
+        s.debug_plugin_param(id, u64::from(test_plugins::PARAM_GUI_OPEN))
+            .unwrap(),
+        0.0,
+        "never created"
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -75,7 +102,7 @@ fn an_au_editor_opens_only_on_the_main_thread() {
     let (s, id) = with_insert(plugin(PluginFormatTag::Au, "aufx/dely/appl"));
     assert!(s.plugin_slots().unwrap()[0].has_editor);
     // Test threads are not the main thread: refused before AppKit is used.
-    let m = unavailable(s.open_editor(id, 0x1000));
+    let m = unavailable(s.open_editor(id, 0x1000, 1.0));
     assert!(m.contains("main thread"), "{m}");
 }
 
@@ -104,4 +131,22 @@ fn open_windows_are_saved_with_the_project() {
     std::fs::remove_file(path.join("ui.json")).unwrap();
     let fourth = Session::open(path.to_string_lossy().into_owned()).unwrap();
     assert!(fourth.open_windows().unwrap().is_empty());
+}
+
+/// A resize the plug-in asked for just before its window closed is not
+/// reported after `close_editor` (H0 carry): the app would resize a window
+/// that is gone, or one reopened for the slot.
+#[test]
+fn close_editor_drops_the_slots_pending_resize() {
+    let _g = serial();
+    let (s, id) = with_insert(plugin(PluginFormatTag::Clap, "vizdaw.test.timer"));
+    s.debug_owe_editor_resize(id, 400, 300);
+    s.debug_owe_editor_resize(77, 500, 200);
+    s.close_editor(id).unwrap();
+    let r = s.idle().unwrap().editor_resize;
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!((r[0].slot, r[0].width, r[0].height), (77, 500, 200));
+    // Without a close it is reported.
+    s.debug_owe_editor_resize(id, 400, 300);
+    assert_eq!(s.idle().unwrap().editor_resize.len(), 1);
 }

@@ -276,8 +276,8 @@ impl Shared {
         Faults(self.faults.swap(0, Ordering::Relaxed))
     }
 
-    /// Schedule frame of the transport, minus the graph latency (Plan
-    /// Ruling 17).
+    /// Schedule frame of the transport, minus the graph latency while it
+    /// plays or counts in (Plan Ruling 17); where it stands when stopped.
     pub fn position(&self) -> u64 {
         self.position.load(Ordering::Relaxed)
     }
@@ -2569,10 +2569,15 @@ impl Renderer {
         );
         s.count_in_clicks
             .store(self.counting.map_or(0, |c| c.started()), Ordering::Relaxed);
-        s.position.store(
-            self.transport.pos.saturating_sub(self.latency),
-            Ordering::Relaxed,
-        );
+        // The latency delays only what is heard while playing: a stopped
+        // transport (not counting in) is where it was located, so a
+        // locate round-trips and Next Marker gets past a marker.
+        let heard = if self.transport.state == PlayState::Stopped && self.counting.is_none() {
+            self.transport.pos
+        } else {
+            self.transport.pos.saturating_sub(self.latency)
+        };
+        s.position.store(heard, Ordering::Relaxed);
         s.transport_pos.store(self.transport.pos, Ordering::Relaxed);
         s.state.store(self.transport.state as u8, Ordering::Relaxed);
         if self.transport.take_ended() {

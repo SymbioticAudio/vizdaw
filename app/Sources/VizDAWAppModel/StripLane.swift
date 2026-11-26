@@ -169,7 +169,7 @@ public struct StripNames: Equatable, Sendable {
             return "Velocity Scale · \(dests[d] ?? "Destination \(d)")"
         case .vcaFader(let v):
             // As the core names the VCA's new track ("VCA ‹name› Fader").
-            return "VCA \(vcas[v] ?? "\(v)") Fader"
+            return "\(VcaStripLabels.title(vcas[v] ?? "\(v)")) Fader"
         }
     }
 }

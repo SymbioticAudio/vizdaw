@@ -52,7 +52,7 @@ private struct VcaStripHeader: View {
                 .contentShape(Rectangle())
                 .onTapGesture(count: 2) { model.beginVcaRename(vca, in: placement) }
                 .help(vca.name)
-                .accessibilityLabel("VCA \(vca.name)")
+                .accessibilityLabel(VcaStripLabels.title(vca.name))
                 .accessibilityAddTraits(.isHeader)
                 .popover(isPresented: renaming, arrowEdge: .bottom) { VcaRenameField(model: model) }
                 .contextMenu { VcaMenuItems(model: model, vca: vca) }

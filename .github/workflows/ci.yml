@@ -11,15 +11,41 @@ jobs:
   rust:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    env:
+      # Line tables only: full debug info for every test binary of the
+      # workspace outgrows the hosted runners' disk.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     strategy:
       fail-fast: false
       matrix:
         os: [macos-15, ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
+      - name: Free disk space (macOS)
+        # The workspace's test binaries outgrow the hosted runner's free
+        # space ("ld: write() failed, errno=28"): drop preinstalled
+        # toolchains this project never uses.
+        if: runner.os == 'macOS'
+        run: |
+          df -h /
+          sudo rm -rf "$ANDROID_HOME" "$ANDROID_SDK_ROOT" /Users/runner/Library/Android \
+            /usr/local/share/dotnet /Users/runner/.dotnet || true
+          xcrun simctl delete all >/dev/null 2>&1 || true
+          sudo rm -rf /Users/runner/Library/Developer/CoreSimulator/Caches || true
+          df -h /
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - name: GPUI system packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev libfontconfig-dev libfreetype-dev xvfb mesa-vulkan-drivers libgl1-mesa-dri
+      - name: VST3 SDK sample build packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y ninja-build libx11-dev libx11-xcb-dev libxcb-util-dev libxcb-cursor-dev libxcb-keysyms1-dev libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libcairo2-dev libfreetype6-dev libpango1.0-dev libwayland-dev wayland-protocols libglib2.0-dev libgtkmm-3.0-dev
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all -- --check
@@ -41,8 +67,47 @@ jobs:
       - name: Build Multi-Q
         if: runner.os == 'macOS'
         run: scripts/build-multiq.sh
+      - name: VST3 SDK samples (cached)
+        uses: actions/cache@v4
+        with:
+          path: target/vst3sdk/out
+          key: vst3sdk-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-vst3-samples.sh', 'scripts/licence-texts/vst3sdk/SOURCE') }}
+      - name: Ninja (macOS)
+        if: runner.os == 'macOS'
+        run: command -v ninja || brew install ninja
+      - name: Build the VST3 SDK samples
+        run: scripts/build-vst3-samples.sh
       - name: Test
         run: cargo test --workspace
+        env:
+          # The VST3 host tests load the SDK samples; here a missing one is
+          # a failure, not a skip.
+          VIZDAW_REQUIRE_VST3_SAMPLES: "1"
+      - name: CLAP and VST3 X11 editors and plug-in containers (Linux, virtual X server)
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: |
+          unset WAYLAND_DISPLAY
+          xvfb-run -a -s "-screen 0 1280x800x24" cargo test -p core-host --test clap_gui_linux -- --nocapture
+          VIZDAW_REQUIRE_VST3_SAMPLES=1 xvfb-run -a -s "-screen 0 1280x800x24" cargo test -p core-host --test vst3_gui_linux -- --nocapture
+          xvfb-run -a -s "-screen 0 1280x800x24" cargo test -p core-ffi --test editors_main
+          xvfb-run -a -s "-screen 0 1280x800x24" cargo test -p vizdaw-gpui --lib plugin_windows::x11 -- --nocapture
+        env:
+          # A missing X server fails these tests instead of skipping them.
+          VIZDAW_REQUIRE_DISPLAY: "1"
+      - name: GPUI end to end (Linux, virtual X server)
+        if: runner.os == 'Linux'
+        timeout-minutes: 25
+        run: |
+          cargo build -p vizdaw-gpui --features screenshot
+          unset WAYLAND_DISPLAY
+          xvfb-run -a -s "-screen 0 1280x800x24" cargo test -p vizctl --test e2e_gpui -- --ignored --nocapture --test-threads 1
+        env:
+          VIZDAW_E2E_APP: target/debug/vizdaw-gpui
+          # The plug-in window X11 tests (gpui_x11_*): a missing X server
+          # or SDK `again` sample fails them instead of skipping them.
+          VIZDAW_REQUIRE_DISPLAY: "1"
+          VIZDAW_REQUIRE_VST3_SAMPLES: "1"
       - name: Bundled Multi-Q tests
         if: runner.os == 'macOS'
         run: |
@@ -64,6 +129,8 @@ jobs:
         run: cargo bench --workspace --no-run
 
   app:
+    # The Swift app is retired: 27.1.0 is the first release (one Rust/GPUI
+    # codebase), so this job keeps the FFI, Multi-Q and notices checks only.
     name: app (macOS)
     runs-on: macos-15
     env:
@@ -83,29 +150,11 @@ jobs:
         run: scripts/build-multiq.sh
       - name: FFI tests
         run: cargo test -p core-ffi
-      - name: Build the FFI library and Swift bindings
-        run: scripts/build-ffi.sh
-      - name: Swift build
-        run: scripts/swift.sh build
       - name: Third-party notices build offline
         run: |
           cargo fetch --locked
           CARGO_NET_OFFLINE=true scripts/third-party-notices.sh target/third-party/THIRD-PARTY.txt
           grep -q '^quick-xml ' target/third-party/THIRD-PARTY.txt
           grep -q '^cfb ' target/third-party/THIRD-PARTY.txt
-      - name: App builds without the branded glyphs
-        run: |
-          VIZDAW_NO_BRAND=1 scripts/swift.sh build --scratch-path "$RUNNER_TEMP/nobrand"
-          if [ -n "$(find "$RUNNER_TEMP/nobrand" \( -name 'SymbioticBrand*.o' -o -name 'SymbioticBrand*.swiftmodule' \))" ]; then
-            echo "the no-brand build has SymbioticBrand in it" >&2
-            exit 1
-          fi
-      - name: Swift tests
-        run: scripts/swift.sh test
-      - name: App bundle
-        run: scripts/make-app.sh
-      - name: End to end through the control channel (needs the runner's window server)
-        timeout-minutes: 20
-        run: cargo test -p vizctl --test e2e -- --ignored --nocapture --test-threads 1
-        env:
-          VIZDAW_E2E_APP: dist/VizDAW.app
+          grep -q '^vst3 ' target/third-party/THIRD-PARTY.txt
+          grep -q '^VST 3 SDK 3.8.0 ' target/third-party/THIRD-PARTY.txt

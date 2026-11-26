@@ -60,6 +60,12 @@ pub struct ParamInfo {
     pub automatable: bool,
     /// Hidden from the user.
     pub hidden: bool,
+    /// The plugin only reports this value; the user cannot set it. Not the
+    /// same as `!automatable`, which can still be set by hand. Never written
+    /// to the catalog (older builds refuse unknown fields); the live instance
+    /// supplies it.
+    #[serde(default, skip_serializing)]
+    pub read_only: bool,
 }
 
 /// How long a plugin keeps sounding after its input stops.

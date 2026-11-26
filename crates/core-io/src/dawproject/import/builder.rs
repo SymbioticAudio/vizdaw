@@ -234,6 +234,7 @@ impl PlanBuilder {
             seqs: Vec::new(),
             media: self.book.media,
             main: vec![0; n],
+            vca_tracks: Vec::new(),
         };
         DpImport {
             report,

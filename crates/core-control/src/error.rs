@@ -42,11 +42,14 @@ pub enum ErrorCode {
     /// The Co-Producer socket does not allow the call (plan 8a Ruling 11),
     /// or the developer socket was sent a `co_producer.*` command.
     NotAllowed,
+    /// `app.quit` without `discard` while songs have unsaved changes; the
+    /// message names them (next small fixes Task 6, R7).
+    UnsavedChanges,
 }
 
 impl ErrorCode {
     /// Every code, in the spec's order.
-    pub const ALL: [ErrorCode; 16] = [
+    pub const ALL: [ErrorCode; 17] = [
         ErrorCode::ParseError,
         ErrorCode::InvalidRequest,
         ErrorCode::UnknownCommand,
@@ -63,6 +66,7 @@ impl ErrorCode {
         ErrorCode::ShuttingDown,
         ErrorCode::Internal,
         ErrorCode::NotAllowed,
+        ErrorCode::UnsavedChanges,
     ];
 
     /// The wire string.
@@ -84,6 +88,7 @@ impl ErrorCode {
             ErrorCode::ShuttingDown => "shutting_down",
             ErrorCode::Internal => "internal",
             ErrorCode::NotAllowed => "not_allowed",
+            ErrorCode::UnsavedChanges => "unsaved_changes",
         }
     }
 

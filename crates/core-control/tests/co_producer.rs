@@ -107,6 +107,7 @@ const CHANGE: &[&str] = &[
     "destination.set_return_latency",
     "destination.set_sound",
     "destination.add_midi",
+    "destination.edit_midi",
     "automation.set_mode",
     "automation.gesture",
     "automation.suspend",
@@ -214,8 +215,8 @@ fn listed_class(id: &str) -> Option<Class> {
 fn every_command_has_the_spec_class() {
     assert_eq!(
         COMMANDS.len(),
-        237,
-        "plan 8d adds thirteen; 8e adds automation.write; 8f adds the two time-record settings; groups-vcas-transport adds seven group commands, seven VCA commands, the three click commands, ui.set_transport_bar and ui.reset_transport_bar; Task 12 adds ui.customize_transport"
+        238,
+        "plan 8d adds thirteen; 8e adds automation.write; 8f adds the two time-record settings; groups-vcas-transport adds seven group commands, seven VCA commands, the three click commands, ui.set_transport_bar and ui.reset_transport_bar; Task 12 adds ui.customize_transport; small-fixes Task 4 adds destination.edit_midi"
     );
     for list in [READ, ADD, OUTWARD, CHANGE, REMOVE, SPEC_REFUSED] {
         for id in list {

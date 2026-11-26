@@ -144,6 +144,7 @@ UTF-8 only; blank lines are skipped; a reply is one line. Requests on one connec
 | `timeout` | a wait's condition never held (`details`: condition, timeout, last facts), or the app did not answer |
 | `shutting_down` | VizDAW is quitting |
 | `internal` | a bug (a caught panic) |
+| `unsaved_changes` | `app.quit` without `discard: true` while songs have unsaved changes; the message names them (next small fixes Task 6) |
 
 ### 5.4 Common parameters
 
@@ -178,7 +179,7 @@ UTF-8 only; blank lines are skipped; a reply is one line. Requests on one connec
 
 **`app.new_demo {audio?}`**, **`app.open {path, plugins?, restore_autosave?}`** → `{doc, window}` once the new window is on screen (≤ 30 s). `app.open` without `path` is `dialog_required` "Open".
 
-**`app.quit`** → `{quitting: true}`, then VizDAW quits (§4.4).
+**`app.quit {discard?}`** → `{quitting: true}`, then VizDAW quits (§4.4). With any unsaved song it replies `unsaved_changes` and keeps running unless `discard` is `true` (test hooks do not bypass this); a Save made while recording is still made when the song closes. `app.quit` also refuses a clean song that is recording, though `state.get document` reports `dirty: false` for it.
 
 **`wait {condition, …, window?, timeout_ms?}`** → `{condition, elapsed_ms}`; on timeout the error's `details` hold the condition, the timeout and the last facts seen. Conditions:
 

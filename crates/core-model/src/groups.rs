@@ -82,6 +82,16 @@ pub struct Vca {
     pub co_producer: bool,
 }
 
+/// A VCA's label (task 1, R2): its name when that is "VCA" or starts with
+/// "VCA " (case-sensitive), else "VCA ‹name›", so it never says VCA twice.
+pub fn vca_label(name: &str) -> String {
+    if name == "VCA" || name.starts_with("VCA ") {
+        name.to_string()
+    } else {
+        format!("VCA {name}")
+    }
+}
+
 /// A VCA's automation modes (Ruling 6), in menu order.
 pub const VCA_MODES: [AutomationMode; 4] = [
     AutomationMode::Off,

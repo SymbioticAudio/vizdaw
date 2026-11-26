@@ -1852,6 +1852,18 @@ fn group_and_vca_items_read_plainly() {
         vec![item("VCA Kit", "added, Kick assigned")]
     );
     let v = vca_id(&v0, "Kit");
+    let named = group(
+        &d,
+        G::NewVca {
+            name: "VCA 1".into(),
+            colour: Swatch::Teal,
+            members: vec![kick],
+        },
+    );
+    assert_eq!(
+        describe(&d, &named),
+        vec![item("VCA 1", "added, Kick assigned")]
+    );
     let level = |from: &Document, db: f64| {
         group(
             from,

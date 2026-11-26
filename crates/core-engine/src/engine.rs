@@ -1374,7 +1374,7 @@ impl Engine {
     }
 
     /// Frame of the transport as heard (schedule frame minus the graph
-    /// latency).
+    /// latency; a stopped transport is where it stands).
     pub fn position_frames(&self) -> u64 {
         self.shared.position()
     }

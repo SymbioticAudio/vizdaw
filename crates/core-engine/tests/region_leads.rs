@@ -354,3 +354,37 @@ fn loops_shorter_than_the_lead_read_the_heard_timeline() {
     });
     assert_eq!(led, delayed, "shrunk to 1000 frames before the wrap");
 }
+
+/// A stopped transport is where it was located, latency or not: the
+/// graph latency only delays what is heard while it plays. Before the
+/// fix a stopped transport reported the located frame minus `L`, so a
+/// locate landed short and Next Marker never got past a marker.
+#[test]
+fn a_stopped_transport_reports_where_it_was_located() {
+    const L: u32 = 120;
+    let (d, seq) = doc(L);
+    for leads in [true, false] {
+        let mut r = rig(&d, seq, leads);
+        assert_eq!(r.engine.latency_frames(), u64::from(L));
+        r.render(2);
+        let at = Tick(4 * Q + 120);
+        r.engine.locate_tick(at).unwrap();
+        r.render(2);
+        assert_eq!(r.engine.position_tick(), at, "leads {leads}: located");
+        assert_eq!(r.engine.position_frames(), r.engine.tick_frame(at));
+        // Played, stopped and located again: the same.
+        r.engine.play().unwrap();
+        r.render(20);
+        assert_eq!(
+            r.engine.position_frames(),
+            r.engine.transport_frames() - u64::from(L),
+            "leads {leads}: heard L behind while playing"
+        );
+        r.engine.stop().unwrap();
+        r.render(2);
+        let at = Tick(2 * Q);
+        r.engine.locate_tick(at).unwrap();
+        r.render(2);
+        assert_eq!(r.engine.position_tick(), at, "leads {leads}: after a stop");
+    }
+}

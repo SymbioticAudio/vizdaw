@@ -190,6 +190,13 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     /// Release gate B1: the close prompts read the snapshot's flag.
     func hasUnsavedChanges() throws -> Bool { snap.dirty }
 
+    /// Next small fixes Task 6: Don't Save drops a save owed at Stop.
+    var cancelledSaveAfterPass = 0
+    func cancelSaveAfterPass() throws {
+        cancelledSaveAfterPass += 1
+        savesAfterPassRow = false
+    }
+
     /// What `addMidiDestination` was asked (plan 5d-1 Ruling 25).
     var addedDestinations: [(name: String, port: String, channel: UInt8)] = []
 
@@ -519,7 +526,7 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
     var openBusy = 0
     /// mixer() and params() throw Busy while true.
     var readBusy = false
-    func openEditor(slot: UInt64, parent: UInt64) throws -> EditorSize {
+    func openEditor(slot: UInt64, parent: UInt64, scale: Double) throws -> EditorSize {
         if openBusy > 0 {
             openBusy -= 1
             throw VizError.Busy(message: "plugin host is busy")
@@ -1559,12 +1566,35 @@ final class FakeSession: SessionProtocol, @unchecked Sendable {
         return true
     }
 
+    /// The synth calls in the order they came (small-fixes Task 4).
+    var synthCalls: [String] = []
+
+    /// Every `editMidiDestination` call (small-fixes Task 4); the row
+    /// takes the values.
+    var editedDestinations: [(dest: UInt64, name: String, port: String, channel: UInt8)] = []
+
+    func editMidiDestination(dest: UInt64, name: String, port: String, channel: UInt8) throws -> DocSnapshot {
+        if let e = synthError {
+            synthError = nil
+            throw e
+        }
+        editedDestinations.append((dest, name, port, channel))
+        synthCalls.append("editMidiDestination")
+        if let i = dests.firstIndex(where: { $0.id == dest }) {
+            dests[i].name = name
+            dests[i].port = port
+            dests[i].channel = channel
+        }
+        return commandResult()
+    }
+
     func setReturnLatency(dest: UInt64, ms: Float) throws -> DocSnapshot {
         if let e = synthError {
             synthError = nil
             throw e
         }
         returnLatencies.append((dest, ms))
+        synthCalls.append("setReturnLatency")
         return commandResult()
     }
 

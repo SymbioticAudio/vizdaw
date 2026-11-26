@@ -113,9 +113,13 @@ impl App {
         self.call("wait", p)
     }
 
-    /// Quits and waits (generously) for the process to end.
+    /// Quits (letting unsaved songs go: the home is throwaway) and waits
+    /// (generously) for the process to end.
     fn quit(mut self) {
-        assert_eq!(self.call("app.quit", json!({}))["quitting"], true);
+        assert_eq!(
+            self.call("app.quit", json!({"discard": true}))["quitting"],
+            true
+        );
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             if let Ok(Some(status)) = self.launched.child.try_wait() {
@@ -7532,6 +7536,34 @@ fn control_close_of_a_dirty_song_does_not_prompt() {
         assert_eq!(e.code, ErrorCode::NoWindow, "{e}");
     }
     // Quitting meets no prompt either.
+    app.quit();
+}
+
+/// Next small fixes Task 6 (R7): `app.quit` over the channel never loses
+/// an unsaved song unasked. Without `discard` it replies `unsaved_changes`
+/// naming the song (even under `VIZDAW_TEST_HOOKS=1`) and VizDAW keeps
+/// running; with `discard: true` it quits.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn app_quit_refuses_while_a_song_is_unsaved() {
+    use core_control::ErrorCode;
+    let mut app = App::start();
+    let w = app.call("command.run", json!({"id": "file.new"}))["window"].clone();
+    app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+    app.call("command.run", json!({"id": "track.new_midi", "window": w}));
+    let d = app.call("state.get", json!({"target": "document", "window": w}));
+    assert_eq!(d["dirty"], true, "{d}");
+    let title = d["title"].as_str().unwrap().to_string();
+    for params in [json!({}), json!({"discard": false})] {
+        let e = app.call_err("app.quit", params);
+        assert_eq!(e.code, ErrorCode::UnsavedChanges, "{e}");
+        assert!(e.message.contains(&title), "names {title:?}: {e}");
+    }
+    // Still running, the song still open.
+    app.call("ping", json!({}));
+    let d = app.call("state.get", json!({"target": "document", "window": w}));
+    assert_eq!(d["dirty"], true, "{d}");
+    // `discard: true` quits (App::quit sends it).
     app.quit();
 }
 

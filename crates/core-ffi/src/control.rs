@@ -472,8 +472,11 @@ pub enum ControlRequest {
         /// Dialog answers.
         answers: RecoveryAnswersRow,
     },
-    /// `app.quit`.
-    Quit,
+    /// `app.quit`; `discard`: quit even with unsaved songs (R7).
+    Quit {
+        /// Quit even though songs have unsaved changes.
+        discard: bool,
+    },
     /// `wait`.
     Wait {
         /// What.
@@ -1166,6 +1169,8 @@ pub enum ControlErrorCode {
     InternalFailure,
     /// `not_allowed` (plan 8a Ruling 11).
     NotAllowed,
+    /// `unsaved_changes` (next small fixes Task 6, R7).
+    UnsavedChanges,
 }
 
 /// A failed call.
@@ -1197,6 +1202,7 @@ fn code_of(c: ControlErrorCode) -> ErrorCode {
         ControlErrorCode::ShuttingDown => ErrorCode::ShuttingDown,
         ControlErrorCode::InternalFailure => ErrorCode::Internal,
         ControlErrorCode::NotAllowed => ErrorCode::NotAllowed,
+        ControlErrorCode::UnsavedChanges => ErrorCode::UnsavedChanges,
     }
 }
 
@@ -1492,7 +1498,7 @@ pub fn request_of(c: Command, screenshot: impl FnOnce() -> PathBuf) -> Option<Co
                 restore_autosave: answers.restore_autosave,
             },
         },
-        Command::AppQuit => ControlRequest::Quit,
+        Command::AppQuit { discard } => ControlRequest::Quit { discard },
         Command::Wait {
             condition,
             window,

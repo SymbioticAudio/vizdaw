@@ -334,6 +334,10 @@ struct ParameterList: View {
                             ) { editing in
                                 if editing { model.beginParam(p.id) } else { model.commitParam(p.id) }
                             }
+                            .disabled(!model.isEditable(p))
+                            .accessibilityLabel(p.name)
+                            .accessibilityValue(
+                                PluginWindowModel.valueText(p) + (model.isEditable(p) ? "" : ", read-only"))
                             Text(PluginWindowModel.valueText(p))
                                 .font(theme.type.caption.font.monospacedDigit())
                                 .frame(width: 48, alignment: .trailing)

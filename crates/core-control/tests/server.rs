@@ -254,7 +254,7 @@ fn stopping_answers_pending_calls() {
         assert!(Instant::now() < deadline, "the call never arrived");
         thread::sleep(Duration::from_millis(1));
     };
-    assert_eq!(call.command, Command::AppQuit);
+    assert_eq!(call.command, Command::AppQuit { discard: false });
     s.stop();
     match caller.join().unwrap() {
         Err(CallError::Reply(e)) => assert_eq!(e.code, ErrorCode::ShuttingDown),

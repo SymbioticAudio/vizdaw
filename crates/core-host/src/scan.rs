@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Time a CLAP or AU v2 scan may take (spec §8).
+/// Time a CLAP, VST3 or AU v2 scan may take (spec §8).
 pub const TIMEOUT: Duration = Duration::from_secs(10);
 /// Time an AU v3 scan may take.
 pub const TIMEOUT_AU_V3: Duration = Duration::from_secs(30);
@@ -62,7 +62,7 @@ impl ScanOutcome {
 pub struct ScanRequest {
     /// Format.
     pub format: PluginFormat,
-    /// Source path (CLAP bundle; ignored for AU).
+    /// Source path (CLAP or VST3 bundle; ignored for AU).
     pub path: PathBuf,
     /// The plugin to scan, or `None` to list the source.
     pub id: Option<String>,
@@ -78,6 +78,7 @@ impl ScanRequest {
             match self.format {
                 PluginFormat::Clap => "clap".to_string(),
                 PluginFormat::Au => "au".to_string(),
+                PluginFormat::Vst3 => "vst3".to_string(),
             },
             "--path".to_string(),
             self.path.to_string_lossy().into_owned(),

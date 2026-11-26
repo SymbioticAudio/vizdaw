@@ -247,7 +247,11 @@ fn golden(name: &str) {
     assert!(now.contains(&format!("\"version\": {VERSION}")), "{name}");
     // Canonical: a current-version file re-serializes byte for byte.
     assert_eq!(to_json(&from_json(&now).unwrap()).unwrap(), now, "{name}");
-    insta::assert_json_snapshot!(name, summary(&d));
+    // Workspace builds with GPUI unify serde_json's `preserve_order` on, so sort
+    // keys to keep the snapshot independent of that feature.
+    insta::with_settings!({ sort_maps => true }, {
+        insta::assert_json_snapshot!(name, summary(&d));
+    });
 }
 
 #[test]
@@ -656,7 +660,7 @@ fn a_strip_colour_round_trips_and_none_is_not_written() {
 /// destination without a MIDI mix has the default one).
 #[test]
 fn version_5_projects_migrate_to_version_6() {
-    assert_eq!(VERSION, 11);
+    assert_eq!(VERSION, 12);
     let d = small_doc();
     let mut v: Value = serde_json::from_str(&to_json(&d).unwrap()).unwrap();
     v["version"] = json!(5);
@@ -674,7 +678,7 @@ fn version_5_projects_migrate_to_version_6() {
 /// lane or destination without MPE has none).
 #[test]
 fn version_6_projects_migrate_to_version_7() {
-    assert_eq!(VERSION, 11);
+    assert_eq!(VERSION, 12);
     let d = small_doc();
     let mut v: Value = serde_json::from_str(&to_json(&d).unwrap()).unwrap();
     v["version"] = json!(6);
@@ -693,7 +697,7 @@ fn version_6_projects_migrate_to_version_7() {
 /// without a name have none).
 #[test]
 fn version_7_projects_migrate_to_version_8() {
-    assert_eq!(VERSION, 11);
+    assert_eq!(VERSION, 12);
     let d = small_doc();
     let mut v: Value = serde_json::from_str(&to_json(&d).unwrap()).unwrap();
     v["version"] = json!(7);
@@ -873,7 +877,7 @@ fn overlapping_doc() -> Document {
 /// `crossfade` key.
 #[test]
 fn version_8_projects_migrate_to_version_9() {
-    assert_eq!(VERSION, 11);
+    assert_eq!(VERSION, 12);
     let d = overlapping_doc();
     let text = to_json(&d).unwrap();
     assert!(text.contains(&format!("\"version\": {VERSION}")));
@@ -982,10 +986,10 @@ fn marked_doc() -> Document {
 
 #[test]
 fn marks_round_trip_and_version_10() {
-    assert_eq!(VERSION, 11);
+    assert_eq!(VERSION, 12);
     let d = marked_doc();
     let text = to_json(&d).unwrap();
-    assert!(text.contains("\"version\": 11"));
+    assert!(text.contains("\"version\": 12"));
     let v: Value = serde_json::from_str(&text).unwrap();
     let lanes = v["document"]["sequences"][0]["lanes"].as_array().unwrap();
     assert_eq!(lanes[0].get("co_producer"), None);
@@ -1012,10 +1016,10 @@ fn marks_round_trip_and_version_10() {
     assert!(!to_json(&plain).unwrap().contains("co_producer"));
 
     // A newer file is refused as before.
-    let mut v12: Value = serde_json::from_str(&text).unwrap();
-    v12["version"] = json!(12);
+    let mut v13: Value = serde_json::from_str(&text).unwrap();
+    v13["version"] = json!(13);
     assert!(matches!(
-        from_json(&v12.to_string()),
-        Err(ModelError::NewerFormat { found: 12 })
+        from_json(&v13.to_string()),
+        Err(ModelError::NewerFormat { found: 13 })
     ));
 }

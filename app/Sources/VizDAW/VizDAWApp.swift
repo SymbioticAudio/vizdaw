@@ -319,7 +319,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Quit asks about songs with unsaved changes first (release gate B1);
     /// never under `VIZDAW_TEST_HOOKS=1` or for the control channel's
-    /// `app.quit`.
+    /// `app.quit` (which refuses unsaved songs itself unless `discard`).
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         MainActor.assumeIsolated { QuitPrompts.shouldTerminate() }
     }
@@ -375,10 +375,18 @@ enum QuitPrompts {
         case .askOne(let id):
             walk([id])
             return .terminateLater
-        case .askMany(let count):
+        case .askMany:
+            // A song whose Save waits for its recording pass is still saved
+            // by Discard Changes (R6): the alert says so.
+            let models = dirty.compactMap { appStore.model($0) }
+            let waiting = models.filter(\.saveAfterPassPending)
+            let discardable = models.filter { !$0.saveAfterPassPending }
+            let text = ClosePrompts.quitAlertText(
+                discardable: discardable.map(\.snapshot.title), savingAfterPass: waiting.map(\.snapshot.title))
             let alert = NSAlert()
             alert.alertStyle = .warning
-            alert.messageText = ClosePrompts.quitAlertText(count: count)
+            alert.messageText = text.message
+            alert.informativeText = text.info
             alert.addButton(withTitle: ClosePrompts.reviewChanges)
             alert.addButton(withTitle: ClosePrompts.discardChanges)
             let cancel = alert.addButton(withTitle: ClosePrompts.cancel)
@@ -388,6 +396,10 @@ enum QuitPrompts {
                 walk(dirty)
                 return .terminateLater
             case .alertSecondButtonReturn:
+                // The songs with only unsaved edits close unsaved; those
+                // waiting on a pass are left alone and saved by their close
+                // (R6).
+                for m in discardable { m.cancelSaveAfterPass() }
                 return .terminateNow
             default:
                 return .terminateCancel
@@ -448,6 +460,7 @@ enum QuitPrompts {
                 case .cancel:
                     answered(.cancel, false)
                 case .dontSave:
+                    model.cancelSaveAfterPass()
                     appStore.close(id)
                     answered(.dontSave, true)
                 case .save:

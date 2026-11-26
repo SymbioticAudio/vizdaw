@@ -323,8 +323,14 @@ pub enum Command {
         /// Answers to the recovery dialogs.
         answers: RecoveryAnswers,
     },
-    /// Quits the app (after replying).
-    AppQuit,
+    /// Quits the app (after replying). With an unsaved song open it
+    /// replies `unsaved_changes` and keeps running, unless `discard`
+    /// (next small fixes Task 6, R7).
+    AppQuit {
+        /// Quit even though songs have unsaved changes (they are lost; a
+        /// Save made while recording is still made).
+        discard: bool,
+    },
     /// Waits for a condition.
     Wait {
         /// What.
@@ -651,8 +657,10 @@ pub fn validate(raw: &RawRequest) -> Result<Command, ControlError> {
             })
         }
         "app.quit" => {
-            p.only(&[])?;
-            Ok(Command::AppQuit)
+            p.only(&["discard"])?;
+            Ok(Command::AppQuit {
+                discard: p.opt_bool("discard")?.unwrap_or(false),
+            })
         }
         "wait" => wait(&p),
         "co_producer.begin" => {

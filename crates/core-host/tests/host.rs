@@ -187,6 +187,191 @@ fn capture_stores_the_state_and_a_new_host_restores_it() {
     );
 }
 
+/// A value sent to a running plugin through its queue, captured before
+/// any block delivered it (the engine stopped, no device, a quick save):
+/// the plugin's state does not have it yet, so the capture keeps it in
+/// the overlay.
+#[test]
+fn a_queued_value_survives_a_capture_before_a_block() {
+    let (mut hist, _song, gain) = with_gain();
+    let mut h = host(4096);
+    h.sync(hist.doc());
+    h.wait_ready(WAIT);
+    run(
+        &mut hist,
+        MixerCmd::SetPluginParams {
+            slot: gain,
+            params: vec![(ParamId(0), 0.3)],
+        },
+    );
+    h.sync(hist.doc());
+    h.capture(&mut hist, gain).unwrap();
+    assert_eq!(
+        hist.doc()
+            .plugin_slot(gain)
+            .unwrap()
+            .params
+            .get(&ParamId(0)),
+        Some(&0.3),
+        "kept in the overlay"
+    );
+    let doc = hist.doc().clone();
+    let mut fresh = host(4096);
+    fresh.sync(&doc);
+    fresh.wait_ready(WAIT);
+    assert_eq!(
+        fresh.instance(gain).unwrap().param_value(ParamId(0)),
+        Some(0.3)
+    );
+}
+
+/// Runs the gain insert (overlay `overlay`), asks it to restart (a
+/// latency change) and lets the engine retire its processor, which then
+/// processes no more blocks; the host has not taken it back yet.
+fn retired_gain(
+    overlay: Option<f64>,
+) -> (
+    History,
+    SeqId,
+    PluginInstanceId,
+    PluginHost,
+    Engine,
+    OfflineBackend,
+) {
+    let (mut hist, song, gain) = with_gain();
+    if let Some(v) = overlay {
+        run(
+            &mut hist,
+            MixerCmd::SetPluginParams {
+                slot: gain,
+                params: vec![(ParamId(0), v)],
+            },
+        );
+    }
+    let mut h = host(4096);
+    h.sync(hist.doc());
+    h.wait_ready(WAIT);
+    let (mut engine, mut be) = engine(&h, 4096);
+    engine.load(hist.doc(), song).unwrap();
+    engine.play().unwrap();
+    peak(&mut be, 1024);
+    // The latency change makes the plug-in ask for a restart.
+    h.set_param(gain, ParamId(1), 64.0);
+    let mut restarted = false;
+    for _ in 0..500 {
+        peak(&mut be, 256);
+        let r = h.service(&mut engine, hist.doc(), song).unwrap();
+        if r.restart.contains(&gain) {
+            restarted = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(restarted, "no restart");
+    (hist, song, gain, h, engine, be)
+}
+
+/// Plays blocks until the host has taken the processor back: parked
+/// (inactive) or activated again (it reads the new latency then).
+fn until_returned(h: &mut PluginHost, be: &mut OfflineBackend, gain: PluginInstanceId) {
+    for _ in 0..500 {
+        be.block(256);
+        h.idle();
+        let inst = h.instance(gain).unwrap();
+        if !inst.is_active() || inst.info().latency == 64 {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    panic!("the processor never came back");
+}
+
+/// A value queued to a processor the engine retired, then a refused load
+/// parks the instance (inactive, its old queue still there): a capture
+/// keeps the value the processor never got.
+#[test]
+fn a_queued_value_survives_a_capture_while_parked() {
+    let (hist, _song, gain, mut h, mut engine, mut be) = retired_gain(None);
+    // A load the engine refuses: a new insert makes a load owed, and the
+    // sequence does not exist.
+    let mut b = Builder::from_doc(hist.doc().clone());
+    let synth = b.strip_of(StripKind::BuiltinSynth).unwrap();
+    b.insert(synth, plugin("vizdaw.test.bank")).unwrap();
+    let mut hist2 = History::new(b.finish());
+    h.sync(hist2.doc());
+    // Refused once the new insert is in: an error, or a compiled graph
+    // with an error. No block runs meanwhile.
+    let mut refused = false;
+    for _ in 0..2000 {
+        refused = match h.service(&mut engine, hist2.doc(), SeqId(u64::MAX)) {
+            Err(_) => true,
+            Ok(r) => r.compiled.is_some_and(|c| c.graph.error.is_some()),
+        };
+        if refused {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(refused, "the load was not refused");
+    // The value goes to the retired processor's queue.
+    run(
+        &mut hist2,
+        MixerCmd::SetPluginParams {
+            slot: gain,
+            params: vec![(ParamId(0), 0.3)],
+        },
+    );
+    h.sync(hist2.doc());
+    until_returned(&mut h, &mut be, gain);
+    assert!(!h.instance(gain).unwrap().is_active(), "parked");
+    h.capture(&mut hist2, gain).unwrap();
+    assert_eq!(
+        hist2
+            .doc()
+            .plugin_slot(gain)
+            .unwrap()
+            .params
+            .get(&ParamId(0)),
+        Some(&0.3),
+        "kept in the overlay"
+    );
+    drop(engine);
+}
+
+/// An undo queues the base value to a processor the engine retired before
+/// any block took it: the reactivated processor is sent it again, so the
+/// plug-in does not keep the removed value.
+#[test]
+fn a_base_value_the_old_processor_never_got_reaches_the_new_one() {
+    let (mut hist, song, gain, mut h, mut engine, mut be) = retired_gain(Some(0.3));
+    hist.undo().unwrap();
+    h.sync(hist.doc());
+    until_returned(&mut h, &mut be, gain);
+    // Reactivated after a successful load.
+    for _ in 0..500 {
+        h.service(&mut engine, hist.doc(), song).unwrap();
+        peak(&mut be, 256);
+        if h.instance(gain).unwrap().is_active() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(h.instance(gain).unwrap().is_active());
+    peak(&mut be, 2048);
+    // What the plug-in holds: its state, through a capture and a new host.
+    h.capture(&mut hist, gain).unwrap();
+    let doc = hist.doc().clone();
+    let mut fresh = host(4096);
+    fresh.sync(&doc);
+    fresh.wait_ready(WAIT);
+    assert_eq!(
+        fresh.instance(gain).unwrap().param_value(ParamId(0)),
+        Some(1.0),
+        "the base value, not the removed 0.3"
+    );
+    drop(engine);
+}
+
 #[test]
 fn a_latency_change_restarts_the_plugin_and_recompiles() {
     let (hist, song, gain) = with_gain();
@@ -381,6 +566,7 @@ fn fake_info() -> PluginInfo {
         stepped: false,
         automatable: true,
         hidden: false,
+        read_only: false,
     };
     PluginInfo {
         plugin: fake_ref(),

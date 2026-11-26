@@ -52,6 +52,10 @@ public final class PluginWindowModel {
     /// Parameters a user sees (not hidden).
     public var visibleParams: [ParamRow] { params.filter { !$0.hidden } }
 
+    /// Whether the user can set `p`: a read-only parameter is shown but
+    /// not editable. (Not automatable is still editable by hand.)
+    public func isEditable(_ p: ParamRow) -> Bool { !p.readOnly }
+
     /// "0.50", or a whole number for stepped parameters.
     public static func valueText(_ p: ParamRow) -> String {
         p.stepped ? String(Int(p.value.rounded())) : String(format: "%.2f", p.value)
@@ -120,7 +124,7 @@ public final class PluginWindowModel {
         opening = true
         defer { opening = false }
         do {
-            editorSize = try session.openEditor(slot: slot, parent: parent)
+            editorSize = try session.openEditor(slot: slot, parent: parent, scale: 1.0)
             editorProblem = nil
             openOwed = false
             return true

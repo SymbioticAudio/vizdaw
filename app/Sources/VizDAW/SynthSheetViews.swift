@@ -124,8 +124,8 @@ struct NewMidiDestinationSheet: View {
 }
 
 /// The destination editor (plan release-fixes Task 8): an external MIDI
-/// destination's return latency, typed (committed on Return or Done) or
-/// measured.
+/// destination's name, MIDI port and channel (small-fixes Task 4) and its
+/// return latency, typed (committed on Return or Done) or measured.
 struct DestinationEditorSheet: View {
     @Environment(\.symbioticTheme) private var theme
     @Bindable var sheets: SynthSheets
@@ -134,13 +134,28 @@ struct DestinationEditorSheet: View {
     var body: some View {
         if let d = sheets.editDestination {
             VStack(alignment: .leading, spacing: theme.spacing.m) {
-                Text(d.name).font(theme.type.title.font)
+                Text(d.title).font(theme.type.title.font).foregroundStyle(theme.text.primary.color)
                 Form {
+                    TextField("Name", text: Binding(get: { d.name }, set: { sheets.editDestination?.name = $0 }))
+                        .onSubmit { sheets.commitEdit() }
+                        .accessibilityLabel("Destination name")
+                    if d.portChoices.isEmpty {
+                        Text("No MIDI destination is connected.").foregroundStyle(theme.text.secondary.color)
+                    } else {
+                        Picker("MIDI port", selection: Binding(get: { d.port }, set: { sheets.editDestination?.port = $0 })) {
+                            ForEach(d.portChoices, id: \.self) { Text(d.portTitle($0)).tag($0) }
+                        }
+                        .accessibilityLabel("MIDI port")
+                    }
+                    Picker("Channel", selection: Binding(get: { d.channel }, set: { sheets.editDestination?.channel = $0 })) {
+                        ForEach(1...16, id: \.self) { Text("\($0)").tag($0) }
+                    }
+                    .accessibilityLabel("MIDI channel")
                     TextField(
                         "Return latency (ms)",
                         text: Binding(get: { d.latencyText }, set: { sheets.editDestination?.latencyText = $0 })
                     )
-                    .onSubmit { sheets.commitLatency() }
+                    .onSubmit { sheets.commitEdit() }
                     .accessibilityLabel("Return latency (ms)")
                 }
                 HStack {
@@ -165,12 +180,12 @@ struct DestinationEditorSheet: View {
                     Button("Cancel") { sheets.closeEditDestination() }
                         .keyboardShortcut(.cancelAction)
                         .accessibilityLabel("Cancel")
-                    Button("Done") { if sheets.commitLatency() { sheets.closeEditDestination() } }
+                    Button("Done") { if sheets.commitEdit() { sheets.closeEditDestination() } }
                         .accessibilityLabel("Done")
                 }
             }
             .padding(theme.spacing.xl)
-            .frame(width: 360)
+            .frame(width: 400)
             .onAppear { editor.beginTextEditing("destinationEditor") }
             .onDisappear { editor.endTextEditing("destinationEditor") }
         }

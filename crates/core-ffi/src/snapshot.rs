@@ -328,6 +328,8 @@ pub enum PluginFormatTag {
     Au,
     /// CLAP.
     Clap,
+    /// VST3.
+    Vst3,
 }
 
 impl From<core_model::mixer::PluginFormat> for PluginFormatTag {
@@ -335,6 +337,7 @@ impl From<core_model::mixer::PluginFormat> for PluginFormatTag {
         match f {
             core_model::mixer::PluginFormat::Au => PluginFormatTag::Au,
             core_model::mixer::PluginFormat::Clap => PluginFormatTag::Clap,
+            core_model::mixer::PluginFormat::Vst3 => PluginFormatTag::Vst3,
         }
     }
 }
@@ -344,6 +347,7 @@ impl From<PluginFormatTag> for core_model::mixer::PluginFormat {
         match f {
             PluginFormatTag::Au => core_model::mixer::PluginFormat::Au,
             PluginFormatTag::Clap => core_model::mixer::PluginFormat::Clap,
+            PluginFormatTag::Vst3 => core_model::mixer::PluginFormat::Vst3,
         }
     }
 }
@@ -353,7 +357,7 @@ impl From<PluginFormatTag> for core_model::mixer::PluginFormat {
 pub struct PluginRefRow {
     /// Format.
     pub format: PluginFormatTag,
-    /// AU `type/subtype/manufacturer`, or the CLAP id.
+    /// AU `type/subtype/manufacturer`, the CLAP id, or the VST3 class ID.
     pub id: String,
     /// Display name.
     pub name: String,
@@ -449,6 +453,10 @@ pub struct IdleUpdate {
     /// showing `Pending` or `Coarse` waveforms ask again (plan 5b).
     #[uniffi(default = false)]
     pub overviews_changed: bool,
+    /// Open editors that asked for a new size (in points): their windows
+    /// follow. At most one per slot, the latest.
+    #[uniffi(default)]
+    pub editor_resize: Vec<crate::editor::EditorResize>,
 }
 
 /// One plugin parameter and its current value.
@@ -474,6 +482,9 @@ pub struct ParamRow {
     pub automatable: bool,
     /// Hidden from the user.
     pub hidden: bool,
+    /// The plugin only reports it; the user cannot set it.
+    #[uniffi(default = false)]
+    pub read_only: bool,
 }
 
 /// A parameter value to record.

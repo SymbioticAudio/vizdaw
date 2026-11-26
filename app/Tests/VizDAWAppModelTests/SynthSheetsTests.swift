@@ -180,7 +180,7 @@ import VizDAWCore
         let f = demoFake()
         f.dests = [
             DestRow(id: 7, name: "Built-in Synth", plugin: nil, channel: 0, builtinSound: .piano),
-            DestRow(id: 9, name: "Juno", plugin: nil, external: true, returnLatencyMs: 12, channel: 0),
+            DestRow(id: 9, name: "Juno", plugin: nil, external: true, returnLatencyMs: 12, channel: 0, port: "Juno MIDI"),
         ]
         let s = DocumentStore(makeEmpty: { FakeSession([]) }, makeDemo: { f }, open: { _ in demoFake() })
         let m = try #require(s.newDemo().flatMap(s.model))
@@ -209,6 +209,8 @@ import VizDAWCore
     }
 
     @Test func theDestinationEditorCommitsLatencyAndMeasures() async throws {
+        SynthSheets.ports = { ["Juno MIDI"] }
+        defer { SynthSheets.ports = { midiDestinationPorts() } }
         let (m, f) = try soundDemo()
         let sheets = m.synth
         sheets.beginEditDestination(9, channelOn: false)
@@ -216,11 +218,12 @@ import VizDAWCore
         #expect(d.dest == 9 && d.name == "Juno" && d.latencyText == "12")
         for bad in ["abc", "-1", "501", "1\u{0}"] {
             sheets.editDestination?.latencyText = bad
-            #expect(!sheets.commitLatency(), "\(bad)")
+            #expect(!sheets.commitEdit(), "\(bad)")
         }
         #expect(f.returnLatencies.isEmpty, "no call for a refused value")
         sheets.editDestination?.latencyText = "12.5"
-        #expect(sheets.commitLatency())
+        #expect(sheets.commitEdit())
+        #expect(f.editedDestinations.isEmpty, "the name, port and channel did not change")
         #expect(f.returnLatencies.count == 1 && f.returnLatencies.last?.dest == 9 && f.returnLatencies.last?.ms == 12.5)
         #expect(sheets.editDestination != nil, "Return keeps the sheet")
         // Measure, as the Track Synth sheet's: off the main thread.
@@ -238,6 +241,52 @@ import VizDAWCore
         #expect(sheets.editDestination == nil)
         sheets.beginEditDestination(9, channelOn: true)
         #expect(sheets.editDestination == nil && m.editor.status == SynthSheets.editDestinationOnChannel)
-        #expect(SynthSheets.editDestinationOnChannel == "Use destination.set_return_latency or destination.measure_return.")
+        #expect(
+            SynthSheets.editDestinationOnChannel
+                == "Use destination.edit_midi, destination.set_return_latency or destination.measure_return.")
+    }
+    /// Small-fixes Task 4: the editor shows the name, port and 1-based
+    /// channel; Done makes the edit (0-based channel) then the latency
+    /// change; an empty name keeps the sheet open with an error and makes
+    /// no call; a port that is offline is offered as it is, marked.
+    @Test func theDestinationEditorEditsTheNamePortAndChannel() throws {
+        SynthSheets.ports = { ["Juno MIDI", "Moog MIDI"] }
+        defer { SynthSheets.ports = { midiDestinationPorts() } }
+        let (m, f) = try soundDemo()
+        let sheets = m.synth
+        sheets.beginEditDestination(9, channelOn: false)
+        var d = try #require(sheets.editDestination)
+        #expect(d.name == "Juno" && d.title == "Juno" && d.port == "Juno MIDI" && d.channel == 1)
+        #expect(d.portChoices == ["Juno MIDI", "Moog MIDI"] && d.portTitle("Juno MIDI") == "Juno MIDI")
+        d.name = "   "
+        sheets.editDestination = d
+        #expect(!sheets.commitEdit())
+        #expect(sheets.message == SynthSheets.destinationNameNeeded && sheets.editDestination != nil)
+        #expect(f.editedDestinations.isEmpty && f.returnLatencies.isEmpty)
+        d.name = "  Juno 106 "
+        d.port = "Moog MIDI"
+        d.channel = 10
+        d.latencyText = "20"
+        sheets.editDestination = d
+        f.synthCalls = []
+        #expect(sheets.commitEdit())
+        let e = try #require(f.editedDestinations.last)
+        #expect(e.dest == 9 && e.name == "Juno 106" && e.port == "Moog MIDI" && e.channel == 9)
+        #expect(f.returnLatencies.last?.dest == 9 && f.returnLatencies.last?.ms == 20)
+        #expect(f.synthCalls == ["editMidiDestination", "setReturnLatency"], "the edit, then the latency")
+        // The core's refusal keeps the sheet open, says why and skips the latency.
+        sheets.editDestination?.name = "Juno 60"
+        sheets.editDestination?.latencyText = "21"
+        f.synthError = .Model(message: "no MIDI destination named \"Moog MIDI\"")
+        #expect(!sheets.commitEdit())
+        #expect(sheets.message == "no MIDI destination named \"Moog MIDI\"" && sheets.editDestination != nil)
+        #expect(f.returnLatencies.count == 1)
+        sheets.closeEditDestination()
+        // A port no longer connected is kept as a choice, marked offline.
+        SynthSheets.ports = { ["Juno MIDI"] }
+        sheets.beginEditDestination(9, channelOn: false)
+        d = try #require(sheets.editDestination)
+        #expect(d.port == "Moog MIDI" && d.channel == 10)
+        #expect(d.portChoices == ["Juno MIDI", "Moog MIDI"] && d.portTitle("Moog MIDI") == "Moog MIDI (offline)")
     }
 }

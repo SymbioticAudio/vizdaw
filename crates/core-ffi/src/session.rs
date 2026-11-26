@@ -110,6 +110,15 @@ pub(crate) struct Inner {
     editor_layout: Option<serde_json::Value>,
     /// Offline media and why (Ruling 22; runtime only, never saved).
     offline: std::collections::BTreeMap<core_model::ids::MediaId, crate::media::OfflineReasonRow>,
+    /// The reader the last zero-crossing snap opened: the media, the file it
+    /// was opened from, and the reader (shared so the read runs without the
+    /// session lock). Used only while both the media and its resolved path
+    /// still match, so a relink or replaced file is never read through it.
+    crossing_reader: Option<(
+        u64,
+        std::path::PathBuf,
+        std::sync::Arc<core_media::caf::CafReader>,
+    )>,
     /// The document whose media and format `offline` was computed for, and
     /// the root it was checked under.
     media_seen: Option<(Document, std::path::PathBuf)>,
@@ -348,6 +357,8 @@ struct News {
     slots_changed: bool,
     params_changed: std::collections::BTreeSet<u64>,
     problems: Vec<String>,
+    /// Editors that asked for a new size since the last `idle`.
+    editor_resize: Vec<crate::editor::EditorResize>,
 }
 
 impl Inner {
@@ -379,6 +390,7 @@ impl Inner {
             plugin_dirty: false,
             closed: false,
             offline: Default::default(),
+            crossing_reader: None,
             media_seen: None,
             jobs: Default::default(),
             overviews: Default::default(),
@@ -862,6 +874,13 @@ impl Inner {
         self.plugin_dirty || *self.doc() != self.clean
     }
 
+    /// What the close and quit prompts ask on: [`Inner::unsaved`], or a
+    /// recording pass running or still to land (its take is in no file
+    /// yet). Not autosave's test: autosave never writes mid-recording.
+    fn asks_before_close(&self) -> bool {
+        self.unsaved() || self.recording.is_some() || self.finishing || self.pending_pass.is_some()
+    }
+
     fn snapshot(&mut self) -> Result<DocSnapshot, VizError> {
         self.snapshot_with(Vec::new())
     }
@@ -1061,6 +1080,28 @@ impl Session {
     /// Task 4). Not exported to Swift.
     pub fn debug_owe_mpe(&self, lane: u64, mpe: Option<core_model::mpe::MpeConfig>) {
         self.lock_inner().mpe_owed.insert(LaneId(lane), mpe);
+    }
+
+    /// Owes the next `idle` a resize slot `slot`'s editor asked for, as one
+    /// the plug-in host reported at a pump without an `idle` (test hook).
+    /// Not exported to Swift.
+    pub fn debug_owe_editor_resize(&self, slot: u64, width: u32, height: u32) {
+        self.lock_inner()
+            .news
+            .editor_resize
+            .push(crate::editor::EditorResize {
+                slot,
+                width,
+                height,
+            });
+    }
+
+    /// The next `opens` [`Session::open_editor`] calls for `slot` answer
+    /// as an editor whose view has not arrived yet (an AU v3 view
+    /// controller still on its way; test hook): `Busy` "editor opening",
+    /// with the plug-in untouched. Not exported to Swift.
+    pub fn debug_editor_opening(&self, slot: u64, opens: u32) {
+        editor::debug_opening(self.id, slot, opens);
     }
 
     /// Owes the composer a finished plug-in gesture on `slot`, as one the
@@ -1485,6 +1526,16 @@ impl Session {
             .news
             .params_changed
             .extend(r.params_changed.iter().map(|i| i.0));
+        for (id, (width, height)) in &r.editor_resize {
+            let news = &mut inner.news.editor_resize;
+            // Several before an `idle` (a skipped tick): the latest wins.
+            news.retain(|e| e.slot != id.0);
+            news.push(crate::editor::EditorResize {
+                slot: id.0,
+                width: *width,
+                height: *height,
+            });
+        }
         inner.autosave_soon |= !r.loaded.is_empty();
         if !r.state_dirty.is_empty() && !inner.plugin_dirty {
             inner.plugin_dirty = true;
@@ -2311,10 +2362,22 @@ impl Session {
     }
 
     /// Whether the song has changes a close would lose: the document
-    /// differs from the one last opened or saved, or a plugin changed its
-    /// own state (release gate B1; the close and quit prompts ask on it).
+    /// differs from the one last opened or saved, a plugin changed its
+    /// own state, or a recording pass is running or still to land (release
+    /// gate B1; next small fixes Task 6). The close and quit prompts ask on
+    /// it; autosave and the snapshot's `dirty` read the document only.
     pub fn has_unsaved_changes(&self) -> Result<bool, VizError> {
-        ffi_guard(|| Ok(self.lock_inner().unsaved()))
+        ffi_guard(|| Ok(self.lock_inner().asks_before_close()))
+    }
+
+    /// Don't Save on a song that is recording (next small fixes Task 6):
+    /// a Save made during the pass is no longer owed, so the close that
+    /// ends the recording saves nothing. Nothing else changes.
+    pub fn cancel_save_after_pass(&self) -> Result<(), VizError> {
+        ffi_guard(|| {
+            self.lock_inner().save_after_pass = false;
+            Ok(())
+        })
     }
 
     /// Why Save As would be refused before its panel opens: the sentence
@@ -2844,6 +2907,7 @@ impl Session {
                 problems: Vec::new(),
                 media_changed: false,
                 overviews_changed: false,
+                editor_resize: Vec::new(),
             };
             // A nested run loop inside a plugin call: skip this tick (before
             // taking the session lock, which that call may hold).
@@ -2963,6 +3027,7 @@ impl Session {
                 problems: n.problems,
                 media_changed,
                 overviews_changed: found.changed,
+                editor_resize: n.editor_resize,
             })
         })
     }
@@ -3003,6 +3068,7 @@ impl Session {
                         stepped: i.stepped,
                         automatable: i.automatable,
                         hidden: i.hidden,
+                        read_only: i.read_only,
                     })
                     .collect()
             })
@@ -3500,6 +3566,12 @@ impl Session {
                     },
                     mpe: d.mpe.map(Into::into),
                     builtin_sound: crate::builtin_sound::sound_of(d),
+                    port: match &d.kind {
+                        DestKind::MidiEndpoint { endpoint_ref, .. } if d.kind.is_external() => {
+                            Some(endpoint_ref.clone())
+                        }
+                        _ => None,
+                    },
                 })
                 .collect())
         })
@@ -3520,35 +3592,8 @@ impl Session {
     ) -> Result<DocSnapshot, VizError> {
         ffi_guard(|| {
             let name = name.trim().to_string();
-            // The port is matched as given: a CoreMIDI name may have
-            // edge spaces (Task 11 review m5).
-            for (what, v) in [("name", &name), ("port", &port)] {
-                if v.trim().is_empty() || v.chars().count() > 255 || v.chars().any(char::is_control)
-                {
-                    return Err(crate::events::bad(&format!(
-                        "the destination's {what} is 1 to 255 characters"
-                    )));
-                }
-            }
-            if channel > 15 {
-                return Err(crate::events::bad(
-                    "the MIDI channel is 0 to 15 (MIDI channels 1 to 16)",
-                ));
-            }
-            // A device named like a reserved reference would play the
-            // built-in synth or the virtual output (Task 11 review m5).
-            if port == core_model::mixer::BUILTIN_SYNTH_REF
-                || port == core_engine::schedule::targets::VIRTUAL_OUT_REF
-            {
-                return Err(crate::events::bad(&format!(
-                    "{port:?} is reserved; choose a MIDI destination"
-                )));
-            }
-            if !crate::host::midi_destination_ports().contains(&port) {
-                return Err(crate::events::bad(&format!(
-                    "no MIDI destination named {port:?}"
-                )));
-            }
+            check_midi_fields(&name, &port, channel)?;
+            check_new_port(&port)?;
             self.execute(Command::Routing(RoutingCmd::AddDestination {
                 name,
                 kind: DestKind::MidiEndpoint {
@@ -3558,6 +3603,99 @@ impl Session {
                 },
                 default_patch: None,
             }))
+        })
+    }
+
+    /// The destination editor (small-fixes Task 4, R4): external MIDI
+    /// destination `dest` takes the name `name` (trimmed), port `port` and
+    /// channel `channel` (0–15), one undo step "Edit Destination"; nothing
+    /// changed (the trimmed name, port and channel as they are) is no
+    /// step. The checks are [`Session::add_midi_destination`]'s, except
+    /// that the port it plays now may be kept although
+    /// [`crate::host::midi_destination_ports`] no longer lists it (an
+    /// offline synth stays editable). `Model` for an unknown id or a
+    /// destination that is not external MIDI (a plugin instrument, the
+    /// Built-in Synth): the kind is not edited here.
+    pub fn edit_midi_destination(
+        &self,
+        dest: u64,
+        name: String,
+        port: String,
+        channel: u8,
+    ) -> Result<DocSnapshot, VizError> {
+        ffi_guard(|| {
+            let name = name.trim().to_string();
+            check_midi_fields(&name, &port, channel)?;
+            let id = DestId(dest);
+            let old = self
+                .lock_inner()
+                .doc()
+                .instruments()
+                .get(&id)
+                .cloned()
+                .ok_or_else(|| VizError::Model {
+                    message: format!("unknown id {id}"),
+                })?;
+            let DestKind::MidiEndpoint {
+                endpoint_ref,
+                group,
+                channel: old_channel,
+            } = &old.kind
+            else {
+                return Err(not_external_midi(&old.name));
+            };
+            if !old.kind.is_external() {
+                return Err(not_external_midi(&old.name));
+            }
+            if port != *endpoint_ref {
+                check_new_port(&port)?;
+            }
+            let mut steps = Vec::new();
+            if name != old.name {
+                steps.push(Command::Routing(RoutingCmd::RenameDestination {
+                    dest: id,
+                    name,
+                }));
+            }
+            if port != *endpoint_ref || channel != *old_channel {
+                steps.push(Command::Routing(RoutingCmd::EditDestination {
+                    dest: id,
+                    kind: DestKind::MidiEndpoint {
+                        endpoint_ref: port,
+                        group: *group,
+                        channel,
+                    },
+                    default_patch: old.default_patch,
+                }));
+            }
+            if steps.is_empty() {
+                return self.lock_inner().snapshot();
+            }
+            let mut inner = self.lock_inner();
+            if inner.edit_label.is_some() || inner.history.in_transaction() {
+                return Err(edit_open_busy());
+            }
+            let before = inner.doc().clone();
+            let filter = ViewFilter::default();
+            let h = &mut inner.history;
+            crate::bundled::arm(h);
+            h.begin("Edit Destination")?;
+            let mut notes = Vec::new();
+            for step in &steps {
+                match h.execute(step, &filter) {
+                    Ok(r) => notes.extend(r.warnings),
+                    Err(e) => {
+                        let _ = h.abort();
+                        return Err(e.into());
+                    }
+                }
+            }
+            h.commit()?;
+            inner.version += 1;
+            inner.reload_host(self.id);
+            self.mark(&mut inner);
+            self.send_mix_changes(&mut inner, &before);
+            inner.snapshot_with(notes)
         })
     }
 
@@ -3588,6 +3726,57 @@ impl Session {
             }))
         })
     }
+}
+
+/// The name (already trimmed), port and channel checks New MIDI
+/// Destination and the destination editor share: name and port 1 to 255
+/// characters with no control characters (the port matched as given: a
+/// CoreMIDI name may have edge spaces, Task 11 review m5), channel 0–15.
+fn check_midi_fields(name: &str, port: &str, channel: u8) -> Result<(), VizError> {
+    for (what, v) in [("name", name), ("port", port)] {
+        if v.trim().is_empty() || v.chars().count() > 255 || v.chars().any(char::is_control) {
+            return Err(crate::events::bad(&format!(
+                "the destination's {what} is 1 to 255 characters"
+            )));
+        }
+    }
+    if channel > 15 {
+        return Err(crate::events::bad(
+            "the MIDI channel is 0 to 15 (MIDI channels 1 to 16)",
+        ));
+    }
+    Ok(())
+}
+
+/// A port a destination may newly play: not a reserved reference (a
+/// device named like one would play the built-in synth or the virtual
+/// output, Task 11 review m5), and one
+/// [`crate::host::midi_destination_ports`] lists.
+fn check_new_port(port: &str) -> Result<(), VizError> {
+    if port == core_model::mixer::BUILTIN_SYNTH_REF
+        || port == core_engine::schedule::targets::VIRTUAL_OUT_REF
+    {
+        return Err(crate::events::bad(&format!(
+            "{port:?} is reserved; choose a MIDI destination"
+        )));
+    }
+    if !crate::host::midi_destination_ports()
+        .iter()
+        .any(|p| p == port)
+    {
+        return Err(crate::events::bad(&format!(
+            "no MIDI destination named {port:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// The destination editor's refusal of a destination whose port and
+/// channel it does not edit (R4).
+fn not_external_midi(name: &str) -> VizError {
+    crate::events::bad(&format!(
+        "{name:?} is not an external MIDI destination; only its name can be changed"
+    ))
 }
 
 /// The package file holding which plugin windows were open (not part of
@@ -3637,27 +3826,44 @@ struct UiState {
 /// app owns, and which windows are open (they reopen with the project).
 #[uniffi::export]
 impl Session {
-    /// Shows slot `slot`'s editor inside the `NSView` at address `parent`
-    /// (main thread; the view lives until `close_editor`). Fails with
-    /// "editor unavailable" when the plugin has none (the app then shows
-    /// its parameters).
+    /// Shows slot `slot`'s editor inside the view at address `parent` (an
+    /// `NSView *` on macOS, an X11 window id on Linux; main thread; the view
+    /// lives until `close_editor`) at window scale `scale` (physical pixels
+    /// per point; non-finite or non-positive counts as 1). Where the window
+    /// API works in pixels (X11) the editor's pixel size follows the scale,
+    /// set before the editor is parented (CLAP gui order); sizes in and out
+    /// are points everywhere, so on macOS the scale changes nothing.
+    /// Fails with "editor unavailable" when the plugin has none (the app
+    /// then shows its parameters) or when called off the main thread.
     ///
-    /// RE-ENTRANCY CONTRACT: an AU v3 editor spins the main run loop (up to
-    /// about 3 s) inside the plugin while it opens, so the app's 60 Hz timer
-    /// and other main-queue work call back into core-ffi meanwhile. This
-    /// function therefore holds NO session `inner` lock (nor any other mutex
-    /// a nested FFI call could take) across the open. Only the plugin
-    /// registry borrow of `plugins::with` is held; nested calls get
-    /// `VizError::Busy` and idle skips.
-    pub fn open_editor(&self, slot: u64, parent: u64) -> Result<EditorSize, VizError> {
+    /// `Busy` "editor opening" while the editor's view is still on its way
+    /// (an AU v3 view controller, requested asynchronously): nothing is
+    /// attached yet; the window calls again on its tick (with the same
+    /// parent, which stays alive meanwhile) until it attaches or fails.
+    /// `Busy` "plugin host is busy" when called from inside a plug-in call.
+    ///
+    /// RE-ENTRANCY CONTRACT: no nested run loop runs inside this call (the
+    /// AU v3 wait is asynchronous), and it holds NO session `inner` lock
+    /// (nor any other mutex a nested FFI call could take) across the open,
+    /// should a plug-in run one anyway. Only the plugin registry borrow of
+    /// `plugins::with` is held; nested calls get `VizError::Busy` and idle
+    /// skips.
+    pub fn open_editor(&self, slot: u64, parent: u64, scale: f64) -> Result<EditorSize, VizError> {
         ffi_guard(|| {
             let parent = editor::parent(parent)?;
+            #[cfg(feature = "test-hooks")]
+            if editor::take_debug_opening(self.id, slot) {
+                return Err(editor_error(core_host::HostError::Opening));
+            }
             plugins::with(self.id, |p| {
                 let ed = p
                     .and_then(|p| p.instance(PluginInstanceId(slot)))
                     .and_then(|i| i.editor())
                     .ok_or_else(|| unavailable("the plugin has no editor"))?;
-                let (width, height) = ed.open(parent).map_err(|e| unavailable(&e.to_string()))?;
+                // Applied at `open`, between the plug-in's create and its
+                // parent.
+                ed.set_scale(scale);
+                let (width, height) = ed.open(parent).map_err(editor_error)?;
                 Ok(EditorSize {
                     width,
                     height,
@@ -3694,13 +3900,14 @@ impl Session {
         })
     }
 
-    /// Hides slot `slot`'s editor (its window is closing) and ends any
-    /// gesture it left open. Like `open_editor`, holds no session lock
-    /// while the plugin runs (closing may also run the main loop).
+    /// Hides slot `slot`'s editor (its window is closing; an editor still
+    /// opening stops waiting), ends any gesture it left open, and drops a
+    /// resize it asked for that `idle` has not reported yet. Like
+    /// `open_editor`, holds no session lock while the plugin runs.
     ///
-    /// Returns VizError::Busy while another editor is opening (nested run
-    /// loop); the caller must keep the parent view alive and retry until
-    /// this returns Ok.
+    /// Returns VizError::Busy when called from inside a plug-in call (the
+    /// registry is borrowed); the caller must keep the parent view alive
+    /// and retry until this returns Ok.
     pub fn close_editor(&self, slot: u64) -> Result<(), VizError> {
         ffi_guard(|| {
             plugins::with(self.id, |p| {
@@ -3710,7 +3917,12 @@ impl Session {
                     }
                     p.end_gestures(PluginInstanceId(slot));
                 }
-            })
+            })?;
+            self.lock_inner()
+                .news
+                .editor_resize
+                .retain(|e| e.slot != slot);
+            Ok(())
         })
     }
 
@@ -3741,6 +3953,17 @@ impl Session {
                 .filter(|w| slots.contains(&PluginInstanceId(*w)))
                 .collect())
         })
+    }
+}
+
+/// An editor's failure: "editor opening" (`Busy`, retried on the window's
+/// tick) or "editor unavailable: …".
+fn editor_error(e: core_host::HostError) -> VizError {
+    match e {
+        core_host::HostError::Opening => VizError::Busy {
+            message: editor::OPENING.into(),
+        },
+        e => unavailable(&e.to_string()),
     }
 }
 

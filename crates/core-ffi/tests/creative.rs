@@ -272,6 +272,7 @@ fn param(id: u64, name: &str, max: f64, value: f64, stepped: bool) -> ParamRow {
         stepped,
         automatable: true,
         hidden: false,
+        read_only: false,
     }
 }
 

@@ -613,6 +613,7 @@ fn probe_effect() -> (core_host::adapt::PluginEffect, Seen) {
         stepped,
         automatable: true,
         hidden: false,
+        read_only: false,
     };
     let port = |name: &str, role| AudioPortInfo {
         name: name.into(),
@@ -800,6 +801,7 @@ impl InsertFactory for ProbeFactory {
                     stepped: false,
                     automatable: true,
                     hidden: false,
+                    read_only: false,
                 })
                 .collect(),
             latency: 0,

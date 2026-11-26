@@ -450,7 +450,7 @@ pub fn admit(c: &Command) -> Result<(), ControlError> {
         | Command::UiKey { .. }
         | Command::AppNewDemo { .. }
         | Command::AppOpen { .. }
-        | Command::AppQuit => Err(ControlError::new(
+        | Command::AppQuit { .. } => Err(ControlError::new(
             ErrorCode::NotAllowed,
             "Co-Producer cannot click, type, open or quit: use commands.list's commands.",
         )),

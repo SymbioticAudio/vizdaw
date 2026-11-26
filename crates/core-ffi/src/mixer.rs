@@ -285,6 +285,10 @@ pub struct DestRow {
     /// every destination that is not a Built-in Synth.
     #[uniffi(default)]
     pub builtin_sound: Option<crate::builtin_sound::BuiltinSound>,
+    /// The MIDI port (endpoint ref) an external MIDI destination plays,
+    /// else `None` (small-fixes Task 4).
+    #[uniffi(default)]
+    pub port: Option<String>,
 }
 
 /// An external destination's MIDI strip mix (plan 5g-1b): controller

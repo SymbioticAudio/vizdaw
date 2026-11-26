@@ -72,8 +72,8 @@ pub struct BounceCopies {
 }
 
 thread_local! {
-    /// Re-entrancy contract: a nested run loop (an AU editor waiting, a
-    /// modal plugin UI) can call back into the FFI from inside [`with`]:
+    /// Re-entrancy contract: a nested run loop a plug-in runs itself (a
+    /// modal plugin UI; AU v3 editors no longer wait in one) can call back into the FFI from inside [`with`]:
     /// the 60 Hz ticker, other calls, a `Session` drop. Every registry
     /// access therefore uses `try_borrow*` and answers "busy" instead of
     /// panicking. Closes that cannot run at once are queued in `PENDING`
@@ -96,6 +96,17 @@ fn busy() -> VizError {
 /// Whether the registry is borrowed (a plugin call is on the stack).
 pub fn is_busy() -> bool {
     REGISTRY.with(|r| r.try_borrow_mut().is_err())
+}
+
+/// Runs `f` (plug-in code outside [`with`]: the run-loop pump) under the
+/// registry's busy mark, so a nested loop the plug-in runs inside it gets
+/// `Busy` from every registry call, as inside [`with`]. Already busy (a
+/// plug-in call is on the stack), the mark is set: `f` just runs.
+pub(crate) fn while_busy<T>(f: impl FnOnce() -> T) -> T {
+    REGISTRY.with(|r| match r.try_borrow_mut() {
+        Ok(_mark) => f(),
+        Err(_) => f(),
+    })
 }
 
 /// The configuration new hosts start with.

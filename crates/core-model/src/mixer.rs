@@ -24,7 +24,8 @@ pub const MASTER_NAME: &str = "Master";
 /// Name of the built-in synth's strip.
 pub const BUILTIN_SYNTH_STRIP: &str = "Built-in Synth";
 
-/// A plugin parameter ID (CLAP `clap_id`, AU parameter address).
+/// A plugin parameter ID (CLAP `clap_id`, AU parameter address, VST3
+/// `ParamID`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ParamId(pub u64);
@@ -37,6 +38,16 @@ pub enum PluginFormat {
     Au,
     /// CLAP.
     Clap,
+    /// VST3 (song format 12 and later).
+    Vst3,
+}
+
+/// `text` as a VST3 class ID: exactly 32 hexadecimal digits, given back in
+/// upper case (the spelling a slot and the catalogue keep); `None` for any
+/// other text.
+pub fn vst3_class_id(text: &str) -> Option<String> {
+    (text.len() == 32 && text.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| text.to_ascii_uppercase())
 }
 
 /// Which plugin a slot holds. Loading matches on `format` + `id` only; a
@@ -46,7 +57,8 @@ pub enum PluginFormat {
 pub struct PluginRef {
     /// Format.
     pub format: PluginFormat,
-    /// AU: `type/subtype/manufacturer` four-char codes; CLAP: plugin id.
+    /// AU: `type/subtype/manufacturer` four-char codes; CLAP: plugin id;
+    /// VST3: the class ID as 32 upper-case hexadecimal digits.
     pub id: String,
     /// Display name.
     pub name: String,

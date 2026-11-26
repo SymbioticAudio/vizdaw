@@ -7,10 +7,15 @@ import VizDAWCore
 public enum VcaStripLabels {
     public static func group(_ name: String) -> String { "Group \(name)" }
     public static func offset(_ text: String) -> String { "VCA offset \(text)" }
-    public static func fader(_ name: String) -> String { "Fader of VCA \(name)" }
-    public static func level(_ name: String) -> String { "Level of VCA \(name)" }
-    public static func mute(_ name: String) -> String { "Mute VCA \(name)" }
-    public static func solo(_ name: String) -> String { "Solo VCA \(name)" }
+    /// A VCA's label, as the core's `vca_label`: its name when that is
+    /// "VCA" or starts with "VCA ", else "VCA ‹name›".
+    public static func title(_ name: String) -> String {
+        name == "VCA" || name.hasPrefix("VCA ") ? name : "VCA \(name)"
+    }
+    public static func fader(_ name: String) -> String { "Fader of \(title(name))" }
+    public static func level(_ name: String) -> String { "Level of \(title(name))" }
+    public static func mute(_ name: String) -> String { "Mute \(title(name))" }
+    public static func solo(_ name: String) -> String { "Solo \(title(name))" }
     public static let mode = "VCA automation mode"
     /// The strip's "VCA" mark: a VCA mutes or solos it (spec §2a).
     public static func mark(_ strip: String) -> String { "VCA mute or solo on \(strip)" }

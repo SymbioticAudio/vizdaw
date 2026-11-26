@@ -3231,3 +3231,28 @@ Plan 8f, Co-Producer time tracking and coaching:
 455. Take Punch fields off the bar (or narrow the window) and press P: »
      opens with Punch In ready; Return commits; a click outside cancels.
 456. The mixer window at 1600 pt shows no ».
+
+### Small fixes on `next` (after the beta)
+
+These apply to a build from `next`, not the beta test build.
+
+457. Give a VCA moves on its own track, export a DAWproject and import it
+     back as a new project: there is no extra instrument track, and the VCA
+     plays its moves. (To make the moves: set the VCA to Touch, play, and
+     move its level.)
+458. A VCA named "VCA 1" reads "VCA 1 Fader" in the track list; with
+     VoiceOver on, its fader says "Fader of VCA 1". A VCA named "Strings"
+     reads "VCA Strings Fader".
+459. Open a plug-in window for an Audio Unit that has a read-only
+     parameter (a meter, say): its slider is greyed out and does not move.
+460. Edit an external destination: change its name, port and channel, then
+     press ⌘Z once: all three go back together.
+461. Drag a trim in the audio editor quickly: the edge snaps to a zero
+     crossing and the drag does not stutter.
+462. Record into a saved song and press ⌘W: it asks whether to save. Choose
+     Don't Save: the window closes and the file on disk is as it was.
+463. Open a saved song with no edits and start recording: the window shows
+     its edited dot while it records.
+464. Open two songs and press Save in one while it is recording, then press
+     ⌘Q and choose Discard Changes: the alert says that song will still be
+     saved when its recording ends, and it is.

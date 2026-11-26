@@ -41,6 +41,7 @@ fn running_params(session: u64, slot: PluginInstanceId) -> Result<Option<Vec<Par
                     stepped: i.stepped,
                     automatable: i.automatable,
                     hidden: i.hidden,
+                    read_only: i.read_only,
                 })
                 .collect(),
         )

@@ -5,10 +5,24 @@ import VizDAWCore
 
 @MainActor
 @Suite struct PluginWindowModelTests {
-    func param(_ id: UInt64, _ name: String, value: Double = 0.5, stepped: Bool = false, hidden: Bool = false) -> ParamRow {
+    func param(_ id: UInt64, _ name: String, value: Double = 0.5, stepped: Bool = false, hidden: Bool = false, automatable: Bool = true, readOnly: Bool = false) -> ParamRow {
         ParamRow(
             id: id, name: name, module: "", min: 0, max: 1, default: 0.5, value: value,
-            stepped: stepped, automatable: true, hidden: hidden)
+            stepped: stepped, automatable: automatable, hidden: hidden, readOnly: readOnly)
+    }
+
+    @Test func aReadOnlyParameterIsShownButNotEditable() throws {
+        let f = mixerFake()
+        f.paramTable[10] = [
+            param(0, "Level Meter", automatable: false, readOnly: true),
+            param(1, "Manual Only", automatable: false),
+            param(2, "Gain"),
+        ]
+        let w = PluginWindowModel(document: try DocumentModel(session: f), slot: 10)
+        #expect(w.visibleParams.map(\.name) == ["Level Meter", "Manual Only", "Gain"])
+        #expect(w.isEditable(w.visibleParams[0]) == false)
+        #expect(w.isEditable(w.visibleParams[1]))
+        #expect(w.isEditable(w.visibleParams[2]))
     }
 
     @Test func titleNamesStripAndPluginAndHiddenParamsAreLeftOut() throws {

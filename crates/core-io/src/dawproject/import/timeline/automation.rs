@@ -1,6 +1,16 @@
 //! Automation (Ruling 14, inverted).
 
 use super::*;
+use core_model::groups::vca_label;
+
+/// VCA `v`'s label for its lane; a missing or empty name falls back to the
+/// import's own default, "VCA N".
+fn vca_lane_label(names: &[String], v: usize) -> String {
+    match names.get(v).map(|n| n.trim()) {
+        Some(n) if !n.is_empty() => vca_label(n),
+        _ => format!("VCA {}", v + 1),
+    }
+}
 
 impl<'p> Tl<'_, '_, 'p> {
     /// Every channel's volume, pan, mute, send levels and device
@@ -115,12 +125,19 @@ impl<'p> Tl<'_, '_, 'p> {
             Some(StripAt::Track(i)) => Some(i),
             _ => None,
         });
-        if owner.is_none() && self.automation_track.is_none() {
-            let i = self.new_track(AUTOMATION_NAME.to_owned(), false);
-            self.automation_track = Some(i);
-            self.cx.add(ItemKind::Note, AUTOMATION_TRACK, None);
-        }
-        let owner = owner.or(self.automation_track);
+        let owner = match (owner, at) {
+            (Some(i), _) => Some(i),
+            // A VCA's curve with no track: the lane of that VCA (B-001).
+            (None, AutoAt::Vca(v)) => Some(self.vca_track(v)),
+            (None, _) => {
+                if self.automation_track.is_none() {
+                    let i = self.new_track(AUTOMATION_NAME.to_owned(), false);
+                    self.automation_track = Some(i);
+                    self.cx.add(ItemKind::Note, AUTOMATION_TRACK, None);
+                }
+                self.automation_track
+            }
+        };
         let unit = p.unit.unwrap_or(match role {
             Role::Volume(r) | Role::Pan(r) | Role::Send(_, r) | Role::Device(_, r) => r.unit,
             Role::Mute => DpUnit::Normalized,
@@ -171,6 +188,19 @@ impl<'p> Tl<'_, '_, 'p> {
         Ok(())
     }
 
+    /// The lane that holds VCA `v`'s trackless curves, "‹label› Fader",
+    /// made on first use with no instrument (B-001).
+    fn vca_track(&mut self, v: usize) -> usize {
+        if let Some(&i) = self.vca_tracks.get(&v) {
+            return i;
+        }
+        let label = vca_lane_label(&self.vca_names, v);
+        let name = self.made_name(&format!("{label} Fader"));
+        let i = self.new_track(name, false);
+        self.vca_tracks.insert(v, i);
+        i
+    }
+
     /// An automation point's value, 0 to 1.
     pub(super) fn auto_value(
         &mut self,
@@ -212,5 +242,18 @@ impl<'p> Tl<'_, '_, 'p> {
             self.count(ItemKind::Changed, VALUES_CLAMPED);
         }
         Some(raw.clamp(0.0, 1.0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::vca_lane_label;
+
+    #[test]
+    fn an_unnamed_vca_lane_reads_vca_n_fader() {
+        let names = vec![String::new(), "Strings".to_owned()];
+        assert_eq!(vca_lane_label(&names, 0), "VCA 1");
+        assert_eq!(vca_lane_label(&names, 1), "VCA Strings");
+        assert_eq!(vca_lane_label(&names, 5), "VCA 6");
     }
 }

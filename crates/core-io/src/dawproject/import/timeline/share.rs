@@ -190,6 +190,7 @@ impl<'p> Tl<'_, '_, 'p> {
             seqs: out,
             media: self.book.media,
             main,
+            vca_tracks: self.vca_tracks.values().copied().collect(),
         })
     }
 

@@ -16,14 +16,14 @@ use std::path::{Path, PathBuf};
 /// File format version of `plugins.json`.
 pub const CATALOG_VERSION: u32 = 1;
 
-/// Where plugins come from: a CLAP bundle or an AU component, with what
+/// Where plugins come from: a CLAP or VST3 bundle or an AU component, with what
 /// identifies the build that was scanned (the cache key, spec §8).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Source {
     /// Format.
     pub format: PluginFormat,
-    /// Bundle path (CLAP), or `au:<type/subtype/manufacturer>` (AU).
+    /// Bundle path (CLAP, VST3), or `au:<type/subtype/manufacturer>` (AU).
     pub path: PathBuf,
     /// Bundle (or component) version.
     pub version: String,
@@ -40,6 +40,18 @@ impl Source {
             format: PluginFormat::Clap,
             path: path.to_path_buf(),
             version: bundle_version(path),
+            mtime: newest_mtime(path, 4),
+        }
+    }
+
+    /// The source of a VST3 bundle at `path`: its `CFBundleShortVersionString`
+    /// (macOS), else the `Version` of its `moduleinfo.json`, and the newest
+    /// modification time of its files.
+    pub fn vst3_bundle(path: &Path) -> Source {
+        Source {
+            format: PluginFormat::Vst3,
+            path: path.to_path_buf(),
+            version: crate::vst3::bundle_version(path),
             mtime: newest_mtime(path, 4),
         }
     }
@@ -486,7 +498,7 @@ impl Catalog {
             // Of several copies of one ID, only the preferred one counts:
             // a shadowed copy is neither loaded nor marks the ID.
             let e = self.preferred(key.0, &key.1).unwrap_or(e);
-            if e.plugin.format == PluginFormat::Clap {
+            if matches!(e.plugin.format, PluginFormat::Clap | PluginFormat::Vst3) {
                 host.register_path(e.plugin.format, &e.plugin.id, e.source.path.clone());
             }
             let why = match self.status_of(e) {

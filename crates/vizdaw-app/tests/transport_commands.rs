@@ -1,0 +1,903 @@
+mod support;
+
+use std::sync::Arc;
+
+use core_control::registry::{self, ArgValue};
+use core_control::{ControlError, ErrorCode};
+use support::{FakeSession, demo_fake};
+use vizdaw_app::DocumentModel;
+use vizdaw_app::commands::{FieldFocus, Ran, TRANSPORT_COMMANDS, enabled, perform_from_menu, run};
+use vizdaw_ffi::VizError;
+use vizdaw_ffi::selection::{SelectionRow, TickRange};
+
+const BAR: i64 = 61_440;
+const TEXT: &str = "A text field has the keyboard.";
+
+/// The demo with the Song one bar long, so Play at its end restarts.
+fn demo() -> (Arc<FakeSession>, DocumentModel) {
+    let f = Arc::new(demo_fake());
+    f.set_length(3, BAR);
+    let doc = DocumentModel::new(f.clone()).unwrap();
+    (f, doc)
+}
+
+fn go(id: &str, doc: &mut DocumentModel) -> Result<Ran, ControlError> {
+    run(id, &[], doc)
+}
+
+fn failure(r: Result<Ran, ControlError>) -> ControlError {
+    r.expect_err("expected a refusal")
+}
+
+fn is(e: &ControlError, code: ErrorCode, message: &str) {
+    assert_eq!((e.code, e.message.as_str()), (code, message));
+}
+
+fn tick(f: &FakeSession) -> i64 {
+    use vizdaw_app::DocSession;
+    f.transport().unwrap().tick
+}
+
+fn playing(f: &FakeSession) -> bool {
+    use vizdaw_app::DocSession;
+    f.transport().unwrap().playing
+}
+
+#[test]
+fn stop_goes_back_to_where_playing_started() {
+    let (f, mut m) = demo();
+    f.set_length(3, 4 * BAR);
+    let mut m2 = DocumentModel::new(f.clone()).unwrap();
+    is(
+        &failure(go("transport.stop", &mut m)),
+        ErrorCode::Unavailable,
+        "Nothing is playing.",
+    );
+    f.set_transport(|t| t.tick = 30_000);
+    go("transport.play_stop", &mut m2).unwrap();
+    assert_eq!(m2.play_start(), Some(30_000));
+    assert!(playing(&f));
+    f.set_transport(|t| t.tick = 90_000);
+    go("transport.stop", &mut m2).unwrap();
+    assert!(!playing(&f));
+    assert_eq!(tick(&f), 30_000);
+}
+
+#[test]
+fn play_only_starts() {
+    let (f, mut m) = demo();
+    go("transport.play", &mut m).unwrap();
+    assert!(playing(&f));
+    f.set_play_error(Some(VizError::Model {
+        message: "played twice".into(),
+    }));
+    go("transport.play", &mut m).expect("Play while playing does nothing");
+    assert!(playing(&f));
+    go("transport.stop", &mut m).unwrap();
+    f.set_play_error(None);
+    go("transport.play", &mut m).unwrap();
+    assert!(playing(&f), "a stopped transport plays");
+}
+
+#[test]
+fn play_selection_plays_its_span_once_or_onwards() {
+    let (f, mut m) = demo();
+    let e = failure(go("transport.play_selection", &mut m));
+    assert_eq!(e.code, ErrorCode::Unavailable, "nothing selected");
+    is(
+        &e,
+        ErrorCode::Unavailable,
+        "Select something in the shown sequence first.",
+    );
+    f.set_span(Some(TickRange {
+        start: 1_000,
+        end: 5_000,
+    }));
+    go("transport.play_selection", &mut m).unwrap();
+    assert_eq!(f.plays_from().last(), Some(&(3, 1_000, Some(5_000))));
+    assert_eq!(m.play_start(), Some(1_000));
+    go("transport.play_from_selection", &mut m).unwrap();
+    assert_eq!(f.plays_from().last(), Some(&(3, 1_000, None)));
+    f.set_play_error(Some(VizError::Model {
+        message: "the end must be after the start".into(),
+    }));
+    is(
+        &failure(go("transport.play_selection", &mut m)),
+        ErrorCode::Failed,
+        "the end must be after the start",
+    );
+}
+
+#[test]
+fn play_from_edit_in_needs_a_range() {
+    let (f, mut m) = demo();
+    let e = failure(go("transport.play_from_edit_in", &mut m));
+    is(
+        &e,
+        ErrorCode::Unavailable,
+        "Set an edit-in point (select a time range) first.",
+    );
+    assert!(!enabled("transport.play_from_edit_in", &m));
+    f.force_selection(SelectionRow {
+        time_range: Some(TickRange {
+            start: 7_680,
+            end: 61_440,
+        }),
+        lanes: vec![],
+        events: vec![],
+    });
+    let mut m = DocumentModel::new(f.clone()).unwrap();
+    assert!(enabled("transport.play_from_edit_in", &m));
+    go("transport.play_from_edit_in", &mut m).unwrap();
+    assert_eq!(f.plays_from().last(), Some(&(3, 7_680, None)));
+}
+
+#[test]
+fn marker_keys_locate_to_the_nearest_marker() {
+    let (f, mut m) = demo();
+    f.set_marker_ticks(vec![61_440, 122_880]);
+    go("transport.next_marker", &mut m).unwrap();
+    assert_eq!(tick(&f), 61_440);
+    go("transport.next_marker", &mut m).unwrap();
+    assert_eq!(tick(&f), 122_880);
+    is(
+        &failure(go("transport.next_marker", &mut m)),
+        ErrorCode::Unavailable,
+        "No marker after the position.",
+    );
+    go("transport.previous_marker", &mut m).unwrap();
+    assert_eq!(tick(&f), 61_440);
+    is(
+        &failure(go("transport.previous_marker", &mut m)),
+        ErrorCode::Unavailable,
+        "No marker before the position.",
+    );
+}
+
+#[test]
+fn scrubbing_waits() {
+    let (_f, mut m) = demo();
+    is(
+        &failure(go("transport.scrub", &mut m)),
+        ErrorCode::Unavailable,
+        "Scrubbing is not available yet.",
+    );
+    assert!(!enabled("transport.scrub", &m));
+}
+
+#[test]
+fn stop_returns_to_where_the_engine_actually_started() {
+    let (f, mut m) = demo();
+    // Stopped at the sequence's end: Play restarts at bar 1.
+    f.set_transport(|t| t.tick = BAR);
+    go("transport.play_stop", &mut m).unwrap();
+    assert_eq!(m.play_start(), Some(0));
+    go("transport.stop", &mut m).unwrap();
+    assert_eq!(tick(&f), 0);
+    // A stale cursor in another sequence is ignored too.
+    f.set_transport(|t| {
+        t.seq = Some(1);
+        t.tick = 30_000;
+    });
+    go("transport.play_stop", &mut m).unwrap();
+    assert_eq!(m.play_start(), Some(0));
+}
+
+#[test]
+fn bare_key_commands_wait_for_text_fields() {
+    let (f, mut m) = demo();
+    m.begin_text_editing("track-rename");
+    for id in [
+        "transport.play_selection",
+        "transport.next_marker",
+        "transport.play_stop",
+        "transport.go_position",
+    ] {
+        is(&failure(go(id, &mut m)), ErrorCode::Unavailable, TEXT);
+        assert!(!enabled(id, &m), "{id}");
+    }
+    // The channel's Loop does not wait; its key and menu item do.
+    assert!(!enabled("transport.loop", &m));
+    assert!(f.plays_from().is_empty());
+    m.end_text_editing("track-rename");
+    assert!(enabled("transport.next_marker", &m));
+}
+
+#[test]
+fn busy_is_busy() {
+    let (f, mut m) = demo();
+    f.set_span(Some(TickRange {
+        start: 1_000,
+        end: 5_000,
+    }));
+    f.set_play_error(Some(VizError::Busy {
+        message: "The core is busy.".into(),
+    }));
+    is(
+        &failure(go("transport.play_selection", &mut m)),
+        ErrorCode::Busy,
+        "The core is busy.",
+    );
+}
+
+#[test]
+fn rewind_and_fast_forward_step_a_bar() {
+    let (f, mut m) = demo();
+    go("transport.fast_forward", &mut m).unwrap();
+    assert_eq!(tick(&f), BAR);
+    go("transport.fast_forward", &mut m).unwrap();
+    assert_eq!(tick(&f), 2 * BAR);
+    go("transport.rewind", &mut m).unwrap();
+    assert_eq!(f.step_bars(), vec![true, true, false]);
+    assert_eq!(tick(&f), BAR);
+    assert!(f.winds().is_empty() && f.hold_ends() == 0);
+    go("transport.rewind", &mut m).unwrap();
+    go("transport.rewind", &mut m).unwrap();
+    assert_eq!(tick(&f), 0, "stops at the start");
+}
+
+#[test]
+fn rewind_and_fast_forward_wait_and_refuse_as_the_other_transport_keys() {
+    let (f, mut m) = demo();
+    let ids = ["transport.rewind", "transport.fast_forward"];
+    m.begin_text_editing("track-rename");
+    for id in ids {
+        is(&failure(go(id, &mut m)), ErrorCode::Unavailable, TEXT);
+        assert!(!enabled(id, &m), "{id}");
+        assert!(perform_from_menu(id, &mut m).is_err());
+        assert_eq!(m.status(), Some(TEXT));
+    }
+    assert!(f.step_bars().is_empty());
+    m.end_text_editing("track-rename");
+    for id in ids {
+        assert!(enabled(id, &m), "{id}");
+    }
+    m.select(None);
+    for id in ids {
+        is(
+            &failure(go(id, &mut m)),
+            ErrorCode::Unavailable,
+            "Select a sequence first.",
+        );
+        assert!(!enabled(id, &m), "{id}");
+    }
+    assert!(f.step_bars().is_empty());
+    m.select(Some(3));
+    f.set_jump_error(Some(VizError::Busy {
+        message: "Stop recording first.".into(),
+    }));
+    for id in ids {
+        is(
+            &failure(go(id, &mut m)),
+            ErrorCode::Busy,
+            "Stop recording first.",
+        );
+    }
+    assert!(f.step_bars().is_empty() && m.alert.is_none());
+}
+
+#[test]
+fn a_core_refusal_is_failed_with_its_text() {
+    let (f, mut m) = demo();
+    f.set_jump_error(Some(VizError::Model {
+        message: "no sequence to step in".into(),
+    }));
+    is(
+        &failure(go("transport.rewind", &mut m)),
+        ErrorCode::Failed,
+        "no sequence to step in",
+    );
+}
+
+#[test]
+fn play_stop_needs_a_sequence_and_the_keys() {
+    let (f, mut m) = demo();
+    m.select(None);
+    is(
+        &failure(go("transport.play_stop", &mut m)),
+        ErrorCode::Unavailable,
+        "Select a sequence to play.",
+    );
+    m.select(Some(3));
+    m.begin_text_editing("track-rename");
+    is(
+        &failure(go("transport.play_stop", &mut m)),
+        ErrorCode::Unavailable,
+        TEXT,
+    );
+    m.end_text_editing("track-rename");
+    go("transport.play_stop", &mut m).unwrap();
+    assert!(playing(&f));
+    // Stop here does not locate back.
+    f.set_transport(|t| t.tick = 5_000);
+    go("transport.play_stop", &mut m).unwrap();
+    assert!(!playing(&f) && tick(&f) == 5_000);
+    assert_eq!(f.count("locate(0)"), 0);
+    f.set_play_error(Some(VizError::Busy {
+        message: "The core is busy.".into(),
+    }));
+    is(
+        &failure(go("transport.play_stop", &mut m)),
+        ErrorCode::Busy,
+        "The core is busy.",
+    );
+    f.set_play_error(Some(VizError::Model {
+        message: "no device".into(),
+    }));
+    is(
+        &failure(go("transport.play_stop", &mut m)),
+        ErrorCode::Failed,
+        "Play Failed: no device",
+    );
+}
+
+#[test]
+fn the_menu_play_stop_raises_an_alert_and_a_refusal_shows_in_the_status() {
+    let (f, mut m) = demo();
+    f.set_play_error(Some(VizError::Model {
+        message: "no device".into(),
+    }));
+    perform_from_menu("transport.play_stop", &mut m).unwrap();
+    let a = m.alert.take().unwrap();
+    assert_eq!(
+        (a.title.as_str(), a.message.as_str()),
+        ("Play Failed", "no device")
+    );
+    f.set_play_error(None);
+    m.select(None);
+    assert!(perform_from_menu("transport.play_stop", &mut m).is_err());
+    assert_eq!(m.status(), Some("Select a sequence to play."));
+    let e = perform_from_menu("transport.stop", &mut m).unwrap_err();
+    is(&e, ErrorCode::Unavailable, "Nothing is playing.");
+    assert_eq!(m.status(), Some("Nothing is playing."));
+}
+
+#[test]
+fn return_to_start_needs_the_return_key() {
+    let (f, mut m) = demo();
+    f.set_transport(|t| t.tick = 5_000);
+    m.begin_text_editing("track-rename");
+    is(
+        &failure(go("transport.return_to_start", &mut m)),
+        ErrorCode::Unavailable,
+        "A text field or list has the keyboard.",
+    );
+    assert!(!enabled("transport.return_to_start", &m));
+    m.end_text_editing("track-rename");
+    go("transport.return_to_start", &mut m).unwrap();
+    assert_eq!(tick(&f), 0);
+}
+
+#[test]
+fn loop_takes_on_or_toggles() {
+    let (f, mut m) = demo();
+    let on = |v: bool| vec![("on".to_string(), ArgValue::Flag(v))];
+    run("transport.loop", &on(true), &mut m).unwrap();
+    assert!(m.looping() && f.looped());
+    run("transport.loop", &on(true), &mut m).unwrap();
+    assert_eq!(f.count("set_loop(true)"), 1, "already on: no call");
+    go("transport.loop", &mut m).unwrap();
+    assert!(!m.looping() && !f.looped());
+    go("transport.loop", &mut m).unwrap();
+    assert!(m.looping());
+    run("transport.loop", &on(false), &mut m).unwrap();
+    assert!(!m.looping());
+}
+
+#[test]
+fn a_failing_loop_is_an_alert_and_stays_as_it_was() {
+    let (f, mut m) = demo();
+    f.set_loop_error(Some(VizError::Busy {
+        message: "Stop recording first.".into(),
+    }));
+    m.toggle_loop();
+    assert!(!m.looping());
+    let a = m.alert.take().unwrap();
+    assert_eq!(a.title, "Loop Failed");
+    assert_eq!(a.message, "Stop recording first.");
+}
+
+#[test]
+fn locating_failures_are_alerts() {
+    let (f, mut m) = demo();
+    m.locate(1_000);
+    assert!(m.alert.is_none());
+    f.set_locate_error(Some(VizError::Model {
+        message: "cannot locate".into(),
+    }));
+    m.locate(1_000);
+    let a = m.alert.take().unwrap();
+    assert_eq!(
+        (a.title.as_str(), a.message.as_str()),
+        ("Locate Failed", "cannot locate")
+    );
+    m.return_to_start();
+    let a = m.alert.take().unwrap();
+    assert_eq!(
+        (a.title.as_str(), a.message.as_str()),
+        ("Locate Failed", "cannot locate")
+    );
+    assert!(m.move_to(2_000).is_err());
+    assert!(m.alert.is_none(), "move_to leaves the error to its caller");
+    f.set_locate_error(None);
+    assert!(m.move_to(2_000).is_ok());
+}
+
+#[test]
+fn a_busy_transport_read_keeps_the_last_good_state() {
+    let (f, mut m) = demo();
+    go("transport.play_stop", &mut m).unwrap();
+    assert!(playing(&f));
+    f.set_transport_error(Some(VizError::Busy {
+        message: "plugin host is busy".into(),
+    }));
+    // Playing, as last read: Stop tries the stop; it is not "Nothing is playing."
+    go("transport.stop", &mut m).unwrap();
+    assert_eq!(f.count("stop"), 1);
+    f.set_transport_error(None);
+    assert!(!playing(&f));
+    go("transport.play_stop", &mut m).unwrap();
+    f.set_transport_error(Some(VizError::Busy {
+        message: "plugin host is busy".into(),
+    }));
+    go("transport.play_stop", &mut m).unwrap();
+    assert_eq!(
+        f.count("stop"),
+        2,
+        "play_stop stops, it does not start again"
+    );
+    assert_eq!(f.count("play(3)"), 2);
+}
+
+#[test]
+fn the_field_keys_ask_the_ui_to_focus_their_field() {
+    let (_f, mut m) = demo();
+    let ran = go("transport.go_position", &mut m).unwrap();
+    assert_eq!(ran.focus, Some(FieldFocus::Position));
+    let ran = go("transport.go_edit_in", &mut m).unwrap();
+    assert_eq!(ran.focus, Some(FieldFocus::EditIn));
+    assert_eq!(go("transport.rewind", &mut m).unwrap().focus, None);
+}
+
+#[test]
+fn the_text_editing_owners_gate_the_keys() {
+    let (_f, mut m) = demo();
+    assert!(m.transport_keys_enabled() && m.return_key_enabled());
+    m.begin_text_editing("a");
+    m.begin_text_editing("b");
+    m.end_text_editing("a");
+    assert!(!m.transport_keys_enabled() && !m.return_key_enabled());
+    m.end_text_editing("b");
+    assert!(m.transport_keys_enabled());
+}
+
+#[test]
+fn every_transport_command_is_in_the_registry() {
+    assert_eq!(TRANSPORT_COMMANDS.len(), 56);
+    for id in TRANSPORT_COMMANDS {
+        assert!(registry::find(id).is_some(), "{id}");
+    }
+}
+
+#[test]
+fn transport_commands_refuse_extra_params() {
+    let (f, mut m) = demo();
+    let bars = vec![("bars".to_string(), ArgValue::Int(2))];
+    let e = failure(run("transport.rewind", &bars, &mut m));
+    assert_eq!(e.code, ErrorCode::InvalidParams);
+    let x = vec![("x".to_string(), ArgValue::Text("x".into()))];
+    let e = failure(run("transport.fast_forward", &x, &mut m));
+    assert_eq!(e.code, ErrorCode::InvalidParams);
+    for id in TRANSPORT_COMMANDS
+        .iter()
+        .filter(|i| **i != "transport.loop")
+    {
+        assert_eq!(
+            failure(run(id, &bars, &mut m)).code,
+            ErrorCode::InvalidParams,
+            "{id}"
+        );
+    }
+    assert!(f.calls().is_empty(), "{:?}", f.calls());
+}
+
+fn on(value: bool) -> Vec<(String, ArgValue)> {
+    vec![("on".to_string(), ArgValue::Flag(value))]
+}
+
+#[test]
+fn modes_toggle_or_take_their_flag() {
+    use vizdaw_app::commands::is_on;
+    let (_f, mut m) = demo();
+    assert!(m.layout().transport.overdub, "a new document overdubs");
+    assert!(!m.layout().transport.punch);
+    run("transport.overdub", &on(false), &mut m).unwrap();
+    assert!(!m.layout().transport.overdub);
+    for id in ["transport.overdub", "transport.punch"] {
+        let value = |m: &DocumentModel| {
+            if id == "transport.overdub" {
+                m.layout().transport.overdub
+            } else {
+                m.layout().transport.punch
+            }
+        };
+        run(id, &on(true), &mut m).unwrap();
+        assert!(value(&m) && is_on(id, &m), "{id} on");
+        run(id, &on(true), &mut m).unwrap();
+        assert!(value(&m), "{id} stays on");
+        go(id, &mut m).unwrap();
+        assert!(!value(&m) && !is_on(id, &m), "{id} toggled off");
+        assert!(enabled(id, &m));
+    }
+    assert!(!m.can_undo(), "the modes are no undo step");
+    let bad = vec![("on".to_string(), ArgValue::Int(1))];
+    assert_eq!(
+        failure(run("transport.punch", &bad, &mut m)).code,
+        ErrorCode::InvalidParams
+    );
+}
+
+#[test]
+fn go_to_punch_fields_asks_for_punch_in() {
+    let (_f, mut m) = demo();
+    let ran = go("transport.go_punch", &mut m).unwrap();
+    assert_eq!(ran.focus, Some(FieldFocus::Punch));
+    assert!(enabled("transport.go_punch", &m));
+    let ran = perform_from_menu("transport.go_punch", &mut m).unwrap();
+    assert_eq!(ran.focus, Some(FieldFocus::Punch));
+}
+
+#[test]
+fn locators_are_set_jumped_to_and_cleared() {
+    use vizdaw_app::commands::locator;
+    let (f, mut m) = demo();
+    is(
+        &failure(go("locator.go_3", &mut m)),
+        ErrorCode::Unavailable,
+        "Locator 3 is not set.",
+    );
+    f.set_transport(|t| t.tick = 12_345);
+    go("locator.set_3", &mut m).unwrap();
+    assert_eq!(m.layout().transport.locator(3), Some(12_345));
+    f.set_transport(|t| t.tick = 0);
+    go("locator.go_3", &mut m).unwrap();
+    assert_eq!(tick(&f), 12_345);
+    go("locator.clear_3", &mut m).unwrap();
+    assert_eq!(m.layout().transport.locator(3), None);
+    assert_eq!(locator("locator.clear_9"), Some(("clear", 9)));
+    assert_eq!(locator("locator.go_0"), Some(("go", 0)));
+    assert_eq!(locator("transport.stop"), None);
+    assert!(!m.can_undo(), "locators are no undo step");
+    // The menu's refusal shows in the status line.
+    perform_from_menu("locator.go_7", &mut m).unwrap_err();
+    assert_eq!(m.status(), Some("Locator 7 is not set."));
+}
+
+#[test]
+fn locator_refusals_menus_and_stop_match_their_run() {
+    let (f, mut m) = demo();
+    f.set_transport(|t| t.tick = 1 << 41);
+    is(
+        &failure(go("locator.set_2", &mut m)),
+        ErrorCode::Failed,
+        "Locator 2 cannot be set at this position.",
+    );
+    assert_eq!(m.layout().transport.locator(2), None);
+    let mut e = DocumentModel::new(Arc::new(FakeSession::new(vec![]))).unwrap();
+    assert_eq!(e.selected_seq(), None);
+    for id in ["locator.set_1", "locator.clear_1", "locator.go_1"] {
+        assert!(enabled(id, &e), "{id} runs without a sequence");
+    }
+    go("locator.set_1", &mut e).unwrap();
+    assert_eq!(e.layout().transport.locator(1), Some(0));
+    f.set_transport(|t| t.tick = 0);
+    m.poll_transport().unwrap();
+    f.set_transport(|t| t.playing = true);
+    go("transport.stop", &mut m).expect("not the stale cache");
+    assert!(!playing(&f));
+}
+
+#[test]
+fn the_new_bare_key_commands_wait_for_text_fields() {
+    let (_f, mut m) = demo();
+    m.begin_text_editing("x");
+    for id in [
+        "transport.overdub",
+        "transport.punch",
+        "transport.go_punch",
+        "locator.set_3",
+        "locator.go_1",
+        "locator.clear_1",
+    ] {
+        is(&failure(go(id, &mut m)), ErrorCode::Unavailable, TEXT);
+        assert!(!enabled(id, &m), "{id}");
+    }
+    assert!(m.layout().transport.overdub && !m.layout().transport.punch);
+    assert_eq!(m.layout().transport.locator(3), None);
+    m.end_text_editing("x");
+    go("locator.set_3", &mut m).unwrap();
+}
+
+// ---- Recording, the click and arming (slice 8a Task 4) ----
+
+fn armed_lanes(f: &FakeSession) -> Vec<bool> {
+    use vizdaw_app::DocSession;
+    f.lanes(3).unwrap().iter().map(|l| l.arm).collect()
+}
+
+/// Swift `recordArmMovesAndARefusalShows`: Arm Next moves the arm, one
+/// undo step; the core's refusal is `failed` in its words and shows in the
+/// status line.
+#[test]
+fn record_arm_moves_and_a_refusal_shows() {
+    let (f, mut m) = demo();
+    go("transport.arm_next", &mut m).unwrap();
+    assert_eq!(f.count("move_record_arm(3,true)"), 1);
+    assert_eq!(armed_lanes(&f), [true, false], "none armed: the first");
+    assert_eq!(m.undo_title(), "Undo Move Record Arm");
+    go("transport.arm_next", &mut m).unwrap();
+    assert_eq!(armed_lanes(&f), [false, true]);
+    let e = failure(go("transport.arm_next", &mut m));
+    is(
+        &e,
+        ErrorCode::Failed,
+        "there is no track after the armed one",
+    );
+    assert_eq!(m.status(), Some("there is no track after the armed one"));
+    go("transport.arm_previous", &mut m).unwrap();
+    assert_eq!(armed_lanes(&f), [true, false]);
+}
+
+/// e2e `records_audio_loop_takes_and_midi`: with none armed, ⌥⇧↑ arms the
+/// last track.
+#[test]
+fn arm_previous_with_none_armed_arms_the_last_track() {
+    let (f, mut m) = demo();
+    perform_from_menu("transport.arm_previous", &mut m).unwrap();
+    assert_eq!(armed_lanes(&f), [false, true]);
+}
+
+/// Swift `busyIsBusyAndAnOpenDragBlocksArming` (the arm half).
+#[test]
+fn busy_is_busy_and_an_open_drag_blocks_arming() {
+    let (f, mut m) = demo();
+    f.fail_next(
+        "move_record_arm",
+        VizError::Busy {
+            message: "The core is busy.".into(),
+        },
+    );
+    is(
+        &failure(go("transport.arm_next", &mut m)),
+        ErrorCode::Busy,
+        "The core is busy.",
+    );
+    assert!(m.begin_gesture("Move", vec![]));
+    is(
+        &failure(go("transport.arm_next", &mut m)),
+        ErrorCode::Unavailable,
+        "Finish the drag first.",
+    );
+    assert_eq!(f.count("move_record_arm(3,true)"), 0);
+}
+
+/// Arming needs a sequence; it does not wait for a text field (it has a
+/// chorded key), in the menu or on the channel.
+#[test]
+fn arming_needs_a_sequence_but_no_free_keyboard() {
+    let (f, mut m) = demo();
+    m.begin_text_editing("track-rename");
+    for id in ["transport.arm_next", "transport.arm_previous"] {
+        assert!(enabled(id, &m), "{id}");
+    }
+    go("transport.arm_next", &mut m).unwrap();
+    perform_from_menu("transport.arm_next", &mut m).unwrap();
+    assert_eq!(f.count("move_record_arm(3,true)"), 2);
+    m.end_text_editing("track-rename");
+    m.select(None);
+    for id in ["transport.arm_next", "transport.arm_previous"] {
+        assert!(!enabled(id, &m), "{id}");
+        is(
+            &failure(go(id, &mut m)),
+            ErrorCode::Unavailable,
+            "Select a sequence first.",
+        );
+    }
+}
+
+fn args(pairs: &[(&str, ArgValue)]) -> Vec<(String, ArgValue)> {
+    pairs
+        .iter()
+        .map(|(n, v)| ((*n).to_string(), v.clone()))
+        .collect()
+}
+
+/// Swift `clickTogglesAndShowsItsCheck`: Click's check follows the
+/// transport read; without `on` it flips, with `on` it sets, one session
+/// call each. It waits for no text field.
+#[test]
+fn click_toggles_and_shows_its_check() {
+    use vizdaw_app::commands::is_on;
+    use vizdaw_ffi::ClickRow;
+    use vizdaw_ffi::control::{ControlArg, ControlValue};
+    use vizdaw_ffi::session::click::ClickModeRow;
+    let (f, mut m) = demo();
+    assert!(!is_on("transport.click", &m));
+    assert!(enabled("transport.click", &m));
+    f.set_transport(|t| {
+        t.click = Some(ClickRow {
+            on: true,
+            level_db: -6.0,
+            mode: ClickModeRow::PlayAndRecord,
+        })
+    });
+    m.poll_transport().unwrap();
+    assert!(is_on("transport.click", &m), "the check follows the read");
+    f.set_click_row(ClickRow {
+        on: true,
+        level_db: -6.0,
+        mode: ClickModeRow::PlayAndRecord,
+    });
+    perform_from_menu("transport.click", &mut m).unwrap();
+    assert!(!is_on("transport.click", &m), "flipped off");
+    let last = f.clicks_run().last().cloned().unwrap();
+    assert_eq!((last.0.as_str(), last.1.len()), ("transport.click", 0));
+    m.begin_text_editing("track-rename");
+    assert!(enabled("transport.click", &m), "no text gate");
+    go("transport.click", &mut m).unwrap();
+    assert!(is_on("transport.click", &m), "flipped on");
+    run("transport.click", &on(true), &mut m).unwrap();
+    assert_eq!(
+        f.clicks_run().last().unwrap().1,
+        [ControlArg {
+            name: "on".into(),
+            value: ControlValue::Flag { value: true },
+        }],
+        "the channel's on is passed on"
+    );
+    f.fail_next(
+        "run_click",
+        VizError::Model {
+            message: "no".into(),
+        },
+    );
+    is(
+        &failure(go("transport.click", &mut m)),
+        ErrorCode::Failed,
+        "no",
+    );
+    assert!(m.alert.is_none(), "a refusal raises no alert");
+    assert!(m.begin_gesture("Move", vec![]));
+    is(
+        &failure(go("transport.click", &mut m)),
+        ErrorCode::Unavailable,
+        "Finish the drag first.",
+    );
+}
+
+/// Swift `clickLevelAndModeReachTheSession`: the level and mode go to the
+/// session with the channel's arguments; a key or menu item (no
+/// arguments) is unavailable and reaches no session.
+#[test]
+fn click_level_and_mode_reach_the_session() {
+    use vizdaw_ffi::session::click::ClickModeRow;
+    let (f, mut m) = demo();
+    let level = args(&[("level_db", ArgValue::Text("-12".into()))]);
+    run("transport.set_click_level", &level, &mut m).unwrap();
+    let last = f.clicks_run().last().cloned().unwrap();
+    assert_eq!(last.0, "transport.set_click_level");
+    assert_eq!(m.last_transport().click.map(|c| c.level_db), Some(-12.0));
+    let mode = args(&[("mode", ArgValue::Text("record_only".into()))]);
+    run("transport.set_click_mode", &mode, &mut m).unwrap();
+    assert_eq!(
+        m.last_transport().click.map(|c| c.mode),
+        Some(ClickModeRow::RecordOnly)
+    );
+    let runs = f.clicks_run().len();
+    assert_eq!(
+        failure(go("transport.set_click_level", &mut m)).code,
+        ErrorCode::Failed,
+        "the session refuses no level"
+    );
+    is(
+        &failure(perform_from_menu("transport.set_click_level", &mut m)),
+        ErrorCode::Unavailable,
+        "Click Level needs a level, such as -12 dB.",
+    );
+    is(
+        &failure(perform_from_menu("transport.set_click_mode", &mut m)),
+        ErrorCode::Unavailable,
+        "Click Mode needs a mode: play_and_record or record_only.",
+    );
+    assert_eq!(
+        m.status(),
+        Some("Click Mode needs a mode: play_and_record or record_only.")
+    );
+    assert_eq!(f.clicks_run().len(), runs, "a key reaches no session");
+}
+
+/// Record waits for a free keyboard (its key is bare R), but an open punch
+/// draft refuses it first, on every path.
+#[test]
+fn record_refuses_an_open_draft_before_the_text_gate() {
+    use vizdaw_app::transport_fields::TransportField;
+    let (f, mut m) = demo();
+    m.begin_text_editing("track-rename");
+    assert!(!enabled("transport.record", &m));
+    is(
+        &failure(go("transport.record", &mut m)),
+        ErrorCode::Unavailable,
+        TEXT,
+    );
+    m.end_text_editing("track-rename");
+    assert!(enabled("transport.record", &m));
+    m.set_record_popover(true);
+    m.punch_focus_changed(None, Some(TransportField::PunchIn));
+    m.set_punch_text(TransportField::PunchIn, "5");
+    assert!(
+        !m.transport_keys_enabled(),
+        "the punch field has the keyboard"
+    );
+    let draft = "Press Return to set the punch, or Esc to discard it.";
+    is(
+        &failure(go("transport.record", &mut m)),
+        ErrorCode::Failed,
+        draft,
+    );
+    is(
+        &failure(perform_from_menu("transport.record", &mut m)),
+        ErrorCode::Failed,
+        draft,
+    );
+    assert_eq!(m.status(), Some(draft));
+    assert_eq!(
+        m.punch_text(TransportField::PunchIn),
+        "5",
+        "the draft stays"
+    );
+    assert!(m.record().shows_popover());
+    assert_eq!(f.count("record(3)"), 0);
+    m.select(None);
+    assert!(!enabled("transport.record", &m));
+}
+
+/// Record over the channel records and, again, stops; keep and discard
+/// run only while loop recording, with no text gate.
+#[test]
+fn record_keep_and_discard_run_from_the_commands() {
+    let (f, _) = demo();
+    f.set_lanes(3, vec![armed_audio(30)]);
+    let mut m = DocumentModel::new(f.clone()).unwrap();
+    assert!(!enabled("record.keep_pass", &m));
+    is(
+        &failure(go("record.keep_pass", &mut m)),
+        ErrorCode::Unavailable,
+        "Keep and discard act on loop passes while recording.",
+    );
+    m.toggle_loop();
+    go("transport.record", &mut m).unwrap();
+    assert!(m.record().is_recording());
+    assert!(enabled("transport.record", &m));
+    m.begin_text_editing("track-rename");
+    assert!(enabled("record.keep_pass", &m) && enabled("record.discard_pass", &m));
+    f.next_pass();
+    go("record.keep_pass", &mut m).unwrap();
+    assert_eq!(f.count("keep_pass"), 1);
+    perform_from_menu("record.discard_pass", &mut m).unwrap();
+    assert_eq!(f.count("discard_pass"), 1);
+    m.end_text_editing("track-rename");
+    go("transport.record", &mut m).unwrap();
+    assert!(!m.record().is_recording());
+    assert_eq!(m.undo_title(), "Undo Record");
+}
+
+fn armed_audio(id: u64) -> vizdaw_ffi::snapshot::LaneRow {
+    let mut l = support::lane_row(id, "Vocal", false);
+    l.arm = true;
+    l.input = Some(vizdaw_ffi::edit::LaneInputRow::Audio {
+        first: 0,
+        stereo: false,
+        return_of: None,
+    });
+    l
+}
