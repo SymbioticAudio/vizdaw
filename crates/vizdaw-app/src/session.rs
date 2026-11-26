@@ -4,12 +4,13 @@ use std::sync::Arc;
 
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::automation::{
-    AutomationModeRow, AutomationStateRow, GestureHolderRow, GesturePhaseRow,
+    AutomationModeRow, AutomationSettingsRow, AutomationStateRow, GestureHolderRow, GesturePhaseRow,
 };
 use vizdaw_ffi::blocks::{BlockRow, BlockRule};
 use vizdaw_ffi::control::ControlArg;
-use vizdaw_ffi::edit::EditCommand;
+use vizdaw_ffi::edit::{EditCommand, MonitorModeRow};
 use vizdaw_ffi::events::{AutomationTargetRow, LaneEvents, MarkerRow, SequenceInfo};
+use vizdaw_ffi::host::InputDeviceRow;
 use vizdaw_ffi::live::InputChannelsRow;
 use vizdaw_ffi::mixer::{DestRow, MidiMixRow, MixerLevels, MixerSnapshot, SendRow, SwatchRow};
 use vizdaw_ffi::record::{RecordSpecRow, RecordStateRow, RecoveredFileRow};
@@ -941,6 +942,43 @@ pub trait CoreCalls: Send + Sync {
     /// listing): call it off the UI thread.
     fn midi_source_ports(&self) -> Vec<String> {
         vizdaw_ffi::host::midi_source_ports()
+    }
+    /// Software Monitoring on or off (core `set_software_monitoring`).
+    fn set_software_monitoring(&self, on: bool) {
+        vizdaw_ffi::audio::set_software_monitoring(on)
+    }
+    /// The I/O buffer size; `Busy` while recording, refused off the list.
+    fn set_io_buffer_frames(&self, frames: u32) -> Result<(), VizError> {
+        vizdaw_ffi::audio::set_io_buffer_frames(frames)
+    }
+    /// The RAM cache (MiB) and the disk read-ahead (s).
+    fn set_stream_settings(&self, cache_mb: u32, read_ahead_seconds: u32) -> Result<(), VizError> {
+        vizdaw_ffi::audio::set_stream_settings(cache_mb, read_ahead_seconds)
+    }
+    /// The monitor mode new tracks get.
+    fn set_default_monitor_mode(&self, mode: MonitorModeRow) {
+        vizdaw_ffi::audio::set_default_monitor_mode(mode)
+    }
+    /// The input device by UID, else name (`None`: "Same as output").
+    fn set_audio_input_device(&self, name: Option<String>) {
+        vizdaw_ffi::host::set_audio_input_device(name)
+    }
+    /// The record latency trim in frames.
+    fn set_record_latency_trim(&self, frames: i32) {
+        vizdaw_ffi::record::set_record_latency_trim(frames)
+    }
+    /// The bounce settings (the tail cap).
+    fn set_bounce_settings(&self, row: BounceSettingsRow) {
+        vizdaw_ffi::bounce::set_bounce_settings(row)
+    }
+    /// The input devices Settings › Audio offers, with their UIDs (a HAL
+    /// listing on macOS: call it off the UI thread; none elsewhere).
+    fn audio_input_device_list(&self) -> Vec<InputDeviceRow> {
+        vizdaw_ffi::host::audio_input_device_list()
+    }
+    /// The automation settings (after Write, return time, thinning).
+    fn set_automation_settings(&self, row: AutomationSettingsRow) -> Result<(), VizError> {
+        vizdaw_ffi::automation::set_automation_settings(row)
     }
     /// Turns `plugins` off in the app's plug-in settings (the Plugin
     /// Manager's catalog, saved), the crash question's "Disable <names>".

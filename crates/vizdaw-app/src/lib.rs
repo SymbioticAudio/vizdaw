@@ -5,6 +5,7 @@ pub mod aaf;
 pub mod alerts;
 pub mod arrangement;
 pub mod audio_format;
+pub mod audio_prefs;
 pub mod audition;
 pub mod banners;
 pub mod bar_items;

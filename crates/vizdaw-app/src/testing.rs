@@ -3757,6 +3757,8 @@ struct CoreState {
     midi_sources: Vec<String>,
     /// What `audio_settings` answers (`None`: the core's).
     audio_settings: Option<AudioSettingsRow>,
+    /// What `audio_input_device_list` answers (default none, as off macOS).
+    input_devices: Vec<vizdaw_ffi::host::InputDeviceRow>,
     /// Holds for the next reads of a source call, by call name (queued).
     holds: HashMap<String, VecDeque<Arc<ReadHold>>>,
     /// The thread each source read ran on, by call name, in order.
@@ -3832,6 +3834,17 @@ impl FakeCore {
             Some(e) => s.call_errors.insert(call.to_owned(), e),
             None => s.call_errors.remove(call),
         };
+    }
+
+    /// Makes the next `call` (a core setter such as `set_io_buffer_frames`)
+    /// refuse with `e` (queued): same as [`FakeCore::fail_next`].
+    pub fn refuse_next(&self, call: &str, e: VizError) {
+        self.fail_next(call, e);
+    }
+
+    /// What `audio_input_device_list` answers from now on.
+    pub fn set_input_devices(&self, devices: Vec<vizdaw_ffi::host::InputDeviceRow>) {
+        self.st().input_devices = devices;
     }
 
     /// Makes the next `call` answer `e` (queued).
@@ -3967,6 +3980,15 @@ impl FakeCore {
         }
     }
 
+    /// A fallible core setter: refused as scripted (a refusal is not
+    /// logged), else logged as `call(arg)`.
+    fn setter(&self, call: &str, arg: String) -> Result<(), VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, call)?;
+        s.calls.push(format!("{call}({arg})"));
+        Ok(())
+    }
+
     fn make(
         &self,
         call: &str,
@@ -4091,6 +4113,52 @@ impl CoreCalls for FakeCore {
     }
     fn midi_source_ports(&self) -> Vec<String> {
         self.source("midi_source_ports", |s| s.midi_sources.clone())
+    }
+    fn set_software_monitoring(&self, on: bool) {
+        self.st()
+            .calls
+            .push(format!("set_software_monitoring({on})"));
+    }
+    fn set_io_buffer_frames(&self, frames: u32) -> Result<(), VizError> {
+        self.setter("set_io_buffer_frames", format!("{frames}"))
+    }
+    fn set_stream_settings(&self, cache_mb: u32, read_ahead_seconds: u32) -> Result<(), VizError> {
+        self.setter(
+            "set_stream_settings",
+            format!("{cache_mb},{read_ahead_seconds}"),
+        )
+    }
+    fn set_default_monitor_mode(&self, mode: MonitorModeRow) {
+        self.st()
+            .calls
+            .push(format!("set_default_monitor_mode({mode:?})"));
+    }
+    fn set_audio_input_device(&self, name: Option<String>) {
+        self.st()
+            .calls
+            .push(format!("set_audio_input_device({name:?})"));
+    }
+    fn set_record_latency_trim(&self, frames: i32) {
+        self.st()
+            .calls
+            .push(format!("set_record_latency_trim({frames})"));
+    }
+    fn set_bounce_settings(&self, row: BounceSettingsRow) {
+        self.st()
+            .calls
+            .push(format!("set_bounce_settings({})", row.tail_cap_ms));
+    }
+    fn audio_input_device_list(&self) -> Vec<vizdaw_ffi::host::InputDeviceRow> {
+        self.source("audio_input_device_list", |s| s.input_devices.clone())
+    }
+    fn set_automation_settings(
+        &self,
+        row: vizdaw_ffi::automation::AutomationSettingsRow,
+    ) -> Result<(), VizError> {
+        self.setter(
+            "set_automation_settings",
+            format!("{:?},{},{:?}", row.after_write, row.return_ms, row.thinning),
+        )
     }
     fn disable_plugins(&self, plugins: &[PluginRefRow]) -> Result<(), VizError> {
         let mut s = self.st();
