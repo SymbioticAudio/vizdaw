@@ -476,7 +476,7 @@ pub const RECORD_OPTIONS_HELP: &str =
     "Replace or overdub, punch, loop, count-in, pre-roll and MIDI takes";
 
 impl Piece {
-    fn of(item: &TransportItem) -> Option<Piece> {
+    pub(crate) fn of(item: &TransportItem) -> Option<Piece> {
         Some(match item {
             TransportItem::Cluster => Piece::Cluster,
             TransportItem::Loop => Piece::Loop,

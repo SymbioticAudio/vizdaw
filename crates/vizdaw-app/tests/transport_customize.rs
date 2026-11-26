@@ -276,3 +276,63 @@ fn distinct_command_buttons() {
     assert_eq!(c.items()[1], command("window.mixer", None));
     assert_eq!(c.items()[2], command("file.new", None));
 }
+
+#[test]
+fn a_move_past_the_selection_keeps_it_on_its_item() {
+    // Selected: loop (index 2).
+    let mut c = model("cluster,click,loop,bar:large,tempo:large");
+    c.select(Some(2));
+    // An item before it moves after it.
+    c.move_to(1, 3);
+    assert_eq!(text(&c), "cluster,loop,bar:large,click,tempo:large");
+    assert_eq!(c.selected(), Some(1), "still on loop");
+    // An item after it moves before it.
+    c.move_to(3, 0);
+    assert_eq!(text(&c), "click,cluster,loop,bar:large,tempo:large");
+    assert_eq!(c.selected(), Some(2), "still on loop");
+    // A move that does not cross it leaves it.
+    c.move_to(3, 4);
+    assert_eq!(text(&c), "click,cluster,loop,tempo:large,bar:large");
+    assert_eq!(c.selected(), Some(2));
+    // The selected item itself still follows.
+    c.move_to(2, 4);
+    assert_eq!(c.selected(), Some(4));
+}
+
+#[test]
+fn an_insert_before_the_selection_shifts_it() {
+    let mut c = model("cluster,loop,bar:large");
+    c.select(Some(1));
+    assert!(c.insert(0, I::Space));
+    assert_eq!(text(&c), "space,cluster,loop,bar:large");
+    assert_eq!(c.selected(), Some(2), "still on loop");
+    assert!(c.insert(2, I::Separator), "at the selection: it moves on");
+    assert_eq!(c.selected(), Some(3));
+    assert!(c.insert(99, I::Space), "after it: it stays");
+    assert_eq!(c.selected(), Some(3));
+    assert!(!c.insert(0, I::Loop), "a refused insert changes nothing");
+    assert_eq!(c.selected(), Some(3));
+}
+
+#[test]
+fn drops_move_add_and_remove() {
+    use vizdaw_app::transport_customize::DragSource as D;
+    let mut c = model("cluster,loop,bar:large");
+    // A bar item dropped on slot 3 (the end) ends last.
+    assert!(c.drop_on_bar(D::Bar(1), 3));
+    assert_eq!(text(&c), "cluster,bar:large,loop");
+    // Dropped where it already is: nothing changed.
+    assert!(!c.drop_on_bar(D::Bar(1), 1));
+    assert!(!c.drop_on_bar(D::Bar(1), 2));
+    // A palette item is added before the slot.
+    let first = c.palette()[0].clone();
+    assert!(c.drop_on_bar(D::Palette(0), 1));
+    assert_eq!(c.items()[1], first);
+    assert!(!c.drop_on_bar(D::Palette(99), 0));
+    assert!(!c.drop_on_bar(D::Bar(99), 0));
+    // Back on the palette: removed, never the cluster.
+    assert!(c.drop_on_palette(D::Bar(1)));
+    assert!(!c.items().contains(&first));
+    assert!(!c.drop_on_palette(D::Bar(0)), "the cluster stays");
+    assert!(!c.drop_on_palette(D::Palette(0)));
+}

@@ -597,6 +597,13 @@ impl DocumentWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // View › Customize Transport Bar…: the sheet on this window (a
+        // document's or the mixer's); with no window open the menu has
+        // nothing to run it on, so it does nothing.
+        if action.id.as_ref() == "ui.customize_transport" {
+            crate::sheets::customize_transport::show(self, window, cx);
+            return;
+        }
         let doc = self.doc;
         let (result, lane) = self.app.update(cx, |s, cx| {
             cx.notify();

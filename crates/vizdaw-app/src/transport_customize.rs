@@ -45,6 +45,13 @@ fn built_ins() -> [TransportItem; 19] {
 /// One command of the picker: its id, its menu title and its menu.
 pub type CommandRow = (&'static str, &'static str, &'static str);
 
+/// Where a dragged chip came from: bar item `n` or palette item `n`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DragSource {
+    Bar(usize),
+    Palette(usize),
+}
+
 /// The draft of the bar and the item the inspector shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Customizer {
@@ -111,8 +118,15 @@ impl Customizer {
     /// would break a rule.
     pub fn insert(&mut self, at: usize, item: TransportItem) -> bool {
         let mut items = self.items.clone();
-        items.insert(at.min(items.len()), item);
-        self.take(items)
+        let at = at.min(items.len());
+        items.insert(at, item);
+        // The inspector stays on its item when one goes in before it.
+        let selected = self.selected.map(|s| if at <= s { s + 1 } else { s });
+        let took = self.take(items);
+        if took {
+            self.selected = selected;
+        }
+        took
     }
 
     /// Takes item `i` off the bar; false for the cluster or an index the
@@ -148,9 +162,47 @@ impl Customizer {
         let item = items.remove(from);
         let at = to.min(items.len());
         items.insert(at, item);
-        let follows = self.selected == Some(from);
+        // The selection stays on its item: it follows a move of its own,
+        // and shifts by one when the move crosses it.
+        let selected = self.selected.map(|s| {
+            if s == from {
+                at
+            } else {
+                let s = if from < s { s - 1 } else { s };
+                if at <= s { s + 1 } else { s }
+            }
+        });
         if self.take(items) {
-            self.selected = follows.then_some(at);
+            self.selected = selected;
+        }
+    }
+
+    /// A drop of `source` on the bar before slot `index` (the end appends):
+    /// a palette item is added, a bar item moved. False when nothing
+    /// changed.
+    pub fn drop_on_bar(&mut self, source: DragSource, index: usize) -> bool {
+        match source {
+            DragSource::Palette(n) => match self.palette().get(n).cloned() {
+                Some(item) => self.insert(index, item),
+                None => false,
+            },
+            DragSource::Bar(n) => {
+                if n >= self.items.len() {
+                    return false;
+                }
+                let before = self.items.clone();
+                self.move_to(n, if n < index { index - 1 } else { index });
+                self.items != before
+            }
+        }
+    }
+
+    /// A drop of `source` on the palette: a bar item is removed (never the
+    /// cluster).
+    pub fn drop_on_palette(&mut self, source: DragSource) -> bool {
+        match source {
+            DragSource::Bar(n) => self.remove(n),
+            DragSource::Palette(_) => false,
         }
     }
 

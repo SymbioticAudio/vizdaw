@@ -4,6 +4,7 @@
 pub mod aaf;
 pub(crate) mod audio_format;
 pub mod bounce;
+pub mod customize_transport;
 pub mod dawproject;
 pub mod export_midi;
 pub mod for_daw;
