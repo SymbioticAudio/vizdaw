@@ -70,6 +70,7 @@ pub struct PluginPrefs {
     bundled_eq_name: Option<String>,
     bundled_au_present: bool,
     install_destination: Option<String>,
+    problem: Option<String>,
 }
 
 /// The format's name in the stored choice and the command's prefix.
@@ -139,6 +140,7 @@ impl Default for PluginPrefs {
             bundled_eq_name: None,
             bundled_au_present: false,
             install_destination: None,
+            problem: None,
         }
     }
 }
@@ -173,6 +175,7 @@ impl PluginPrefs {
             bundled_eq_name: core.bundled_eq_name(),
             bundled_au_present: core.bundled_au_present(),
             install_destination: None,
+            problem: None,
         }
     }
 
@@ -180,6 +183,11 @@ impl PluginPrefs {
     /// folder); tests give a temporary folder.
     pub fn set_install_destination(&mut self, dest: Option<String>) {
         self.install_destination = dest;
+    }
+
+    /// Why the last save failed (the core has the change for this run).
+    pub fn problem(&self) -> Option<&str> {
+        self.problem.as_deref()
     }
 
     pub fn new_channel_eq(&self) -> bool {
@@ -239,7 +247,9 @@ impl PluginPrefs {
         core.set_new_channel_eq(on);
         self.new_channel_eq = on;
         self.note = core.default_eq_note();
-        prefs.set_raw(NEW_CHANNEL_EQ_KEY, Value::Bool(on))
+        let saved = prefs.set_raw(NEW_CHANNEL_EQ_KEY, Value::Bool(on));
+        self.problem = saved.clone().err();
+        saved
     }
 
     /// Chooses the EQ new channels get (`None`: Multi-Q, which stores
@@ -260,6 +270,7 @@ impl PluginPrefs {
             None => prefs.remove_raw(EQ_KEY),
         };
         self.default_eq = choice;
+        self.problem = saved.clone().err();
         saved
     }
 

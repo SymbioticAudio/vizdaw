@@ -188,7 +188,18 @@ impl SettingsWindow {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (items, face, on, switch_enabled, bundled, can_install, note, caption_text, status) = {
+        let (
+            items,
+            face,
+            on,
+            switch_enabled,
+            bundled,
+            can_install,
+            note,
+            caption_text,
+            status,
+            problem,
+        ) = {
             let p = &AppState::global(cx).read(cx).plugins;
             let items = eq_items(p, self.eqs_read);
             let face = items
@@ -208,6 +219,7 @@ impl SettingsWindow {
                     p.default_eq_name()
                 ),
                 p.status().map(str::to_owned),
+                p.problem().map(str::to_owned),
             )
         };
         let t = tokens();
@@ -265,6 +277,9 @@ impl SettingsWindow {
         }
         if let Some(s) = status {
             body = body.child(div().text_color(rgb(t.text_primary)).child(text(&s, scope)));
+        }
+        if let Some(p) = Self::problem_line(problem, scope) {
+            body = body.child(p);
         }
         body.into_any_element()
     }

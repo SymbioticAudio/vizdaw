@@ -171,6 +171,57 @@ fn the_switch_disables_the_picker(cx: &mut TestAppContext) {
     assert!(s.enabled("menu", PICKER));
 }
 
+/// Prefs whose file cannot be written (its folder is a file).
+fn unwritable(s: &mut Setup) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("vizdaw-plugins-tab-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let blocker = dir.join("blocker");
+    std::fs::write(&blocker, b"x").unwrap();
+    s.app.update(&mut s.cx, |a, _| {
+        let core = a.store.core();
+        let mut p = vizdaw_app::plugin_prefs::PluginPrefs::load(
+            &mut Prefs::at(blocker.join("prefs.json")),
+            core.as_ref(),
+        );
+        p.set_install_destination(Some(DEST.into()));
+        p.refresh(core.as_ref());
+        a.plugins = p;
+        a.prefs = Prefs::at(blocker.join("prefs.json"));
+    });
+    dir
+}
+
+fn problem(s: &mut Setup) -> Option<String> {
+    s.elements()
+        .into_iter()
+        .find(|e| e.role == "text" && e.value.as_deref() == Some("problem"))
+        .map(|e| e.label)
+}
+
+#[gpui::test]
+fn a_failed_write_shows_the_problem_line(cx: &mut TestAppContext) {
+    let mut s = setup(cx, |c| c.set_eq_choices(vec![gain()]));
+    let dir = unwritable(&mut s);
+    assert!(problem(&mut s).is_none());
+    s.click("checkbox", SWITCH);
+    let p = problem(&mut s).expect("the problem after the switch");
+    assert!(p.contains("could not be written"), "{p}");
+    // The core took it all the same.
+    assert_eq!(
+        s.find("checkbox", SWITCH).unwrap().value.as_deref(),
+        Some("off")
+    );
+    s.click("checkbox", SWITCH);
+    s.click("menu", PICKER);
+    s.click("menuitem", "Test Gain (CLAP)");
+    assert!(
+        problem(&mut s)
+            .expect("the problem after the pick")
+            .contains("could not be written")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[gpui::test]
 fn the_picker_offers_the_installed_effects_and_sets_the_choice(cx: &mut TestAppContext) {
     let mut s = setup(cx, |c| c.set_eq_choices(vec![gain()]));
