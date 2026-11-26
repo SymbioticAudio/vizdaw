@@ -233,3 +233,35 @@
   - "Theme styles in the mixer (label case, fonts, panel bands, knurled skirts, cap styles, tile)".
   - "User themes (folder, parser, watcher, Duplicate as File…, Show Themes Folder)".
 - [ ] Commit `docs: slice 9b checks, checklist and backlog`.
+
+## Outcome (2026-11-26)
+
+All seven tasks are done (commits on `next` from cc478b67 to the Outcome commit). Every window of the GPUI app draws from the current theme, one of the six built-ins. The theme is chosen in Settings › Appearance (six rows with swatches, the colour-bars switch, the caption, the problem line) or with `ui.theme`, and the change applies to every window at once. `state.get windows` reports it. Flat and Symbiotic draw square corners. A scan test keeps colour literals out of `crates/vizdaw-gpui/src`. `gpui_themes_and_the_strip_over_the_channel` ports every Swift step.
+
+Evidence:
+- vizdaw-app and vizdaw-gpui suites green on the Mac at each task, and the e2e green on the Mac in 9.5 s.
+- The controller checked the document window in all six themes and the Mix view in Console and Flat, using the app's offscreen screenshots.
+- Final review: ready after two contrast fixes, both made with six-theme tests (bcc3dd1d).
+
+### Rulings
+
+- Pre-flight: tokens.json is checked in as a copy of symbiotic-design 0.2.3, rather than taken as a git dependency. Cost: it must be re-copied by hand on each design bump.
+- Task 1 (implementer): colours are `Color { rgb, alpha }`, because the JSON mixes #RRGGBB and #RRGGBBAA.
+- Task 2 (implementer): the current theme lives in a thread-local slot that `tokens()` reads. The reviewer checked that every colour is read on the main thread. `windows.theme` reports the resolved id, as Swift did. `user.*` ids are refused until user themes exist.
+- Task 3 (implementer): the Settings and shell roots use `surface.window`, as Swift's `ThemedRoot` did. The sheet scrim is `meter.background` at 0.6; Swift had no equivalent. Menu hover uses `surface.raised`.
+- Task 3 fix round: the readouts take `readout.*`. Play, Record and destructive buttons show a tinted glyph or text on a normal face, as Swift did, instead of text on a state fill.
+- Task 4 (implementer, reviewer confirmed): a track-header colour bar was added, with Swift's geometry. The pane and mixer background is `surface.window`.
+- Task 4 fix round: the lit monitor button takes the key ink (`legend_on`). The controller checked this fix diff directly instead of sending it for a re-review; the final review then confirmed it.
+- Task 5 (implementer): the whole-`src` scan stands in for a separate `theme_scan.rs`. The caption reads "this Mac" on macOS and "this computer" elsewhere. A `ThemedCorners` trait applies square corners across 19 files.
+- Task 6: the controller restored the `Set Fader` undo check that the implementer had relaxed.
+- Final: `StripTokens::legend_on` now uses Swift's key-ink rule (the mixer toggles were 1.3–2.8:1 in the dark themes), and the selected Settings tab uses `accent.onAccent`.
+
+### Carried
+
+- The Linux cells (`ui.theme`, Settings: Appearance, the e2e) get ticked after Linux CI.
+- `controller-checks.md` "Themes (9b)" still needs an unlocked-screen pass: the Settings window, plug-in windows, menus and popovers in each theme.
+- The theme styles beyond corners, and user themes, are backlog rows for a later slice.
+
+### Deferred minors
+
+All are in the backlog row "GPUI slice 9b: review leftovers".
