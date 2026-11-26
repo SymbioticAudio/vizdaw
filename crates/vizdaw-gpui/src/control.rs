@@ -78,6 +78,7 @@ use vizdaw_app::commands::{
 };
 use vizdaw_app::key_prefs as keys_prefs;
 use vizdaw_app::step_entry::STEP_COMMANDS;
+use vizdaw_app::surface_commands::{self, SURFACE_COMMANDS};
 use vizdaw_app::{DocId, SaveAction};
 use vizdaw_ffi::control::{
     AlertRow, ControlResult, DetailRow, EditorStateRow, TransportMarksRow, result_json,
@@ -482,7 +483,21 @@ fn answer(command: &Command, cx: &mut App) -> Result<Value, ControlError> {
             if let Some(r) = app_wide(id, args, cx) {
                 return r;
             }
-            let entry = target(window.as_ref(), cx)?;
+            let entry = match target(window.as_ref(), cx) {
+                Ok(entry) => entry,
+                // With no document, `surface.inject` and the learns still
+                // check their arguments first (`M/SurfaceCommands.swift:102`).
+                Err(e)
+                    if window.is_none()
+                        && e.code == ErrorCode::NoDocument
+                        && SURFACE_COMMANDS.contains(&id.as_str()) =>
+                {
+                    let core = AppState::global(cx).read(cx).store.core();
+                    return surface_commands::run_surface(id, args, None, core.as_ref())
+                        .map(|_| Value::Null);
+                }
+                Err(e) => return Err(e),
+            };
             run_command(id, args, &entry, cx)
         }
         Command::StateGet {
@@ -538,6 +553,10 @@ fn answer(command: &Command, cx: &mut App) -> Result<Value, ControlError> {
             let entry = target(window.as_ref(), cx)?;
             record_state(*what, entry.doc, cx)
         }
+        Command::StateGet {
+            target: StateTarget::Surfaces,
+            window,
+        } => surfaces_state(window.as_ref(), cx),
         Command::StateGet { target, .. } => Err(not_yet(&format!(
             "state.get {}",
             format!("{target:?}").to_lowercase()
@@ -684,6 +703,19 @@ fn run_command(
         // or a background read is refused before it starts: nobody waits
         // for its reply.
         _ if files::DOC_IDS.contains(&id) => return files::run_now(id, args, entry, cx),
+        // `surface.inject` and the learns, in the window's document; they
+        // answer at once and raise no alert.
+        _ if SURFACE_COMMANDS.contains(&id) => {
+            let ran = app.update(cx, |s, cx| {
+                cx.notify();
+                let core = s.store.core();
+                s.store.with_document(doc, |d, _| {
+                    surface_commands::run_surface(id, args, Some(d), core.as_ref())
+                })
+            });
+            let ran = ran.ok_or_else(closed)??;
+            return Ok(ran_json(id, doc, entry, ran.undo, ran.status));
+        }
         "file.close" => {
             // Never asks (Swift `control_close_never_prompts`): the window
             // closes without its save prompt and the document goes, saved
@@ -820,7 +852,10 @@ fn app_wide(
     if files::APP_IDS.contains(&id) {
         return Some(files::run_app(id, args, cx));
     }
-    if !APP_COMMANDS.contains(&id) && !keys_prefs::KEYS_COMMANDS.contains(&id) {
+    if !APP_COMMANDS.contains(&id)
+        && !keys_prefs::KEYS_COMMANDS.contains(&id)
+        && !surface_commands::APP_WIDE.contains(&id)
+    {
         return None;
     }
     let app = AppState::global(cx);
@@ -833,6 +868,15 @@ fn app_wide(
             ran
         } else if id == "ui.theme" {
             s.run_ui_theme(args, cx)
+        } else if surface_commands::APP_WIDE.contains(&id) {
+            // `surface.add` and `surface.remove` change the app-wide
+            // surfaces; the pickers mark their ports again.
+            let core = s.store.core();
+            let ran = surface_commands::run_surface(id, args, None, core.as_ref());
+            if ran.is_ok() {
+                s.store.refresh_claimed_ports();
+            }
+            ran
         } else if keys_prefs::KEYS_COMMANDS.contains(&id) {
             keys_prefs::run_keys(id, args, &mut s.keys, &mut s.prefs)
         } else {
@@ -1040,6 +1084,37 @@ fn record_state(target: StateTarget, doc: DocId, cx: &mut App) -> Result<Value, 
         };
         Ok(result_json(&result))
     })
+}
+
+/// `state.get surfaces` (`S/ControlChannel.swift:438-449`): the named
+/// window's document's, or the front one's when no window is named, with
+/// what feedback sent. Unnamed with no document, the app-wide surfaces
+/// (`doc` null, no feedback); a named window without a document is
+/// `no_document`.
+fn surfaces_state(window: Option<&WindowRef>, cx: &App) -> Result<Value, ControlError> {
+    let entry = match (target(window, cx), window) {
+        (Ok(entry), _) => entry,
+        (Err(_), None) => {
+            let core = AppState::global(cx).read(cx).store.core();
+            return Ok(result_json(&ControlResult::Surfaces {
+                doc: None,
+                state: core.surfaces_state(),
+            }));
+        }
+        (Err(_), Some(_)) => {
+            return Err(ControlError::new(
+                ErrorCode::NoDocument,
+                "No document is open in that window.",
+            ));
+        }
+    };
+    let s = AppState::global(cx);
+    let s = s.read(cx);
+    let d = s.store.document(entry.doc).ok_or_else(closed)?;
+    Ok(result_json(&ControlResult::Surfaces {
+        doc: Some(doc_id(entry.doc)),
+        state: d.session().surface_state().map_err(read_error)?,
+    }))
 }
 
 /// A refused session read as the call's error: Busy is `busy`.

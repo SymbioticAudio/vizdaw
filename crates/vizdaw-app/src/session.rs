@@ -1090,9 +1090,6 @@ pub trait CoreCalls: Send + Sync {
             .map(|rows| crate::plugin_prefs::eq_choices_from(&rows))
             .unwrap_or_default()
     }
-    /// Turns `plugins` off in the app's plug-in settings (the Plugin
-    /// Manager's catalog, saved), the crash question's "Disable <names>".
-    /// Without a catalog: refused.
     /// Reads `surfaces.json` (at launch, on the UI thread, as Swift); a
     /// damaged file is kept aside and VizDAW starts with no surfaces.
     fn surfaces_load(&self) -> Result<(), VizError> {
@@ -1152,6 +1149,9 @@ pub trait CoreCalls: Send + Sync {
     fn learn_state(&self) -> LearnStateRow {
         vizdaw_ffi::surfaces::learn_state()
     }
+    /// Turns `plugins` off in the app's plug-in settings (the Plugin
+    /// Manager's catalog, saved), the crash question's "Disable <names>".
+    /// Without a catalog: refused.
     fn disable_plugins(&self, plugins: &[PluginRefRow]) -> Result<(), VizError> {
         let _ = plugins;
         Err(VizError::Model {

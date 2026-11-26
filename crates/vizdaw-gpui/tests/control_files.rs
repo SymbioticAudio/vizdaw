@@ -1128,7 +1128,7 @@ fn the_dawproject_return_prompt_is_answered_under_the_channel(cx: &mut TestAppCo
 #[gpui::test]
 fn the_file_commands_are_no_longer_unavailable(cx: &mut TestAppContext) {
     let s = setup(cx);
-    let e = call(&s, cx, "state.get", json!({"target": "surfaces"})).unwrap_err();
+    let e = call(&s, cx, "state.get", json!({"target": "audio_editor"})).unwrap_err();
     assert_eq!(e.code, ErrorCode::Unavailable);
     assert!(e.message.contains("slice 8a"), "{}", e.message);
     assert!(e.message.contains("file.import_*"), "{}", e.message);

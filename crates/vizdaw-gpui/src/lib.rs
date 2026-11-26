@@ -336,27 +336,44 @@ pub fn run() {
         }
         // The preferences under the launch home (a throwaway e2e home
         // keeps its own).
-        state.update(cx, |s, _| s.set_prefs(vizdaw_app::Prefs::open()));
-        // The saved key bindings, in the keys and the menus.
-        menus::rebind(cx);
-        // Before any document opens, so their plug-ins load.
-        if let Some(problem) = vizdaw_app::session::open_plugin_catalog() {
-            eprintln!("{problem}");
-        }
-        // The picker's sources, off the UI thread, for every document.
-        state.update(cx, |s, _| s.warm_sources());
-        // Before any document opens.
-        if let Some(path) = &options.control
-            && let Err(e) = control::start(path, cx)
-        {
-            eprintln!("{e}");
-            std::process::exit(2);
-        }
-        cx.activate(true);
-        if options.demo {
-            new_demo(cx);
-        } else {
-            new_document(cx);
-        }
+        let prefs = vizdaw_app::Prefs::open();
+        launch(&state, prefs, options.demo, cx, |cx| {
+            // Before any document opens, so their plug-ins load.
+            if let Some(problem) = vizdaw_app::session::open_plugin_catalog() {
+                eprintln!("{problem}");
+            }
+            // Before any document opens.
+            if let Some(path) = &options.control
+                && let Err(e) = control::start(path, cx)
+            {
+                eprintln!("{e}");
+                std::process::exit(2);
+            }
+            cx.activate(true);
+        });
     });
+}
+
+/// The launch's steps over the installed `state`, in order: the
+/// preferences; `surfaces.json` (after the preferences and before the
+/// first document, as Swift read it after setting the support folder,
+/// `S/VizDAWApp.swift:515-522`; the pickers then mark the surfaces'
+/// ports); the saved key bindings; `before_documents` (the plug-in
+/// catalog and the control channel); the pickers' sources, off the UI
+/// thread; then the first window, the demo when `demo`.
+pub fn launch(
+    state: &gpui::Entity<AppState>,
+    prefs: vizdaw_app::Prefs,
+    demo: bool,
+    cx: &mut App,
+    before_documents: impl FnOnce(&mut App),
+) -> Option<WindowHandle<DocumentWindow>> {
+    state.update(cx, |s, _| s.set_prefs(prefs));
+    state.update(cx, |s, _| s.load_surfaces());
+    // The saved key bindings, in the keys and the menus.
+    menus::rebind(cx);
+    before_documents(cx);
+    // The picker's sources, off the UI thread, for every document.
+    state.update(cx, |s, _| s.warm_sources());
+    if demo { new_demo(cx) } else { new_document(cx) }
 }

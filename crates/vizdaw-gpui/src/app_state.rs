@@ -408,6 +408,13 @@ impl AppState {
         }
     }
 
+    /// Reads `surfaces.json` at launch, on the UI thread as Swift did
+    /// (`surfaces_load`; Ruling 3), and marks the surfaces' ports in the
+    /// pickers.
+    pub fn load_surfaces(&mut self) {
+        self.store.load_surfaces();
+    }
+
     /// Reads the input picker's sources once, off the UI thread, for the
     /// documents opened from now on (the app at launch; Swift
     /// `warmSources`).

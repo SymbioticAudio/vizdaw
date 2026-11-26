@@ -5110,6 +5110,117 @@ fn gpui_themes_and_the_strip_over_the_channel() {
     app.quit();
 }
 
+/// The core's `surfaces.json` under the launch home (`vizctl` sets
+/// `HOME`; `core-ffi/src/recovery.rs:53-63`).
+fn surfaces_file(home: &std::path::Path) -> PathBuf {
+    let support = if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/VizDAW")
+    } else {
+        home.join(".local/share/vizdaw")
+    };
+    support.join("surfaces.json")
+}
+
+/// Review Focus 3: a damaged `surfaces.json` is kept aside at launch as
+/// `surfaces.json.bad`, the app starts with no surfaces and says why, and
+/// the next add saves a fresh file, which the next launch reads.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_a_damaged_surfaces_file_is_kept_aside() {
+    let home = temp_home();
+    let file = surfaces_file(home.path());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "{").unwrap();
+    let mut app = App::start(home.path(), false);
+    let st = app.call("state.get", json!({"target": "surfaces"}));
+    assert_eq!(st["surfaces"], json!([]), "{st}");
+    let problems = st["problems"].as_array().unwrap();
+    assert_eq!(problems.len(), 1, "{st}");
+    assert!(
+        problems[0].as_str().is_some_and(|p| p.starts_with(
+            "surfaces.json could not be read and was kept aside as surfaces.json.bad"
+        )),
+        "{st}"
+    );
+    assert!(
+        file.with_extension("json.bad").is_file(),
+        "the damaged file is kept"
+    );
+    assert!(!file.exists(), "and moved aside");
+    let r = app.command(
+        "surface.add",
+        json!({"type": "mcu", "input": "E2E In", "output": "E2E Out"}),
+    );
+    assert_eq!(r["status"], "surface 0", "{r}");
+    assert_eq!(
+        (&r["doc"], &r["window"]),
+        (&Value::Null, &Value::Null),
+        "{r}"
+    );
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap())
+        .expect("a fresh surfaces.json");
+    assert!(saved.is_object(), "{saved}");
+    app.quit();
+    // The next launch reads the saved MCU, with nothing to say.
+    let mut app = App::start(home.path(), false);
+    let st = app.call("state.get", json!({"target": "surfaces"}));
+    assert_eq!(st["surfaces"][0]["type"], "mcu", "{st}");
+    assert_eq!(st["problems"], json!([]), "{st}");
+    app.quit();
+}
+
+/// `surface.learn` and `surface.unlearn` over the channel, in the demo:
+/// the arguments are checked, the core refuses what it cannot learn, and
+/// a learn waits for its control (`state.get surfaces` `learning`).
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_midi_learn_over_the_channel() {
+    use core_control::ErrorCode;
+    let home = temp_home();
+    let (mut app, w) = start_demo(home.path());
+    let learn = |app: &mut App, params: Value| {
+        app.client.call(
+            "command.run",
+            json!({"id": "surface.learn", "params": params, "window": w}),
+            Duration::from_millis(WAIT_MS),
+        )
+    };
+    let code = |r: Result<Value, CallError>| match r {
+        Err(CallError::Reply(e)) => e.code,
+        other => panic!("expected a refusal, got {other:?}"),
+    };
+    assert_eq!(code(learn(&mut app, json!({}))), ErrorCode::InvalidParams);
+    assert_eq!(
+        code(learn(&mut app, json!({"command": "file.open"}))),
+        ErrorCode::Failed,
+        "the core refuses a command that asks for a dialog"
+    );
+    let r = learn(&mut app, json!({"command": "edit.undo"})).unwrap();
+    assert_eq!(r["command"], "surface.learn", "{r}");
+    let st = app.call("state.get", json!({"target": "surfaces", "window": w}));
+    assert_eq!(st["learning"], "edit.undo", "{st}");
+    let m = mixer_state(&mut app, &w);
+    let synth = m["strips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["kind_colour"] == "instrument")
+        .and_then(|s| s["id"].as_u64())
+        .unwrap_or_else(|| panic!("no instrument strip in {m}"));
+    learn(&mut app, json!({"target": format!("fader:{synth}")})).unwrap();
+    let st = app.call("state.get", json!({"target": "surfaces", "window": w}));
+    assert!(
+        st["learning"].is_string() && st["learning"] != "edit.undo",
+        "{st}"
+    );
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "surface.unlearn", "params": {"command": "edit.undo"}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::Failed, "nothing was learned: {e}");
+    app.quit();
+}
+
 /// The test VST3's `view` kind, drawing its X11 child (view flag `X11`).
 #[cfg(target_os = "linux")]
 #[test]

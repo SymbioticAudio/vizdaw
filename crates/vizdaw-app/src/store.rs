@@ -127,6 +127,9 @@ pub struct DocumentStore {
     /// The picker's sources as any document (or the launch warm-up) last
     /// read them: a new document's first picker lists them.
     input_sources: crate::lane_inputs::InputSources,
+    /// The surfaces' input ports, which reach no track (plan 5f-1 Ruling
+    /// 17): every document's picker marks them.
+    claimed_ports: Vec<String>,
 }
 
 impl DocumentStore {
@@ -166,6 +169,7 @@ impl DocumentStore {
             shift_held: Box::new(|| false),
             disable_plugins: Box::new(move |p| disabling.disable_plugins(p).is_ok()),
             input_sources: crate::lane_inputs::InputSources::default(),
+            claimed_ports: vec![],
         }
     }
 
@@ -236,6 +240,32 @@ impl DocumentStore {
         self.record_defaults = d;
     }
 
+    /// Reads `surfaces.json` (at launch, before the first document, on
+    /// the UI thread as Swift did, `S/VizDAWApp.swift:518-521`): a damaged
+    /// file is kept aside by the core, which starts with no surfaces.
+    /// Then the pickers mark the surfaces' ports.
+    pub fn load_surfaces(&mut self) {
+        if let Err(e) = self.core.surfaces_load() {
+            eprintln!("surfaces.json not read: {}", error_message(&e));
+        }
+        self.refresh_claimed_ports();
+    }
+
+    /// The surfaces' input ports, read again from the core's list (after
+    /// a surface is added or removed), for every document's picker.
+    pub fn refresh_claimed_ports(&mut self) {
+        let ports: Vec<String> = self
+            .core
+            .surface_list()
+            .into_iter()
+            .map(|r| r.input)
+            .collect();
+        for d in self.documents.values_mut() {
+            d.inputs.set_claimed_ports(ports.clone());
+        }
+        self.claimed_ports = ports;
+    }
+
     pub fn new_empty(&mut self) -> Option<DocId> {
         self.add("New Document Failed", |s| s.core.new_empty())
     }
@@ -254,6 +284,7 @@ impl DocumentStore {
             Ok(mut model) => {
                 model.apply_record_defaults(self.record_defaults);
                 model.inputs.attach(self.core.clone(), &self.input_sources);
+                model.inputs.set_claimed_ports(self.claimed_ports.clone());
                 let id = DocId(self.next_id);
                 self.next_id += 1;
                 self.documents.insert(id, model);
