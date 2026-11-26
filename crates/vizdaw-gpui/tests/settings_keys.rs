@@ -300,9 +300,10 @@ fn recording_cmd_w_binds_it_and_closes_nothing(cx: &mut TestAppContext) {
     assert!(s.open_windows());
     assert_eq!(s.chords("file.save"), ["⌘W"]);
     assert_eq!(s.chords("file.close"), Vec::<String>::new());
-    // Not recording any more: ⌘W closes the Settings window as always.
+    // Not recording any more: Close lost ⌘W (Save has it), so ⌘W no
+    // longer closes the Settings window.
     s.keys(&format!("{CMD}-w"));
-    assert!(s.handle().is_none());
+    assert!(s.handle().is_some(), "⌘W is Save now, not Close");
 }
 
 #[gpui::test]

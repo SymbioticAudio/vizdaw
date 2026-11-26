@@ -864,7 +864,7 @@ pub fn keystroke(chord: &Chord) -> Option<String> {
 /// `KeyBinding::new` wants a `&'static str` (`KeyBinding::load`, for
 /// dynamic text, wants an `App`). Keystrokes come from a small, bounded
 /// set (the registry's chords), so each is leaked once and reused.
-fn interned(s: String) -> &'static str {
+pub(crate) fn interned(s: String) -> &'static str {
     static SEEN: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
     let mut seen = SEEN
         .get_or_init(Default::default)
@@ -878,25 +878,78 @@ fn interned(s: String) -> &'static str {
     k
 }
 
-/// Slice 1's bindings, then one per chord of each document and transport
-/// command (a chord without a modifier only where [`UNMODIFIED_KEYS`]
-/// holds).
+/// The context a chord of a fixed-key command binds in: `base` (`None`:
+/// everywhere) for a chord with ⌘ or ⌃, and for a bare one (a bare key, ⇧
+/// or ⌥) [`UNMODIFIED_KEYS`], which waits while a text field types. A
+/// bare chord has no place in a window without those keys (`base` not the
+/// document window's): `None`.
+fn fixed_context(chord: &Chord, base: Option<&'static str>) -> Option<Option<&'static str>> {
+    if chord.mods & (COMMAND | CONTROL) != 0 {
+        Some(base)
+    } else if base.is_none() || base == Some(WINDOW_CONTEXT) {
+        Some(Some(UNMODIFIED_KEYS))
+    } else {
+        None
+    }
+}
+
+/// One binding per chord of command `id` for a fixed-key action.
+fn fixed_keys<A: Action>(
+    keys: &mut Vec<KeyBinding>,
+    keymap: &Keymap,
+    id: &str,
+    base: Option<&'static str>,
+    action: impl Fn() -> A,
+) {
+    for chord in keymap.chords(id) {
+        if bindings::key_name(chord.code).is_some_and(|n| n.starts_with("Keypad")) {
+            continue;
+        }
+        let Some(k) = keystroke(&chord) else { continue };
+        let Some(context) = fixed_context(&chord, base) else {
+            continue;
+        };
+        keys.push(KeyBinding::new(interned(k), action(), context));
+    }
+}
+
+/// Slice 1's bindings (New, Open, Save, Save As, Close, Play/Stop and
+/// Stop and Return from the keymap, so a rebind moves them; Quit and
+/// Settings are the app menu's own), then one per chord of each document
+/// and transport command (a chord without a modifier only where
+/// [`UNMODIFIED_KEYS`] holds).
 pub fn bindings(keymap: &Keymap) -> Vec<KeyBinding> {
     let mut keys = vec![
-        KeyBinding::new(secondary!("n"), NewDocument, None),
-        KeyBinding::new(secondary!("o"), OpenDocument, None),
         KeyBinding::new(secondary!("q"), Quit, None),
         KeyBinding::new(secondary!(","), OpenSettings, None),
-        KeyBinding::new(secondary!("w"), CloseWindow, Some(SETTINGS_WINDOW_CONTEXT)),
-        KeyBinding::new(secondary!("s"), Save, Some(WINDOW_CONTEXT)),
-        KeyBinding::new(secondary!("shift-s"), SaveAs, Some(WINDOW_CONTEXT)),
-        KeyBinding::new(secondary!("w"), CloseWindow, Some(WINDOW_CONTEXT)),
-        KeyBinding::new(secondary!("w"), CloseWindow, Some(PLUGIN_WINDOW_CONTEXT)),
-        // As the command registry binds them: `transport.play_stop` Space,
-        // `transport.stop` (stop and return) S.
-        KeyBinding::new("space", PlayStop, Some(UNMODIFIED_KEYS)),
-        KeyBinding::new("s", StopAndReturn, Some(UNMODIFIED_KEYS)),
     ];
+    fixed_keys(&mut keys, keymap, FILE_NEW, None, || NewDocument);
+    fixed_keys(&mut keys, keymap, FILE_OPEN, None, || OpenDocument);
+    for ctx in [
+        SETTINGS_WINDOW_CONTEXT,
+        WINDOW_CONTEXT,
+        PLUGIN_WINDOW_CONTEXT,
+    ] {
+        fixed_keys(&mut keys, keymap, FILE_CLOSE, Some(ctx), || CloseWindow);
+    }
+    fixed_keys(&mut keys, keymap, FILE_SAVE, Some(WINDOW_CONTEXT), || Save);
+    fixed_keys(
+        &mut keys,
+        keymap,
+        FILE_SAVE_AS,
+        Some(WINDOW_CONTEXT),
+        || SaveAs,
+    );
+    fixed_keys(&mut keys, keymap, PLAY_STOP, Some(WINDOW_CONTEXT), || {
+        PlayStop
+    });
+    fixed_keys(
+        &mut keys,
+        keymap,
+        STOP_AND_RETURN,
+        Some(WINDOW_CONTEXT),
+        || StopAndReturn,
+    );
     // The File items Swift binds from the keymap (⇧⌘I Import Audio…).
     for &id in FILE_BOUND {
         for chord in keymap.chords(id) {

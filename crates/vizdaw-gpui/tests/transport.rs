@@ -1642,3 +1642,121 @@ fn a_command_button_that_cannot_run_says_so(cx: &mut TestAppContext) {
         Some("Loop can't run from a button right now.")
     );
 }
+
+/// The platform's ⌘ in a keystroke string.
+const CMD: &str = if cfg!(target_os = "macos") {
+    "cmd"
+} else {
+    "ctrl"
+};
+
+impl Setup {
+    /// Binds `chord` to `id` as Settings › Keys does, and rebinds the
+    /// window and the menus.
+    fn rebind(&mut self, id: &str, chord: &str) {
+        self.cx.update(|_, cx| {
+            AppState::global(cx).update(cx, |s, _| {
+                let mut prefs = std::mem::replace(&mut s.prefs, vizdaw_app::Prefs::in_memory());
+                s.keys.record(id, chord, &mut prefs);
+                s.prefs = prefs;
+            });
+            vizdaw_gpui::menus::rebind(cx);
+        });
+        self.cx.run_until_parked();
+    }
+
+    fn reset_all_keys(&mut self) {
+        self.cx.update(|_, cx| {
+            AppState::global(cx).update(cx, |s, _| {
+                let mut prefs = std::mem::replace(&mut s.prefs, vizdaw_app::Prefs::in_memory());
+                s.keys.reset_all(&mut prefs);
+                s.prefs = prefs;
+            });
+            vizdaw_gpui::menus::rebind(cx);
+        });
+        self.cx.run_until_parked();
+    }
+
+    fn windows(&mut self) -> usize {
+        self.cx.cx.update(|cx| cx.windows().len())
+    }
+
+    /// The key the menus show for `id`.
+    fn menu_key(&mut self, id: &str) -> Option<String> {
+        use vizdaw_gpui::menus::ItemSpec;
+        fn find(items: &[ItemSpec], id: &str) -> Option<Option<String>> {
+            for i in items {
+                match i {
+                    ItemSpec::Command { id: i, keys, .. } if *i == id => return Some(keys.clone()),
+                    ItemSpec::Submenu { items, .. } => {
+                        if let Some(k) = find(items, id) {
+                            return Some(k);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        self.cx.update(|_, cx| {
+            let shown = vizdaw_gpui::menus::shown(cx).expect("menus shown");
+            shown
+                .menus
+                .iter()
+                .find_map(|m| find(&m.items, id))
+                .flatten()
+        })
+    }
+}
+
+#[gpui::test]
+fn rebinding_close_moves_its_key_everywhere(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    s.rebind("file.close", "⌥⌘J");
+    assert_eq!(
+        s.menu_key("file.close").as_deref(),
+        Some("⌥⌘J"),
+        "the menu shows the new key"
+    );
+    // The old key no longer closes the window.
+    s.keys(&format!("{CMD}-w"));
+    assert_eq!(s.windows(), 1, "the old key does nothing");
+    // The new one does.
+    s.keys(&format!("alt-{CMD}-j"));
+    assert_eq!(s.windows(), 0, "the new key closes");
+}
+
+#[gpui::test]
+fn reset_all_restores_close_and_play_stop_keys(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    s.rebind("file.close", "⌥⌘J");
+    s.rebind("transport.play_stop", "⌥⌘Y");
+    assert_eq!(s.menu_key("transport.play_stop").as_deref(), Some("⌥⌘Y"));
+    s.reset_all_keys();
+    assert_eq!(s.menu_key("file.close").as_deref(), Some("⌘W"));
+    s.keys("space");
+    assert!(s.with_doc(|d| d.is_playing()), "Space plays again");
+    s.keys("space");
+    s.keys(&format!("{CMD}-w"));
+    assert_eq!(s.windows(), 0, "⌘W closes again");
+}
+
+#[gpui::test]
+fn rebinding_play_stop_moves_it_off_space(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    s.rebind("transport.play_stop", "⌥⌘Y");
+    s.keys("space");
+    assert_eq!(s.fake.count("play(3)"), 0, "Space no longer plays");
+    s.keys(&format!("alt-{CMD}-y"));
+    assert_eq!(s.fake.count("play(3)"), 1, "the new key plays");
+}
+
+#[gpui::test]
+fn rebinding_fast_forward_moves_the_held_key(cx: &mut TestAppContext) {
+    let mut s = setup(cx, demo_fake());
+    s.rebind("transport.fast_forward", "M");
+    s.keys("shift-.");
+    assert!(s.fake.key_steps().is_empty(), "⇧. no longer steps");
+    s.keys("m");
+    assert_eq!(s.fake.key_steps(), vec![true], "the new key steps");
+}

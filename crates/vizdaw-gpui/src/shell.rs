@@ -23,6 +23,7 @@ use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use core_control::bindings::Keymap;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable,
@@ -1280,7 +1281,8 @@ impl DocumentWindow {
     /// ⇧. (Rewind and Fast Forward) step a bar per key-down and
     /// auto-repeat while the window has the keyboard.
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(forward) = held_key(&event.keystroke)
+        let held = held_key(&event.keystroke, self.app.read(cx).keys.keymap());
+        if let Some(forward) = held
             && window.focused(cx).is_none_or(|f| {
                 f == self.focus
                     || &f == self.arrangement.focus_handle()
@@ -1334,12 +1336,11 @@ impl DocumentWindow {
     }
 
     /// The held key is up: one landing if it stepped.
-    fn key_up(&mut self, event: &KeyUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn key_up(&mut self, _: &KeyUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.step_key_down = None;
-        let k = event.keystroke.key.as_str();
-        if matches!(k, "," | "." | "<" | ">") {
-            self.with_shuttle(cx, |sh, d| sh.key_up(d));
-        }
+        // Any key up ends a hold (a landing only if a key step happened):
+        // the held keys are whatever the keymap says.
+        self.with_shuttle(cx, |sh, d| sh.key_up(d));
     }
 
     pub fn play_stop(&mut self, _: &PlayStop, window: &mut Window, cx: &mut Context<Self>) {
@@ -2288,18 +2289,35 @@ fn seen_views(d: &DocumentModel) -> ViewLayouts {
     v
 }
 
-/// Rewind (false) or Fast Forward (true) for a held-key keystroke: ⇧, and
-/// ⇧. with no other modifier (a layout may report the shifted character).
-fn held_key(k: &Keystroke) -> Option<bool> {
+/// Rewind (false) or Fast Forward (true) for a held-key keystroke: a key
+/// the keymap gives `transport.rewind` or `transport.fast_forward` (⇧, and
+/// ⇧. by default; a layout may report the shifted character, `<` or `>`).
+fn held_key(k: &Keystroke, keymap: &Keymap) -> Option<bool> {
     let m = &k.modifiers;
-    if !m.shift || m.control || m.alt || m.platform || m.function {
-        return None;
-    }
-    match k.key.as_str() {
-        "," | "<" => Some(false),
-        "." | ">" => Some(true),
-        _ => None,
-    }
+    let pressed = (m.shift, m.control, m.alt, m.platform, m.function);
+    [
+        ("transport.rewind", false),
+        ("transport.fast_forward", true),
+    ]
+    .into_iter()
+    .find(|(id, _)| {
+        keymap.chords(id).iter().any(|chord| {
+            if chord.text().contains("Keypad") {
+                return false;
+            }
+            let Some(want) = crate::menus::keystroke(chord)
+                .and_then(|s| Keystroke::parse(crate::menus::interned(s)).ok())
+            else {
+                return false;
+            };
+            let w = &want.modifiers;
+            (w.shift, w.control, w.alt, w.platform, w.function) == pressed
+                && (want.key == k.key
+                    || (w.shift
+                        && matches!((want.key.as_str(), k.key.as_str()), (",", "<") | (".", ">"))))
+        })
+    })
+    .map(|(_, forward)| forward)
 }
 
 /// What `doc`'s bar draws, in its document window (`document_window`) or
