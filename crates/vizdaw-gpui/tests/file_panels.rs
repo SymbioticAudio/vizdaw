@@ -47,6 +47,7 @@ fn the_mac_open_panel_is_swifts_choose_project() {
             can_create_folders: false,
             packages_as_folders: false,
             prompt: "Open".into(),
+            title: None,
             message: Some(
                 "Choose a VizDAW project, a MIDI file, a DAWproject file or an AAF file".into()
             ),
@@ -453,4 +454,18 @@ fn a_panel_whose_window_closes_is_ended_and_the_flag_clears(cx: &mut TestAppCont
     assert_eq!(fake.rows(), vec!["3"]);
     // Another window closing later ends nothing more.
     assert_eq!(fake.ended.borrow().len(), 1);
+}
+
+#[test]
+fn a_panel_title_reaches_the_mac_panel_and_the_portal() {
+    use vizdaw_gpui::settings_window::EDITOR_PANEL;
+    let m = mac_panel(&EDITOR_PANEL, &PanelPlace::default());
+    assert_eq!(m.title.as_deref(), Some("Choose External Sample Editor"));
+    let p = portal_request(&EDITOR_PANEL, &PanelPlace::default());
+    assert_eq!(p.title, "Choose External Sample Editor");
+    // A panel with no title keeps its message as the portal's title.
+    assert_eq!(
+        mac_panel(&panels::OPEN_PROJECT, &PanelPlace::default()).title,
+        None
+    );
 }

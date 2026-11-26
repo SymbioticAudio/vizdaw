@@ -53,6 +53,7 @@ pub const AUTOMATION_HEIGHT: f32 = 300.;
 /// caption.
 pub const APPEARANCE_HEIGHT: f32 = 300.;
 /// The Keys tab's content width and height (Swift's frame, 720×520).
+pub use editing::EDITOR_PANEL;
 pub use keys::{KEYS_HEIGHT, KEYS_WIDTH};
 /// The Editing tab's content height: three sections, eleven rows.
 pub const EDITING_HEIGHT: f32 = 600.;

@@ -12,9 +12,9 @@ use std::rc::Rc;
 use gpui::{AnyElement, App, Context, IntoElement, ParentElement, Styled, Window, div, px};
 use vizdaw_app::Prefs;
 use vizdaw_app::editing_prefs::{
-    AMOUNT_MAX, AMOUNT_MIN, CROSSFADE_MAX, CROSSFADE_MIN, EDITOR_PANEL_MESSAGE, EditingPrefs,
-    NudgeSettings, NudgeTime, ROOT_NAMES, ScaleKind, TICKS_DEFAULT, TICKS_MAX, TICKS_MIN,
-    TICKS_STEP, ZERO_CROSSINGS_HELP, ZERO_CROSSINGS_TITLE, editor_display_name, ms_text,
+    AMOUNT_MAX, AMOUNT_MIN, CROSSFADE_MAX, CROSSFADE_MIN, EDITOR_PANEL_MESSAGE, EDITOR_PANEL_TITLE,
+    EditingPrefs, NudgeSettings, NudgeTime, ROOT_NAMES, ScaleKind, TICKS_DEFAULT, TICKS_MAX,
+    TICKS_MIN, TICKS_STEP, ZERO_CROSSINGS_HELP, ZERO_CROSSINGS_TITLE, editor_display_name, ms_text,
     ticks_text,
 };
 use vizdaw_app::editor::Division;
@@ -36,6 +36,7 @@ pub const EDITING_WIDTH: f32 = 460.;
 pub const EDITOR_PANEL: PanelSpec = PanelSpec {
     row: "editing-external-editor",
     kind: PanelKind::Open,
+    title: Some(EDITOR_PANEL_TITLE),
     prompt: "Choose",
     message: Some(EDITOR_PANEL_MESSAGE),
     types: if cfg!(target_os = "macos") {

@@ -40,6 +40,7 @@ pub const RESERVE_LABEL: &str = "Number keys always go to locators (step entry u
 pub const SAVE_KEYS: PanelSpec = PanelSpec {
     row: "keys-save",
     kind: PanelKind::Save,
+    title: None,
     prompt: "Save",
     message: None,
     types: &[],
@@ -54,6 +55,7 @@ pub const SAVE_KEYS: PanelSpec = PanelSpec {
 pub const LOAD_KEYS: PanelSpec = PanelSpec {
     row: "keys-load",
     kind: PanelKind::Open,
+    title: None,
     prompt: "Open",
     message: None,
     types: &[] as &[FileType],
