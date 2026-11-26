@@ -27,6 +27,7 @@ pub mod record_popover;
 pub mod region_drawing;
 pub mod registry;
 pub mod screenshot;
+pub mod settings_window;
 pub mod sheet_host;
 pub mod sheets;
 pub mod shell;
@@ -46,8 +47,8 @@ use vizdaw_app::{DocId, DocumentStore};
 
 pub use app_state::{AppState, WindowKind};
 pub use menus::{
-    AppFileCommand, CloseWindow, FileCommand, NewDemo, NewDocument, OpenDocument, PlayStop, Quit,
-    RunCommand, Save, SaveAs, StopAndReturn,
+    AppFileCommand, CloseWindow, FileCommand, NewDemo, NewDocument, OpenDocument, OpenSettings,
+    PlayStop, Quit, RunCommand, Save, SaveAs, StopAndReturn,
 };
 pub use shell::DocumentWindow;
 
@@ -77,6 +78,10 @@ pub fn install(store: DocumentStore, cx: &mut App) -> gpui::Entity<AppState> {
     });
     cx.on_action(|_: &OpenDocument, cx| prompt_open(cx));
     cx.on_action(|_: &Quit, cx| quit(cx));
+    // On a later turn: never inside the key's or the menu's own dispatch.
+    cx.on_action(|_: &OpenSettings, cx| {
+        cx.defer(|cx| settings_window::open_settings(None, cx));
+    });
     state
 }
 
