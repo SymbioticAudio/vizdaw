@@ -1,0 +1,1 @@
+`symbiotic-tokens.json`: a copy of `tokens/tokens.json` from symbiotic-design 0.2.3 (commit fe1e8fe), the owner's own design repo, MIT licence. `src/theme.rs` reads it. Do not edit it here; update it from the source repo.

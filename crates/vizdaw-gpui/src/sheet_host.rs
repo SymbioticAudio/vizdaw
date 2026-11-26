@@ -18,13 +18,14 @@
 //! ([`use_sheet_prompts`]: GPUI's own Linux prompt has no keys and no
 //! theme).
 
+use crate::appearance::ThemedCorners as _;
 use futures::channel::oneshot;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, AnyWindowHandle, App, AppContext, Context, Div, EventEmitter, FocusHandle,
     Focusable, InteractiveElement, IntoElement, KeyDownEvent, Keystroke, ParentElement,
     PromptButton, PromptHandle, PromptLevel, PromptResponse, Render, RenderablePromptHandle,
-    SharedString, Stateful, StatefulInteractiveElement, Styled, Window, div, px, rgb, rgba,
+    SharedString, Stateful, StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
 
 use crate::registry::RegistryScope;
@@ -40,12 +41,39 @@ pub fn sheet_owner(token: vizdaw_app::WindowToken) -> String {
 
 /// The card's width (Swift's sheets are about this wide).
 const CARD_WIDTH: f32 = 460.;
-/// The default button's colour.
-const DEFAULT_BUTTON: u32 = 0x3f5f8f;
-/// A destructive button's colour.
-const DESTRUCTIVE_BUTTON: u32 = 0x7a3434;
-/// The card's colour.
-const CARD: u32 = 0x2a2a32;
+
+/// The colours a sheet or alert card draws, all the current theme's.
+/// Swift's sheets and alerts use the system backgrounds, so the card is
+/// `surface.window` and its text `text.primary`; the default button takes
+/// the accent, a destructive one `state.error` text, and the dimmed document
+/// behind is `meter.background` (the one dark token every theme has) at
+/// 0.6.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CardColours {
+    pub background: u32,
+    pub text: u32,
+    pub border: u32,
+    pub default_button: u32,
+    pub default_button_text: u32,
+    /// A destructive button's text (Swift `role: .destructive`: red text,
+    /// the normal face).
+    pub destructive_text: u32,
+    pub scrim: gpui::Hsla,
+}
+
+/// The card's colours now (read at each draw, never kept).
+pub fn card_colours() -> CardColours {
+    let t = crate::appearance::current();
+    CardColours {
+        background: t.surface.window.rgb,
+        text: t.text.primary.rgb,
+        border: t.surface.separator.rgb,
+        default_button: t.accent.accent.rgb,
+        default_button_text: t.accent.on_accent.rgb,
+        destructive_text: t.state.error.rgb,
+        scrim: gpui::Hsla::from(rgb(t.meter.background.rgb)).opacity(0.6),
+    }
+}
 
 /// What a button does when a key presses it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,7 +412,7 @@ fn backdrop() -> Div {
         .left_0()
         .size_full()
         .occlude()
-        .bg(rgba(0x0000_0099))
+        .bg(card_colours().scrim)
         .flex()
         .items_center()
         .justify_center()
@@ -400,11 +428,11 @@ fn card() -> Div {
         .flex_col()
         .gap_3()
         .p_4()
-        .rounded_lg()
+        .round_lg()
         .border_1()
-        .border_color(rgb(colors::BORDER))
-        .bg(rgb(CARD))
-        .text_color(rgb(colors::TEXT))
+        .border_color(rgb(card_colours().border))
+        .bg(rgb(card_colours().background))
+        .text_color(rgb(card_colours().text))
         .text_sm()
         .cursor_default()
 }
@@ -435,10 +463,13 @@ fn buttons_row(
 }
 
 pub(crate) fn button_face(i: usize, b: &SheetButton) -> Stateful<Div> {
-    let background = match b.role {
-        ButtonRole::Default | ButtonRole::DefaultCancel if b.enabled => DEFAULT_BUTTON,
-        ButtonRole::Destructive if b.enabled => DESTRUCTIVE_BUTTON,
-        _ => colors::BUTTON,
+    let k = card_colours();
+    let (background, face_text) = match b.role {
+        ButtonRole::Default | ButtonRole::DefaultCancel if b.enabled => {
+            (k.default_button, k.default_button_text)
+        }
+        ButtonRole::Destructive if b.enabled => (colors::button(), k.destructive_text),
+        _ => (colors::button(), colors::text()),
     };
     div()
         .id(("sheet-button", i))
@@ -450,12 +481,12 @@ pub(crate) fn button_face(i: usize, b: &SheetButton) -> Stateful<Div> {
         .flex_none()
         .items_center()
         .justify_center()
-        .rounded_md()
+        .round_md()
         .bg(rgb(background))
         .text_color(rgb(if b.enabled {
-            colors::TEXT
+            face_text
         } else {
-            colors::DISABLED
+            colors::disabled()
         }))
         .when(b.enabled, |d| d.cursor_pointer())
         .when_some(b.help.clone(), with_help)
@@ -480,11 +511,11 @@ impl Render for HelpTip {
             .max_w(px(280.))
             .px_2()
             .py_1()
-            .rounded_md()
+            .round_md()
             .border_1()
-            .border_color(rgb(colors::BORDER))
-            .bg(rgb(CARD))
-            .text_color(rgb(colors::TEXT))
+            .border_color(rgb(colors::border()))
+            .bg(rgb(card_colours().background))
+            .text_color(rgb(colors::text()))
             .text_xs()
             .child(self.0.clone())
     }
@@ -625,7 +656,7 @@ impl Ask {
             .children(self.detail.as_ref().map(|d| {
                 div()
                     .relative()
-                    .text_color(rgb(colors::DIM))
+                    .text_color(rgb(colors::dim()))
                     .child(d.clone())
                     .child(scope.control("text", d, true))
             }))
@@ -795,8 +826,8 @@ impl Render for AskDialog {
             .justify_between()
             .gap_3()
             .p_4()
-            .bg(rgb(CARD))
-            .text_color(rgb(colors::TEXT))
+            .bg(rgb(card_colours().background))
+            .text_color(rgb(colors::text()))
             .text_sm()
             .child(self.ask.body(&mut scope.container()))
             .child(row)
@@ -934,8 +965,8 @@ impl Render for SheetDialog {
             .justify_between()
             .gap_3()
             .p_4()
-            .bg(rgb(CARD))
-            .text_color(rgb(colors::TEXT))
+            .bg(rgb(card_colours().background))
+            .text_color(rgb(colors::text()))
             .text_sm()
             .children(body)
             .child(row)

@@ -43,6 +43,7 @@
 //! shows. Between two reads a meter above silence asks for every frame
 //! and is drawn fallen by the time since the read (`level_at`).
 
+use crate::appearance::ThemedCorners as _;
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
@@ -1792,13 +1793,7 @@ impl Place<'_> {
             .top(px(top as f32))
             .w(px(StripLayout::WIDTH as f32))
             .h(px(self.grid.total as f32))
-            .child(
-                div()
-                    .absolute()
-                    .size_full()
-                    .rounded(px(PANEL_RADIUS))
-                    .bg(fill),
-            )
+            .child(div().absolute().size_full().round_px(PANEL_RADIUS).bg(fill))
     }
 }
 
@@ -1813,7 +1808,7 @@ pub(crate) fn edge(selected: bool) -> gpui::Div {
     div()
         .absolute()
         .size_full()
-        .rounded(px(PANEL_RADIUS))
+        .round_px(PANEL_RADIUS)
         .border(px(width))
         .border_color(rgb(edge))
 }
@@ -2150,11 +2145,12 @@ fn header(
         .as_ref()
         .map(|g| group_tag(view, s.id, g, w, scope, window, cx));
     at(x, y, w, h)
-        .child(
+        // Show channel colour bars (Swift `appearancePreferences.colourBars`).
+        .children(crate::appearance::colour_bars().then(|| {
             at(0., 0., w, StripLayout::COLOUR_BAR)
                 .rounded(px(t.radius))
-                .bg(s.bar),
-        )
+                .bg(s.bar)
+        }))
         .child(name_holder)
         .children(tag)
         .child(
@@ -3240,9 +3236,9 @@ impl MenuRowLook for gpui::Stateful<gpui::Div> {
     fn when_enabled(self, enabled: bool) -> Self {
         if enabled {
             self.cursor_pointer()
-                .hover(|s| s.bg(rgb(crate::transport_bar::colors::BUTTON)))
+                .hover(|s| s.bg(rgb(crate::transport_bar::colors::button())))
         } else {
-            self.text_color(rgb(crate::transport_bar::colors::DISABLED))
+            self.text_color(rgb(crate::transport_bar::colors::disabled()))
         }
     }
 }

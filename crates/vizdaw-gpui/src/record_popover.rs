@@ -14,6 +14,7 @@
 //! field holding the keyboard, so Record refuses and says why
 //! (`RecordModel::close_allowed`).
 
+use crate::appearance::ThemedCorners as _;
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -362,9 +363,9 @@ pub(crate) fn chevron(
     cx: &mut Context<DocumentWindow>,
 ) -> AnyElement {
     let bounds = popover.chevron.clone();
-    let button = face("record-options", "\u{2304}", true, colors::BUTTON)
+    let button = face("record-options", "\u{2304}", true, colors::button())
         .w(px(crate::transport_bar::CHEVRON))
-        .when(state.is_some(), |b| b.bg(rgb(colors::ON)))
+        .when(state.is_some(), |b| b.bg(rgb(colors::on())))
         .child(scope.control_with(
             "button",
             RECORD_OPTIONS,
@@ -429,12 +430,12 @@ fn panel(
         .gap_2()
         .p_3()
         .w(px(WIDTH))
-        .bg(rgb(colors::LIST))
+        .bg(rgb(colors::list()))
         .border_1()
-        .border_color(rgb(colors::BORDER))
-        .rounded_md()
+        .border_color(rgb(colors::border()))
+        .round_md()
         .shadow_md()
-        .text_color(rgb(colors::TEXT))
+        .text_color(rgb(colors::text()))
         .child(scope.this("group", RECORD_OPTIONS, on))
         .on_mouse_down_out(cx.listener(|this, e: &MouseDownEvent, window, cx| {
             this.press_outside_record_popover(e.position, window, cx)
@@ -447,7 +448,7 @@ fn panel(
             div()
                 .relative()
                 .text_xs()
-                .text_color(rgb(colors::DIM))
+                .text_color(rgb(colors::dim()))
                 .child(note)
                 .child(scope.control("text", note, true)),
         );
@@ -526,7 +527,7 @@ fn panel(
                 .flex_row()
                 .justify_between()
                 .child("Disk")
-                .child(div().text_color(rgb(colors::DIM)).child(t.clone()))
+                .child(div().text_color(rgb(colors::dim())).child(t.clone()))
                 .child(scope.control_with("text", "Disk", true, Some(t), false)),
         );
     }
@@ -553,7 +554,7 @@ fn mode(
                 ("record-mode", usize::from(is_replace)),
                 title,
                 enabled,
-                if on { colors::ON } else { colors::BUTTON },
+                if on { colors::on() } else { colors::button() },
             )
             .flex_1()
             .child(scope.control_selected("button", title, enabled, None, on))
@@ -583,7 +584,7 @@ fn toggle(
         .flex()
         .flex_row()
         .gap_2()
-        .when(!enabled, |d| d.text_color(rgb(colors::DISABLED)))
+        .when(!enabled, |d| d.text_color(rgb(colors::disabled())))
         .child(if on { "\u{2611}" } else { "\u{2610}" })
         .child(title)
         .child(scope.control_selected("checkbox", title, enabled, value, on))
@@ -619,7 +620,7 @@ fn stepper(
                 (title, usize::from(verb == "Increment")),
                 glyph,
                 can,
-                colors::BUTTON,
+                colors::button(),
             )
             .w(px(24.))
             .child(scope.control("button", &format!("{verb} {title}"), can))
@@ -657,17 +658,17 @@ fn punch_field(
         .relative()
         .flex_1()
         .h(px(24.))
-        .rounded_sm()
+        .round_sm()
         .overflow_hidden()
-        .text_color(rgb(0x000000));
+        .text_color(rgb(colors::field_text()));
     let boxed = if editing {
         boxed.child(input)
     } else {
         let shown = boxed
             .bg(rgb(if enabled {
-                colors::FIELD
+                colors::field()
             } else {
-                colors::DISABLED
+                colors::disabled()
             }))
             .px(px(4.))
             .flex()
@@ -696,7 +697,7 @@ fn punch_field(
         .child(
             div()
                 .text_xs()
-                .text_color(rgb(colors::DIM))
+                .text_color(rgb(colors::dim()))
                 .child(f.title()),
         )
         .child(boxed.child(scope.control_with(

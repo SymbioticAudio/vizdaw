@@ -18,6 +18,7 @@
 //! under the control channel, which cancels nothing. Merge and Cancel run
 //! once: the model ends the job and the hold before anything else.
 
+use crate::appearance::ThemedCorners as _;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 
@@ -47,10 +48,6 @@ const WIDTH: f32 = 520.;
 const LIST_MAX_HEIGHT: f32 = 220.;
 /// The conflict lines' most height (Swift `maxHeight: 240`).
 const CONFLICTS_MAX_HEIGHT: f32 = 240.;
-/// The Conflicts heading's colour (the theme's warning).
-const WARNING_TEXT: u32 = 0xd8a040;
-const SELECTED_ROW: u32 = 0x3f5f8f;
-
 /// What the sheet shows of the document, read once per frame.
 struct View {
     path: String,
@@ -159,13 +156,13 @@ fn snapshot_list(
                 .justify_between()
                 .px_2()
                 .py_1()
-                .rounded_sm()
+                .round_sm()
                 .cursor_pointer()
-                .when(on, |d| d.bg(rgb(SELECTED_ROW)))
+                .when(on, |d| d.bg(rgb(colors::on())))
                 .child(when(r.exported_at))
                 .child(
                     div()
-                        .text_color(rgb(colors::DIM))
+                        .text_color(rgb(colors::dim()))
                         .child(tracks_text(r.tracks)),
                 )
                 .child(list.control_selected("row", &snapshot_label(r), true, None, on))
@@ -190,9 +187,9 @@ fn snapshot_list(
                 .max_h(px(LIST_MAX_HEIGHT))
                 .overflow_y_scroll()
                 .border_1()
-                .border_color(rgb(colors::BORDER))
-                .rounded_md()
-                .bg(rgb(colors::LIST))
+                .border_color(rgb(colors::border()))
+                .round_md()
+                .bg(rgb(colors::list()))
                 .children(items)
                 .child(list.this("list", EXPORTS_LABEL, true))
                 .child(list.clip()),
@@ -209,13 +206,13 @@ fn preview_view(p: &MergePreviewRow, scope: &mut RegistryScope) -> AnyElement {
         .child(text(&p.summary, scope));
     if p.conflict_lines.is_empty() {
         return body
-            .child(text(NO_CONFLICTS, scope).text_color(rgb(colors::DIM)))
+            .child(text(NO_CONFLICTS, scope).text_color(rgb(colors::dim())))
             .into_any_element();
     }
     body = body.child(
         text(CONFLICTS, scope)
             .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(rgb(WARNING_TEXT)),
+            .text_color(rgb(colors::warning())),
     );
     let mut lines = scope.container();
     let items: Vec<AnyElement> = p
@@ -229,7 +226,7 @@ fn preview_view(p: &MergePreviewRow, scope: &mut RegistryScope) -> AnyElement {
                 .child(
                     div()
                         .flex_none()
-                        .text_color(rgb(WARNING_TEXT))
+                        .text_color(rgb(colors::warning()))
                         .child("\u{26A0}"),
                 )
                 .child(text(l, &mut lines).flex_1())
@@ -274,7 +271,7 @@ impl Sheet for MergeSheet {
             .child(
                 text(&file_name(&v.path), scope)
                     .text_xs()
-                    .text_color(rgb(colors::DIM))
+                    .text_color(rgb(colors::dim()))
                     .truncate(),
             );
         if v.waiting {

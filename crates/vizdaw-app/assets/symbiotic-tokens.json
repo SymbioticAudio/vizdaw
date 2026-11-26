@@ -1,0 +1,331 @@
+{
+  "description": "SymbioticAudio design tokens (MIT). Every theme defines every token and every style, and a group marked constant (brand) has the same values in every theme; a group or style marked since appeared in that version, and its Swift initialiser parameter has a default; tools/generate.py validates this file and writes the Swift code and tokens/contrast.md. Contrast pairs list where colours are actually used: accent-coloured text and links sit on panels, not on the window, so accent.accent is checked on surface.panel only.",
+  "tokens": {
+    "surface": {"kind": "color", "items": {
+      "window": "Window background behind everything",
+      "panel": "Panels, sidebars and editor backgrounds",
+      "raised": "Controls and cards raised above a panel",
+      "inset": "Recessed areas: fields, meters' wells, editor canvases",
+      "separator": "Hairlines between areas",
+      "selection": "Background of selected rows, regions and events",
+      "focusRing": "Keyboard focus ring"
+    }},
+    "text": {"kind": "color", "items": {
+      "primary": "Main text and icons",
+      "secondary": "Labels, captions and inactive icons",
+      "disabled": "Text and icons of disabled controls",
+      "inverse": "Text on selection or other strong backgrounds"
+    }},
+    "accent": {"kind": "color", "items": {
+      "accent": "Primary accent: default buttons, active toggles",
+      "onAccent": "Text and icons on the accent colour"
+    }},
+    "state": {"kind": "color", "items": {
+      "record": "Record and record-arm",
+      "play": "Play / running",
+      "solo": "Solo",
+      "mute": "Mute",
+      "warning": "Warnings and caution banners",
+      "error": "Errors and faults",
+      "offline": "Offline media or disconnected devices"
+    }},
+    "meter": {"kind": "color", "items": {
+      "background": "Meter well",
+      "low": "Level below -18 dBFS",
+      "mid": "Level from -18 to -6 dBFS",
+      "high": "Level from -6 to 0 dBFS",
+      "clip": "Clip / over indicator"
+    }},
+    "graph": {"kind": "color", "items": {
+      "line": "Waveform, envelope, LFO and scope line",
+      "fill": "Area under a graph line",
+      "grid": "Graph grid lines",
+      "handle": "Editable point or handle",
+      "handleSelected": "Selected point or handle"
+    }},
+    "control": {"kind": "color", "items": {
+      "gain": "Gain and level controls",
+      "eqLow": "Low EQ band",
+      "eqLowMid": "Low-mid EQ band",
+      "eqHighMid": "High-mid EQ band",
+      "eqHigh": "High EQ band",
+      "send": "Send levels",
+      "pan": "Pan and balance",
+      "dynamics": "Compressor, gate and limiter",
+      "filter": "Filter cutoff and resonance"
+    }},
+    "strip": {"kind": "color", "items": {
+      "channel": "Audio or MIDI channel strip",
+      "instrument": "Instrument strip",
+      "auxReturn": "Aux return strip",
+      "bus": "Bus / group strip",
+      "master": "Master strip"
+    }},
+    "brand": {"kind": "color", "constant": true, "items": {
+      "gold": "SymbioticAudio gold (symbioticaudio.org): section bars and highlights",
+      "cyan": "SymbioticAudio cyan (symbioticaudio.org): page background",
+      "cyanInk": "SymbioticAudio deep cyan (symbioticaudio.org): links and accents",
+      "ink": "SymbioticAudio ink (symbioticaudio.org): body text",
+      "paper": "SymbioticAudio paper (symbioticaudio.org): content background",
+      "rule": "SymbioticAudio rule (symbioticaudio.org): 1 px separators"
+    }},
+    "spacing": {"kind": "points", "items": {
+      "xxs": "Hairline gaps inside a control",
+      "xs": "Between a control and its label",
+      "s": "Between related controls",
+      "m": "Between groups in a panel",
+      "l": "Panel padding",
+      "xl": "Between panels"
+    }},
+    "radius": {"kind": "points", "items": {
+      "none": "Square corners",
+      "s": "Small controls and buttons",
+      "m": "Cards and fields",
+      "l": "Panels and sheets"
+    }},
+    "iconStroke": {"kind": "points", "items": {
+      "s16": "Icon stroke width at 16 pt",
+      "s24": "Icon stroke width at 24 pt",
+      "s32": "Icon stroke width at 32 pt"
+    }},
+    "type": {"kind": "font", "items": {
+      "caption": "Small captions and meter scales",
+      "body": "Body text and list rows",
+      "label": "Control labels",
+      "title": "Panel and section titles",
+      "display": "Large readouts such as the transport position"
+    }},
+    "knob": {"kind": "color", "since": "0.2.0", "items": {
+      "skirt": "Knob skirt: the ring around the cap",
+      "cap": "Knob cap",
+      "track": "Unlit part of the knob's value arc",
+      "indicator": "Knob pointer line"
+    }},
+    "fader": {"kind": "color", "since": "0.2.0", "items": {
+      "well": "Fader slot the cap travels in",
+      "scale": "Fader dB scale marks and numbers",
+      "capLine": "Centre line across the fader cap"
+    }},
+    "relief": {"kind": "color", "since": "0.2.0", "items": {
+      "highlight": "Shaded finish: light edge (clear in a flat theme)",
+      "shadow": "Shaded finish: dark edge and drop shadow (clear in a flat theme)",
+      "capTop": "Shaded finish: top of a knob or fader cap gradient (clear in a flat theme)",
+      "capBottom": "Shaded finish: bottom of a knob or fader cap gradient (clear in a flat theme)",
+      "panelTop": "Shaded finish: top of the strip panel gradient (clear in a flat theme)",
+      "panelBottom": "Shaded finish: bottom of the strip panel gradient (clear in a flat theme)"
+    }},
+    "swatch": {"kind": "color", "since": "0.2.0", "items": {
+      "red": "User strip colour and piano-roll lane colour: red",
+      "orange": "User strip colour and piano-roll lane colour: orange",
+      "yellow": "User strip colour and piano-roll lane colour: yellow",
+      "green": "User strip colour and piano-roll lane colour: green",
+      "teal": "User strip colour and piano-roll lane colour: teal",
+      "blue": "User strip colour and piano-roll lane colour: blue",
+      "purple": "User strip colour and piano-roll lane colour: purple",
+      "pink": "User strip colour and piano-roll lane colour: pink"
+    }},
+    "keys": {"kind": "color", "since": "0.2.0", "items": {
+      "white": "Piano white keys (white in every theme)",
+      "black": "Piano black keys and key labels (black in every theme)"
+    }},
+    "readout": {"kind": "color", "since": "0.2.0", "items": {
+      "background": "Number boxes and the transport display",
+      "text": "Text on a readout"
+    }},
+    "band": {"kind": "color", "since": "0.2.0", "items": {
+      "light": "Light section band behind a strip's sends (clear outside a banded theme)",
+      "dark": "Dark section band behind a strip's EQ, inserts and pan (clear outside a banded theme)"
+    }}
+  },
+  "styles": {
+    "labels": {"description": "How control labels and section heads are set: as written, lower case, capitals, or condensed bold capitals", "since": "0.2.0", "values": ["plain", "lowercase", "caps", "condensedCaps"]},
+    "legendFamily": {"description": "Font family of names, section legends, buttons and menus: the system sans, the system serif, or the technical sans (DIN Alternate, else the system sans)", "since": "0.2.0", "values": ["system", "serif", "technical"]},
+    "numberFamily": {"description": "Font family of scale marks, readouts and number boxes: the system sans or the system serif", "since": "0.2.0", "values": ["system", "serif"]},
+    "corners": {"description": "Corner shape of controls and panels: rounded by the radius tokens, or square", "since": "0.2.0", "values": ["rounded", "square"]},
+    "panelBands": {"description": "Strip sections on the plain panel, or on the band colours", "since": "0.2.0", "values": ["plain", "banded"]},
+    "knobSkirt": {"description": "Knob skirt drawn plain, or knurled from the relief tokens", "since": "0.2.0", "values": ["plain", "knurled"]},
+    "capStyle": {"description": "Fader cap drawn with an outline, flush with no outline or shadow, or ridged like hardware", "since": "0.2.0", "values": ["outlined", "flush", "ridged"]},
+    "tile": {"description": "Strip header as a thin colour bar, or as a full colour tile under the name", "since": "0.2.0", "values": ["bar", "tile"]}
+  },
+  "contrast": [
+    {"text": "text.primary", "on": "surface.window", "use": "body"},
+    {"text": "text.primary", "on": "surface.panel", "use": "body"},
+    {"text": "text.primary", "on": "surface.raised", "use": "body"},
+    {"text": "text.primary", "on": "surface.inset", "use": "body"},
+    {"text": "text.secondary", "on": "surface.window", "use": "body"},
+    {"text": "text.secondary", "on": "surface.panel", "use": "body"},
+    {"text": "text.inverse", "on": "surface.selection", "use": "body"},
+    {"text": "accent.onAccent", "on": "accent.accent", "use": "body"},
+    {"text": "accent.accent", "on": "surface.panel", "use": "body"},
+    {"text": "state.record", "on": "surface.panel", "use": "icon"},
+    {"text": "state.warning", "on": "surface.window", "use": "icon"},
+    {"text": "graph.line", "on": "surface.inset", "use": "icon"},
+    {"text": "meter.clip", "on": "meter.background", "use": "icon"},
+    {"text": "readout.text", "on": "readout.background", "use": "body"},
+    {"text": "keys.black", "on": "keys.white", "use": "body"}
+  ],
+  "themes": [
+    {
+      "id": "classic-light", "name": "Classic Light", "appearance": "light", "knobFinish": "flat", "placeholder": false,
+      "note": "Late-1990s desktop look: light neutral-grey chrome, white canvases, crisp dark outlines, primary state colours.",
+      "style": {"labels": "plain", "legendFamily": "system", "numberFamily": "system", "corners": "rounded", "panelBands": "plain", "knobSkirt": "plain", "capStyle": "outlined", "tile": "bar"},
+      "values": {
+        "surface": {"window": "#CFCFCF", "panel": "#DDDDDD", "raised": "#EEEEEE", "inset": "#FFFFFF", "separator": "#7A7A7A", "selection": "#1F4FBF", "focusRing": "#1F4FBF"},
+        "text": {"primary": "#000000", "secondary": "#3A3A3A", "disabled": "#8A8A8A", "inverse": "#FFFFFF"},
+        "accent": {"accent": "#1F4FBF", "onAccent": "#FFFFFF"},
+        "state": {"record": "#D81010", "play": "#00860A", "solo": "#F2CC00", "mute": "#EE7A00", "warning": "#9A5200", "error": "#B80000", "offline": "#7A7A7A"},
+        "meter": {"background": "#1A1A1A", "low": "#10C030", "mid": "#F0D800", "high": "#FF8A00", "clip": "#FF2A1A"},
+        "graph": {"line": "#1A1A1A", "fill": "#9FBDEB", "grid": "#00000030", "handle": "#000000", "handleSelected": "#1F4FBF"},
+        "control": {"gain": "#5E5E5E", "eqLow": "#C81818", "eqLowMid": "#D07000", "eqHighMid": "#1F8A1F", "eqHigh": "#1F5FD0", "send": "#7A2FBF", "pan": "#0070B8", "dynamics": "#B0006A", "filter": "#8A5A00"},
+        "strip": {"channel": "#8E8E8E", "instrument": "#3FA34A", "auxReturn": "#4A7AD0", "bus": "#C99400", "master": "#D04040"},
+        "brand": {"gold": "#EFC031", "cyan": "#00ACEC", "cyanInk": "#0077A8", "ink": "#222222", "paper": "#FFFFFF", "rule": "#000000"},
+        "spacing": {"xxs": 2, "xs": 4, "s": 8, "m": 12, "l": 16, "xl": 24},
+        "radius": {"none": 0, "s": 3, "m": 6, "l": 10},
+        "iconStroke": {"s16": 1.0, "s24": 1.2, "s32": 1.6},
+        "type": {"caption": {"size": 10, "weight": "regular"}, "body": {"size": 13, "weight": "regular"}, "label": {"size": 11, "weight": "medium"}, "title": {"size": 15, "weight": "semibold"}, "display": {"size": 24, "weight": "bold"}},
+        "knob": {"skirt": "#B8B8B8", "cap": "#F4F4F4", "track": "#8E8E8E", "indicator": "#000000"},
+        "fader": {"well": "#2E2E2E", "scale": "#2A2A2A", "capLine": "#000000"},
+        "relief": {"highlight": "#00000000", "shadow": "#00000000", "capTop": "#00000000", "capBottom": "#00000000", "panelTop": "#00000000", "panelBottom": "#00000000"},
+        "swatch": {"red": "#C8201C", "orange": "#C25A00", "yellow": "#8F7400", "green": "#25822E", "teal": "#00807E", "blue": "#1F5FD0", "purple": "#7A35C2", "pink": "#C0287A"},
+        "keys": {"white": "#FFFFFF", "black": "#1A1A1A"},
+        "readout": {"background": "#FFFFFF", "text": "#000000"},
+        "band": {"light": "#00000000", "dark": "#00000000"}
+      }
+    },
+    {
+      "id": "studio-dark", "name": "Studio Dark", "appearance": "dark", "knobFinish": "flat", "placeholder": false,
+      "note": "Modern dark studio look: charcoal panels, lighter raised controls, a cool blue accent, muted kind colours.",
+      "style": {"labels": "plain", "legendFamily": "system", "numberFamily": "system", "corners": "rounded", "panelBands": "plain", "knobSkirt": "plain", "capStyle": "outlined", "tile": "bar"},
+      "values": {
+        "surface": {"window": "#222327", "panel": "#2A2C30", "raised": "#393C42", "inset": "#1B1C1F", "separator": "#FFFFFF1F", "selection": "#2F66C2", "focusRing": "#6AA6FF"},
+        "text": {"primary": "#E8EAEE", "secondary": "#AEB3BC", "disabled": "#6A6F78", "inverse": "#FFFFFF"},
+        "accent": {"accent": "#6AA6FF", "onAccent": "#0D1117"},
+        "state": {"record": "#F25A55", "play": "#4CC771", "solo": "#F2C14E", "mute": "#F0903F", "warning": "#F2A43A", "error": "#F25A55", "offline": "#7E848E"},
+        "meter": {"background": "#121315", "low": "#3FC46A", "mid": "#E2C443", "high": "#F08C33", "clip": "#FF4747"},
+        "graph": {"line": "#93BCF2", "fill": "#4E82CC59", "grid": "#FFFFFF14", "handle": "#E8EAEE", "handleSelected": "#F2C14E"},
+        "control": {"gain": "#AEB3BC", "eqLow": "#E26E6A", "eqLowMid": "#E2A453", "eqHighMid": "#6CC68A", "eqHigh": "#6AAAE8", "send": "#A98CEA", "pan": "#5EBCD8", "dynamics": "#E27CB2", "filter": "#D2A462"},
+        "strip": {"channel": "#8B919B", "instrument": "#62A97B", "auxReturn": "#6F91D0", "bus": "#C9A253", "master": "#C96B6D"},
+        "brand": {"gold": "#EFC031", "cyan": "#00ACEC", "cyanInk": "#0077A8", "ink": "#222222", "paper": "#FFFFFF", "rule": "#000000"},
+        "spacing": {"xxs": 2, "xs": 4, "s": 8, "m": 12, "l": 16, "xl": 24},
+        "radius": {"none": 0, "s": 3, "m": 6, "l": 10},
+        "iconStroke": {"s16": 1.0, "s24": 1.2, "s32": 1.6},
+        "type": {"caption": {"size": 10, "weight": "regular"}, "body": {"size": 13, "weight": "regular"}, "label": {"size": 11, "weight": "medium"}, "title": {"size": 15, "weight": "semibold"}, "display": {"size": 24, "weight": "bold"}},
+        "knob": {"skirt": "#1D1F22", "cap": "#4B4F57", "track": "#3A3D44", "indicator": "#E8EAEE"},
+        "fader": {"well": "#131416", "scale": "#AEB3BC", "capLine": "#131416"},
+        "relief": {"highlight": "#00000000", "shadow": "#00000000", "capTop": "#00000000", "capBottom": "#00000000", "panelTop": "#00000000", "panelBottom": "#00000000"},
+        "swatch": {"red": "#E6625E", "orange": "#E8924C", "yellow": "#E3C455", "green": "#62C27C", "teal": "#4CC3BD", "blue": "#5F9DF0", "purple": "#A986EC", "pink": "#E57CBA"},
+        "keys": {"white": "#F4F4F4", "black": "#141416"},
+        "readout": {"background": "#1B1C1F", "text": "#E8EAEE"},
+        "band": {"light": "#00000000", "dark": "#00000000"}
+      }
+    },
+    {
+      "id": "flat", "name": "Flat", "appearance": "light", "knobFinish": "flat", "placeholder": false,
+      "note": "Tile-style and typographic: white canvas, square flat colour tiles, one calm bold accent, big light headings.",
+      "style": {"labels": "lowercase", "legendFamily": "system", "numberFamily": "system", "corners": "square", "panelBands": "plain", "knobSkirt": "plain", "capStyle": "flush", "tile": "tile"},
+      "values": {
+        "surface": {"window": "#FFFFFF", "panel": "#F0F0F0", "raised": "#E2E2E2", "inset": "#FFFFFF", "separator": "#D4D4D4", "selection": "#2F5FC4", "focusRing": "#2F5FC4"},
+        "text": {"primary": "#000000", "secondary": "#3D3D3D", "disabled": "#A0A0A0", "inverse": "#FFFFFF"},
+        "accent": {"accent": "#2F5FC4", "onAccent": "#FFFFFF"},
+        "state": {"record": "#E0201B", "play": "#2A8A2E", "solo": "#F2A900", "mute": "#1C9AD6", "warning": "#B05800", "error": "#C8101E", "offline": "#737373"},
+        "meter": {"background": "#1A1A1A", "low": "#3CB043", "mid": "#F2C200", "high": "#F07A00", "clip": "#E0201B"},
+        "graph": {"line": "#1A1A1A", "fill": "#2F5FC429", "grid": "#00000021", "handle": "#000000", "handleSelected": "#000000"},
+        "control": {"gain": "#555555", "eqLow": "#E0201B", "eqLowMid": "#E07000", "eqHighMid": "#2A8A2E", "eqHigh": "#1C7AD6", "send": "#7B3FC9", "pan": "#00A0A0", "dynamics": "#C2006E", "filter": "#A05A00"},
+        "strip": {"channel": "#0E6FC7", "instrument": "#2A8436", "auxReturn": "#7B3FC9", "bus": "#C24E00", "master": "#3D3D3D"},
+        "brand": {"gold": "#EFC031", "cyan": "#00ACEC", "cyanInk": "#0077A8", "ink": "#222222", "paper": "#FFFFFF", "rule": "#000000"},
+        "spacing": {"xxs": 2, "xs": 4, "s": 8, "m": 12, "l": 16, "xl": 24},
+        "radius": {"none": 0, "s": 0, "m": 0, "l": 0},
+        "iconStroke": {"s16": 1.6, "s24": 2.0, "s32": 2.4},
+        "type": {"caption": {"size": 10, "weight": "regular"}, "body": {"size": 13, "weight": "regular"}, "label": {"size": 11, "weight": "semibold"}, "title": {"size": 20, "weight": "light"}, "display": {"size": 42, "weight": "light"}},
+        "knob": {"skirt": "#E2E2E2", "cap": "#1A1A1A", "track": "#C8C8C8", "indicator": "#FFFFFF"},
+        "fader": {"well": "#262626", "scale": "#3D3D3D", "capLine": "#FFFFFF"},
+        "relief": {"highlight": "#00000000", "shadow": "#00000000", "capTop": "#00000000", "capBottom": "#00000000", "panelTop": "#00000000", "panelBottom": "#00000000"},
+        "swatch": {"red": "#CC1F1A", "orange": "#B34D00", "yellow": "#866A00", "green": "#2A7D2A", "teal": "#007A7E", "blue": "#1060C0", "purple": "#7036C0", "pink": "#C0106A"},
+        "keys": {"white": "#FFFFFF", "black": "#1A1A1A"},
+        "readout": {"background": "#E2E2E2", "text": "#000000"},
+        "band": {"light": "#00000000", "dark": "#00000000"}
+      }
+    },
+    {
+      "id": "console", "name": "Console", "appearance": "dark", "knobFinish": "shaded", "placeholder": false,
+      "note": "Realistic analogue console drawn in code: charcoal panels, grey and navy bands, knurled function-coloured knobs.",
+      "style": {"labels": "caps", "legendFamily": "technical", "numberFamily": "system", "corners": "rounded", "panelBands": "banded", "knobSkirt": "knurled", "capStyle": "ridged", "tile": "bar"},
+      "values": {
+        "surface": {"window": "#141619", "panel": "#2B2D31", "raised": "#45484E", "inset": "#0C0D0F", "separator": "#000000B3", "selection": "#D8B45C", "focusRing": "#E6BE5A"},
+        "text": {"primary": "#F2EEE2", "secondary": "#C4BFB1", "disabled": "#73767C", "inverse": "#141619"},
+        "accent": {"accent": "#E6BE5A", "onAccent": "#141619"},
+        "state": {"record": "#FF4A3D", "play": "#4FD474", "solo": "#F2D13A", "mute": "#E0443A", "warning": "#FFB442", "error": "#FF5144", "offline": "#80868E"},
+        "meter": {"background": "#07090B", "low": "#3DE46E", "mid": "#F4D83A", "high": "#FF9C30", "clip": "#FF3D30"},
+        "graph": {"line": "#A3C7EA", "fill": "#5C8EC259", "grid": "#FFFFFF14", "handle": "#F2EEE2", "handleSelected": "#F2D13A"},
+        "control": {"gain": "#C8342C", "eqLow": "#26282C", "eqLowMid": "#BDC1C6", "eqHighMid": "#A9ADB3", "eqHigh": "#2E3035", "send": "#2F9E4E", "pan": "#E8C22E", "dynamics": "#A8329E", "filter": "#6E7178"},
+        "strip": {"channel": "#B9BDC2", "instrument": "#959AA1", "auxReturn": "#3F78D0", "bus": "#C8342C", "master": "#E8C22E"},
+        "brand": {"gold": "#EFC031", "cyan": "#00ACEC", "cyanInk": "#0077A8", "ink": "#222222", "paper": "#FFFFFF", "rule": "#000000"},
+        "spacing": {"xxs": 2, "xs": 4, "s": 8, "m": 12, "l": 16, "xl": 24},
+        "radius": {"none": 0, "s": 3, "m": 6, "l": 10},
+        "iconStroke": {"s16": 1.0, "s24": 1.2, "s32": 1.6},
+        "type": {"caption": {"size": 10, "weight": "regular"}, "body": {"size": 13, "weight": "regular"}, "label": {"size": 11, "weight": "medium"}, "title": {"size": 15, "weight": "semibold"}, "display": {"size": 24, "weight": "bold"}},
+        "knob": {"skirt": "#1C1D20", "cap": "#5A5E66", "track": "#0C0D0F", "indicator": "#F7F7F2"},
+        "fader": {"well": "#020203", "scale": "#E2DDCF", "capLine": "#F7F7F2"},
+        "relief": {"highlight": "#FFFFFF59", "shadow": "#000000B3", "capTop": "#FFFFFF73", "capBottom": "#00000066", "panelTop": "#33363B", "panelBottom": "#25272B"},
+        "swatch": {"red": "#FF5D52", "orange": "#FF9A44", "yellow": "#F5D64A", "green": "#5ADC80", "teal": "#4FD7CF", "blue": "#66A9FF", "purple": "#B892FF", "pink": "#FF80C2"},
+        "keys": {"white": "#F2F0EA", "black": "#101113"},
+        "readout": {"background": "#07090B", "text": "#FFC24A"},
+        "band": {"light": "#3C3F45", "dark": "#1D2738"}
+      }
+    },
+    {
+      "id": "symbiotic", "name": "Symbiotic", "appearance": "light", "knobFinish": "flat", "placeholder": false,
+      "note": "SymbioticAudio's own flat blue-and-gold look, from the symbioticaudio.org site palette; not the default theme.",
+      "style": {"labels": "condensedCaps", "legendFamily": "system", "numberFamily": "system", "corners": "square", "panelBands": "plain", "knobSkirt": "plain", "capStyle": "outlined", "tile": "bar"},
+      "values": {
+        "surface": {"window": "#00ACEC", "panel": "#FFFFFF", "raised": "#EFEFEF", "inset": "#EAF6FC", "separator": "#000000", "selection": "#EFC031", "focusRing": "#0077A8"},
+        "text": {"primary": "#222222", "secondary": "#333333", "disabled": "#8C8C8C", "inverse": "#222222"},
+        "accent": {"accent": "#0077A8", "onAccent": "#FFFFFF"},
+        "state": {"record": "#C62828", "play": "#2E7D32", "solo": "#EFC031", "mute": "#0077A8", "warning": "#7A3300", "error": "#C62828", "offline": "#757575"},
+        "meter": {"background": "#222222", "low": "#43A047", "mid": "#EFC031", "high": "#F57C00", "clip": "#FF3B30"},
+        "graph": {"line": "#0077A8", "fill": "#00ACEC33", "grid": "#0000001A", "handle": "#222222", "handleSelected": "#E0A800"},
+        "control": {"gain": "#757575", "eqLow": "#C62828", "eqLowMid": "#E08A00", "eqHighMid": "#2E7D32", "eqHigh": "#0077A8", "send": "#6A3FA0", "pan": "#00ACEC", "dynamics": "#C2185B", "filter": "#B35900"},
+        "strip": {"channel": "#757575", "instrument": "#2E7D32", "auxReturn": "#6A3FA0", "bus": "#B08300", "master": "#0077A8"},
+        "brand": {"gold": "#EFC031", "cyan": "#00ACEC", "cyanInk": "#0077A8", "ink": "#222222", "paper": "#FFFFFF", "rule": "#000000"},
+        "spacing": {"xxs": 2, "xs": 4, "s": 8, "m": 12, "l": 16, "xl": 24},
+        "radius": {"none": 0, "s": 0, "m": 0, "l": 0},
+        "iconStroke": {"s16": 1.0, "s24": 1.2, "s32": 1.6},
+        "type": {"caption": {"size": 10, "weight": "regular"}, "body": {"size": 13, "weight": "regular"}, "label": {"size": 11, "weight": "bold"}, "title": {"size": 15, "weight": "semibold"}, "display": {"size": 24, "weight": "bold"}},
+        "knob": {"skirt": "#222222", "cap": "#FFFFFF", "track": "#4A4A4A", "indicator": "#222222"},
+        "fader": {"well": "#222222", "scale": "#222222", "capLine": "#222222"},
+        "relief": {"highlight": "#00000000", "shadow": "#00000000", "capTop": "#00000000", "capBottom": "#00000000", "panelTop": "#00000000", "panelBottom": "#00000000"},
+        "swatch": {"red": "#C62828", "orange": "#BF5F00", "yellow": "#9A7400", "green": "#2E7D32", "teal": "#00838F", "blue": "#0077A8", "purple": "#6A3FA0", "pink": "#C2185B"},
+        "keys": {"white": "#FFFFFF", "black": "#222222"},
+        "readout": {"background": "#EAF6FC", "text": "#222222"},
+        "band": {"light": "#00000000", "dark": "#00000000"}
+      }
+    },
+    {
+      "id": "eg13", "name": "EG13", "appearance": "light", "knobFinish": "flat", "placeholder": false,
+      "note": "From the EG13 synth: light grey sections on a mid-grey canvas, black ring knobs, teal and pink chips, lime readouts.",
+      "style": {"labels": "condensedCaps", "legendFamily": "system", "numberFamily": "system", "corners": "rounded", "panelBands": "plain", "knobSkirt": "plain", "capStyle": "outlined", "tile": "bar"},
+      "values": {
+        "surface": {"window": "#8C8C89", "panel": "#E6E6E6", "raised": "#D5D5D4", "inset": "#FFFFFF", "separator": "#00000033", "selection": "#006E78", "focusRing": "#006E78"},
+        "text": {"primary": "#141212", "secondary": "#252121", "disabled": "#7E7E7C", "inverse": "#FFFFFF"},
+        "accent": {"accent": "#006E78", "onAccent": "#FFFFFF"},
+        "state": {"record": "#C42C4E", "play": "#3A8A2A", "solo": "#AFD22C", "mute": "#00A1A7", "warning": "#5E3200", "error": "#C42C4E", "offline": "#6E6E6E"},
+        "meter": {"background": "#1E1E1E", "low": "#9CC428", "mid": "#E2D23A", "high": "#F08A2E", "clip": "#DA4061"},
+        "graph": {"line": "#232020", "fill": "#00A1A740", "grid": "#00000026", "handle": "#232020", "handleSelected": "#DA4061"},
+        "control": {"gain": "#FFFFFF", "eqLow": "#F4F4F4", "eqLowMid": "#E6E6E6", "eqHighMid": "#D8D8D8", "eqHigh": "#CACACA", "send": "#00A1A7", "pan": "#DA4061", "dynamics": "#BDBDBD", "filter": "#EFEFEF"},
+        "strip": {"channel": "#FFFFFF", "instrument": "#00A1A7", "auxReturn": "#DA4061", "bus": "#333333", "master": "#AFD22C"},
+        "brand": {"gold": "#EFC031", "cyan": "#00ACEC", "cyanInk": "#0077A8", "ink": "#222222", "paper": "#FFFFFF", "rule": "#000000"},
+        "spacing": {"xxs": 2, "xs": 4, "s": 8, "m": 12, "l": 16, "xl": 24},
+        "radius": {"none": 0, "s": 3, "m": 6, "l": 10},
+        "iconStroke": {"s16": 1.0, "s24": 1.2, "s32": 1.6},
+        "type": {"caption": {"size": 10, "weight": "regular"}, "body": {"size": 13, "weight": "regular"}, "label": {"size": 11, "weight": "medium"}, "title": {"size": 15, "weight": "semibold"}, "display": {"size": 24, "weight": "bold"}},
+        "knob": {"skirt": "#000000", "cap": "#FFFFFF", "track": "#2E2E2E", "indicator": "#000000"},
+        "fader": {"well": "#1E1E1E", "scale": "#232020", "capLine": "#000000"},
+        "relief": {"highlight": "#00000000", "shadow": "#00000000", "capTop": "#00000000", "capBottom": "#00000000", "panelTop": "#00000000", "panelBottom": "#00000000"},
+        "swatch": {"red": "#C42C4E", "orange": "#B04E00", "yellow": "#7E6E00", "green": "#4A7A10", "teal": "#007F8A", "blue": "#2F62B8", "purple": "#6E3FA8", "pink": "#A8287A"},
+        "keys": {"white": "#FFFFFF", "black": "#1A1A1A"},
+        "readout": {"background": "#383838", "text": "#AFD22C"},
+        "band": {"light": "#00000000", "dark": "#00000000"}
+      }
+    }
+  ]
+}

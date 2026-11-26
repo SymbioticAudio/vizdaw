@@ -19,7 +19,7 @@ use vizdaw_app::arrangement::{Point, Rect};
 use vizdaw_ffi::events::EventRow;
 use vizdaw_ffi::{OverviewRows, OverviewStateRow};
 
-use crate::arrangement::{canvas_rect, colors, hsla, paint_text};
+use crate::arrangement::{canvas_rect, colors, paint_text, with_alpha};
 
 /// The gain band's height along a region's top edge (Swift
 /// `RegionHandles.band`): the waveform starts under it.
@@ -268,7 +268,7 @@ pub(crate) fn paint_region(
 ) {
     let r = d.rect;
     let muted = d.row.mute;
-    let alpha = colors::REGION_ALPHA * if muted { colors::MUTED_ALPHA } else { 1. };
+    let region_fill = colors::region_fill().opacity(if muted { colors::MUTED_ALPHA } else { 1. });
     let body = canvas_rect(
         o,
         r.x + 0.5,
@@ -276,15 +276,16 @@ pub(crate) fn paint_region(
         (r.width - 1.).max(0.),
         (r.height - 1.).max(0.),
     );
-    window
-        .paint_quad(fill(body, hsla(colors::REGION_FILL, alpha)).corner_radii(px(colors::RADIUS)));
+    window.paint_quad(
+        fill(body, region_fill).corner_radii(px(crate::appearance::corner(colors::RADIUS))),
+    );
     let inside = canvas_rect(o, r.x, r.y, r.width, r.height);
     window.with_content_mask(Some(ContentMask { bounds: inside }), |window| {
         if d.offline {
             stroke(
                 &hatch_lines(r),
                 o,
-                hsla(colors::OFFLINE, colors::OFFLINE_HATCH_ALPHA),
+                with_alpha(colors::offline(), colors::OFFLINE_HATCH_ALPHA),
                 window,
             );
         } else {
@@ -293,7 +294,7 @@ pub(crate) fn paint_region(
                     rows,
                     *wave,
                     o,
-                    hsla(colors::REGION_LINE, colors::WAVEFORM_ALPHA),
+                    with_alpha(colors::region_line(), colors::WAVEFORM_ALPHA),
                     window,
                 );
             }
@@ -301,18 +302,18 @@ pub(crate) fn paint_region(
         stroke(
             &fade_lines(&d.row, r),
             o,
-            Hsla::from(gpui::rgb(colors::FADE_LINE)),
+            Hsla::from(gpui::rgb(colors::tick())),
             window,
         );
     });
     let (line, width) = if d.selected {
-        (colors::REGION_SELECTED, 2.)
+        (colors::region_selected(), 2.)
     } else {
-        (colors::REGION_LINE, 1.)
+        (colors::region_line(), 1.)
     };
     window.paint_quad(quad(
         body,
-        px(colors::RADIUS),
+        px(crate::appearance::corner(colors::RADIUS)),
         gpui::transparent_black(),
         px(width),
         gpui::rgb(line),
@@ -333,7 +334,7 @@ fn paint_pill(d: &RegionDraw, o: gpui::Point<Pixels>, window: &mut Window, cx: &
     let run = gpui::TextRun {
         len: OFFLINE.len(),
         font,
-        color: gpui::rgb(colors::OFFLINE).into(),
+        color: gpui::rgb(colors::offline()).into(),
         background_color: None,
         underline: None,
         strikethrough: None,
@@ -347,15 +348,15 @@ fn paint_pill(d: &RegionDraw, o: gpui::Point<Pixels>, window: &mut Window, cx: &
     window.paint_quad(
         fill(
             canvas_rect(o, pill.x, pill.y, pill.width, pill.height),
-            gpui::rgb(colors::OFFLINE_PILL),
+            gpui::rgb(colors::offline_pill()),
         )
-        .corner_radii(px(colors::RADIUS)),
+        .corner_radii(px(crate::appearance::corner(colors::RADIUS))),
     );
     paint_text(
         OFFLINE,
         o.x + px(pill.x + 4.),
         o.y + px(pill.y + 1.),
-        colors::OFFLINE,
+        colors::offline(),
         window,
         cx,
     );

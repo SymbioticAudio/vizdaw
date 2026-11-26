@@ -15,6 +15,7 @@
 //! store makes the project and its window opens. Never under the control
 //! channel.
 
+use crate::appearance::ThemedCorners as _;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, AppContext, Entity, InteractiveElement, IntoElement, ParentElement,
@@ -124,9 +125,9 @@ fn toggle(
         .items_center()
         .gap_2()
         .text_color(rgb(if enabled {
-            colors::TEXT
+            colors::text()
         } else {
-            colors::DISABLED
+            colors::disabled()
         }))
         .child(if on { "\u{2611}" } else { "\u{2610}" })
         .child(title.to_owned())
@@ -153,7 +154,7 @@ fn where_to(doc: DocId, fresh: bool, scope: &mut RegistryScope) -> AnyElement {
             .items_center()
             .gap_2()
             .cursor_pointer()
-            .text_color(rgb(colors::TEXT))
+            .text_color(rgb(colors::text()))
             .child(if on { "\u{25C9}" } else { "\u{25CB}" })
             .child(title.to_owned())
             .child(scope.control_selected("radio", title, true, None, on))
@@ -220,17 +221,17 @@ fn picker(
         .items_center()
         .justify_between()
         .gap_2()
-        .rounded_md()
+        .round_md()
         .border_1()
-        .border_color(rgb(colors::BORDER))
-        .bg(rgb(colors::BUTTON))
+        .border_color(rgb(colors::border()))
+        .bg(rgb(colors::button()))
         .text_color(rgb(if enabled {
-            colors::TEXT
+            colors::text()
         } else {
-            colors::DISABLED
+            colors::disabled()
         }))
         .child(div().overflow_hidden().child(chosen.clone()))
-        .child(div().text_color(rgb(colors::DIM)).child("\u{25BE}"))
+        .child(div().text_color(rgb(colors::dim())).child("\u{25BE}"))
         .child(scope.control_with("menu", &label, enabled, Some(&chosen), false))
         .when(enabled, |d| {
             d.cursor_pointer().on_click(move |_, window, cx| {
@@ -251,7 +252,7 @@ fn picker(
                 .px_3()
                 .py_1()
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(colors::BUTTON)))
+                .hover(|s| s.bg(rgb(colors::button())))
                 .child(title.clone())
                 .child(scope.control_selected("menuitem", title, true, None, dest == c.dest))
                 .on_click(move |_, window, cx| {
@@ -275,10 +276,10 @@ fn picker(
                             .flex_col()
                             .min_w(px(PICKER_WIDTH))
                             .py_1()
-                            .bg(rgb(colors::LIST))
+                            .bg(rgb(colors::list()))
                             .border_1()
-                            .border_color(rgb(colors::BORDER))
-                            .rounded_md()
+                            .border_color(rgb(colors::border()))
+                            .round_md()
                             .children(rows),
                     ),
                 )
@@ -311,10 +312,14 @@ impl Sheet for ImportMidiSheet {
             .flex_col()
             .gap_2()
             .child(text(IMPORT_TITLE, scope).font_weight(gpui::FontWeight::BOLD))
-            .child(text(&summary, scope).text_xs().text_color(rgb(colors::DIM)))
+            .child(
+                text(&summary, scope)
+                    .text_xs()
+                    .text_color(rgb(colors::dim())),
+            )
             .child(where_to(doc, fresh, scope));
         if m.choices.is_empty() {
-            body = body.child(text(NO_NOTES, scope).text_color(rgb(colors::DIM)));
+            body = body.child(text(NO_NOTES, scope).text_color(rgb(colors::dim())));
         } else {
             let heading = if fresh {
                 NEW_PROJECT_CHANNELS
@@ -342,7 +347,7 @@ impl Sheet for ImportMidiSheet {
                         .child(
                             text(&notes, &mut row)
                                 .text_xs()
-                                .text_color(rgb(colors::DIM)),
+                                .text_color(rgb(colors::dim())),
                         )
                         .child(div().flex_1())
                         .child(picker(
@@ -365,8 +370,8 @@ impl Sheet for ImportMidiSheet {
                     .h(px(LIST_HEIGHT))
                     .overflow_y_scroll()
                     .border_1()
-                    .border_color(rgb(colors::BORDER))
-                    .rounded_md()
+                    .border_color(rgb(colors::border()))
+                    .round_md()
                     .px_2()
                     .child(div().flex().flex_col().children(rows))
                     .child(clip),

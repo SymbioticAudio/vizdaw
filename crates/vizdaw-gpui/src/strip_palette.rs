@@ -7,6 +7,7 @@
 //! colour, which only the colour bar takes.
 
 use gpui::{Rgba, rgb};
+use vizdaw_app::theme::{Theme, themes};
 use vizdaw_ffi::automation::AutomationModeRow;
 use vizdaw_ffi::edit::MonitorModeRow;
 use vizdaw_ffi::mixer::{StripColourRow, StripRow, SwatchRow};
@@ -57,6 +58,7 @@ pub struct StripTokens {
     pub surface_separator: u32,
     pub focus_ring: u32,
     pub accent: u32,
+    pub on_accent: u32,
     pub text_primary: u32,
     pub text_secondary: u32,
     pub text_inverse: u32,
@@ -73,7 +75,8 @@ pub struct StripTokens {
     pub radius: f32,
 }
 
-/// Classic Light, the default theme.
+/// Classic Light, the default theme, as written by hand before the theme
+/// table (a test holds `from_theme` to it).
 pub const CLASSIC_LIGHT: StripTokens = StripTokens {
     strip_channel: 0x8E8E8E,
     strip_instrument: 0x3FA34A,
@@ -110,6 +113,7 @@ pub const CLASSIC_LIGHT: StripTokens = StripTokens {
     surface_separator: 0x7A7A7A,
     focus_ring: 0x1F4FBF,
     accent: 0x1F4FBF,
+    on_accent: 0xFFFFFF,
     text_primary: 0x000000,
     text_secondary: 0x3A3A3A,
     text_inverse: 0xFFFFFF,
@@ -124,9 +128,16 @@ pub const CLASSIC_LIGHT: StripTokens = StripTokens {
     radius: 3.,
 };
 
-/// The theme the strips draw in (the themes slice makes it a choice).
+/// The strip tokens of the six themes, in `themes()` order.
+fn all_tokens() -> &'static [StripTokens] {
+    static TABLE: std::sync::OnceLock<Vec<StripTokens>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| themes().iter().map(StripTokens::from_theme).collect())
+}
+
+/// The tokens of the theme the windows draw in now (see
+/// [`crate::appearance`]).
 pub fn tokens() -> &'static StripTokens {
-    &CLASSIC_LIGHT
+    &all_tokens()[crate::appearance::current_index()]
 }
 
 /// What a knob controls: it takes its colour from the function.
@@ -138,6 +149,60 @@ pub enum KnobFunction {
 }
 
 impl StripTokens {
+    /// The tokens `t` gives the strips.
+    pub fn from_theme(t: &Theme) -> StripTokens {
+        StripTokens {
+            strip_channel: t.strip.channel.rgb,
+            strip_instrument: t.strip.instrument.rgb,
+            strip_aux_return: t.strip.aux_return.rgb,
+            strip_bus: t.strip.bus.rgb,
+            strip_master: t.strip.master.rgb,
+            meter_background: t.meter.background.rgb,
+            meter_low: t.meter.low.rgb,
+            meter_mid: t.meter.mid.rgb,
+            meter_high: t.meter.high.rgb,
+            meter_clip: t.meter.clip.rgb,
+            state_record: t.state.record.rgb,
+            state_play: t.state.play.rgb,
+            state_solo: t.state.solo.rgb,
+            state_mute: t.state.mute.rgb,
+            state_warning: t.state.warning.rgb,
+            state_error: t.state.error.rgb,
+            state_offline: t.state.offline.rgb,
+            control_gain: t.control.gain.rgb,
+            control_pan: t.control.pan.rgb,
+            control_send: t.control.send.rgb,
+            fader_well: t.fader.well.rgb,
+            fader_scale: t.fader.scale.rgb,
+            fader_cap_line: t.fader.cap_line.rgb,
+            knob_skirt: t.knob.skirt.rgb,
+            knob_cap: t.knob.cap.rgb,
+            knob_track: t.knob.track.rgb,
+            knob_indicator: t.knob.indicator.rgb,
+            readout_background: t.readout.background.rgb,
+            readout_text: t.readout.text.rgb,
+            surface_panel: t.surface.panel.rgb,
+            surface_raised: t.surface.raised.rgb,
+            surface_inset: t.surface.inset.rgb,
+            surface_separator: t.surface.separator.rgb,
+            focus_ring: t.surface.focus_ring.rgb,
+            accent: t.accent.accent.rgb,
+            on_accent: t.accent.on_accent.rgb,
+            text_primary: t.text.primary.rgb,
+            text_secondary: t.text.secondary.rgb,
+            text_inverse: t.text.inverse.rgb,
+            swatch_red: t.swatch.red.rgb,
+            swatch_orange: t.swatch.orange.rgb,
+            swatch_yellow: t.swatch.yellow.rgb,
+            swatch_green: t.swatch.green.rgb,
+            swatch_teal: t.swatch.teal.rgb,
+            swatch_blue: t.swatch.blue.rgb,
+            swatch_purple: t.swatch.purple.rgb,
+            swatch_pink: t.swatch.pink.rgb,
+            radius: t.radius.s,
+        }
+    }
+
     /// A fader cap's colour: its strip kind's.
     pub fn cap(&self, k: StripColourRow) -> Rgba {
         rgb(match k {
@@ -165,13 +230,16 @@ impl StripTokens {
     /// The colour bar: the strip's own colour, else the accent for a
     /// Co-Producer strip, else its kind's.
     pub fn bar(&self, s: &StripRow) -> Rgba {
-        if let Some(c) = s.colour {
-            return self.swatch(c);
+        self.resolve(Bar::of(s))
+    }
+
+    /// The colour a [`Bar`] names in the current theme.
+    pub fn resolve(&self, b: Bar) -> Rgba {
+        match b {
+            Bar::Swatch(c) => self.swatch(c),
+            Bar::Accent => rgb(self.accent),
+            Bar::Cap(k) => self.cap(k),
         }
-        if s.co_producer {
-            return rgb(self.accent);
-        }
-        self.cap(s.kind_colour)
     }
 
     pub fn knob(&self, f: KnobFunction) -> Rgba {
@@ -216,16 +284,38 @@ impl StripTokens {
         })
     }
 
-    /// The legend on a lit toggle: dark text on a light fill, light on a
-    /// dark one.
+    /// The legend on a lit toggle: the current theme's key ink with the
+    /// higher contrast on `fill` (Swift `Theme.legend(on:)`).
     pub fn legend_on(&self, fill: u32) -> Rgba {
-        let c = rgb(fill);
-        let luma = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
-        rgb(if luma > 0.5 {
-            self.text_primary
+        rgb(crate::appearance::legend_on(
+            crate::appearance::current(),
+            fill,
+        ))
+    }
+}
+
+/// Which token a colour bar takes, kept instead of the colour so a
+/// theme change shows at the next draw (Swift `StripPalette.bar`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bar {
+    /// The strip's own colour.
+    Swatch(SwatchRow),
+    /// A Co-Producer strip's: the accent.
+    Accent,
+    /// Its kind's cap colour.
+    Cap(StripColourRow),
+}
+
+impl Bar {
+    /// The bar of strip `s`.
+    pub fn of(s: &StripRow) -> Bar {
+        if let Some(c) = s.colour {
+            Bar::Swatch(c)
+        } else if s.co_producer {
+            Bar::Accent
         } else {
-            self.text_inverse
-        })
+            Bar::Cap(s.kind_colour)
+        }
     }
 }
 
@@ -278,7 +368,12 @@ mod tests {
     #[test]
     fn lit_legends_contrast_with_their_fill() {
         let t = tokens();
-        assert_eq!(t.legend_on(t.state_solo), rgb(t.text_primary));
-        assert_eq!(t.legend_on(t.state_record), rgb(t.text_inverse));
+        let now = crate::appearance::current();
+        for fill in [t.state_solo, t.state_record] {
+            assert_eq!(
+                t.legend_on(fill),
+                rgb(crate::appearance::legend_on(now, fill))
+            );
+        }
     }
 }

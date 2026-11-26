@@ -20,6 +20,7 @@
 //! job starts; a refusal or a failed job brings it back with the message
 //! ([`present`]), never an alert. Never under the control channel.
 
+use crate::appearance::ThemedCorners as _;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 
@@ -54,9 +55,6 @@ const TRACKS_HEIGHT: f32 = 120.;
 const WONT_HEIGHT: f32 = 120.;
 /// The width of a picker row's label column.
 const LABEL_WIDTH: f32 = 90.;
-/// The error's colour.
-const ERROR_TEXT: u32 = 0xe06060;
-
 /// Which picker is open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pick {
@@ -309,9 +307,9 @@ fn toggle(
         .items_center()
         .gap_2()
         .text_color(rgb(if enabled {
-            colors::TEXT
+            colors::text()
         } else {
-            colors::DISABLED
+            colors::disabled()
         }))
         .child(if on { "\u{2611}" } else { "\u{2610}" })
         .child(title.to_owned())
@@ -358,7 +356,7 @@ fn row(label: &str, control: impl IntoElement) -> gpui::Div {
             div()
                 .w(px(LABEL_WIDTH))
                 .flex_none()
-                .text_color(rgb(colors::TEXT))
+                .text_color(rgb(colors::text()))
                 .child(label.to_owned()),
         )
         .child(control)
@@ -390,13 +388,13 @@ fn picker(
         .items_center()
         .justify_between()
         .gap_2()
-        .rounded_md()
+        .round_md()
         .border_1()
-        .border_color(rgb(colors::BORDER))
-        .bg(rgb(colors::BUTTON))
+        .border_color(rgb(colors::border()))
+        .bg(rgb(colors::button()))
         .cursor_pointer()
         .child(chosen.clone())
-        .child(div().text_color(rgb(colors::DIM)).child("\u{25BE}"))
+        .child(div().text_color(rgb(colors::dim())).child("\u{25BE}"))
         .child(scope.control_with("menu", label, true, Some(&chosen), false))
         .on_click(move |_, window, cx| {
             toggle_ui.update(cx, |u, _| {
@@ -413,7 +411,7 @@ fn picker(
                 .px_3()
                 .py_1()
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(colors::BUTTON)))
+                .hover(|s| s.bg(rgb(colors::button())))
                 .child(*title)
                 .child(scope.control_selected("menuitem", title, true, None, i == at))
                 .on_click(move |_, window, cx| {
@@ -433,10 +431,10 @@ fn picker(
                             .flex_col()
                             .min_w(px(160.))
                             .py_1()
-                            .bg(rgb(colors::LIST))
+                            .bg(rgb(colors::list()))
                             .border_1()
-                            .border_color(rgb(colors::BORDER))
-                            .rounded_md()
+                            .border_color(rgb(colors::border()))
+                            .round_md()
                             .children(rows),
                     ),
                 )
@@ -460,7 +458,7 @@ pub(crate) fn wont_transfer(
             return Some(
                 text(EVERYTHING_TRANSFERS, scope)
                     .text_xs()
-                    .text_color(rgb(colors::DIM))
+                    .text_color(rgb(colors::dim()))
                     .into_any_element(),
             );
         }
@@ -491,7 +489,7 @@ pub(crate) fn wont_transfer(
     checking.then(|| {
         div()
             .relative()
-            .text_color(rgb(colors::DIM))
+            .text_color(rgb(colors::dim()))
             .child("\u{22EF}")
             .child(scope.control("progress", CHECKING, true))
             .into_any_element()
@@ -523,7 +521,7 @@ impl Sheet for ExportMidiSheet {
             .child(
                 text(self.kind.subtitle(), scope)
                     .text_xs()
-                    .text_color(rgb(colors::DIM)),
+                    .text_color(rgb(colors::dim())),
             );
         if smf {
             let ui = self.ui.clone();
@@ -570,8 +568,8 @@ impl Sheet for ExportMidiSheet {
                 .h(px(TRACKS_HEIGHT))
                 .overflow_y_scroll()
                 .border_1()
-                .border_color(rgb(colors::BORDER))
-                .rounded_md()
+                .border_color(rgb(colors::border()))
+                .round_md()
                 .px_2()
                 .py_1()
                 .child(div().flex().flex_col().gap_1().children(rows))
@@ -601,7 +599,7 @@ impl Sheet for ExportMidiSheet {
                 body = body.child(
                     text(EACH_TRACK_ONE_FILE, scope)
                         .text_xs()
-                        .text_color(rgb(colors::DIM)),
+                        .text_color(rgb(colors::dim())),
                 );
             }
         }
@@ -615,7 +613,7 @@ impl Sheet for ExportMidiSheet {
                     .flex()
                     .flex_row()
                     .gap_2()
-                    .text_color(rgb(ERROR_TEXT))
+                    .text_color(rgb(colors::error()))
                     .child(div().flex_none().child("\u{2716}"))
                     .child(text(e, scope).flex_1()),
             );

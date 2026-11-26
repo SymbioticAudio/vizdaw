@@ -62,7 +62,7 @@ use crate::piano_roll::{PianoRoll, RollState};
 use crate::record_popover::{PopoverState, RecordPopover};
 use crate::registry::{RegistryScope, SharedRegistry};
 use crate::text_input::{TextInput, TextInputEvent};
-use crate::track_headers::{HeaderInput, HeadersState, Rename, TrackHeaders};
+use crate::track_headers::{self, HeaderInput, HeadersState, Rename, TrackHeaders};
 use crate::transport_bar::{self, BarState, FaultsState, Plan, RecordBar, colors};
 use crate::transport_fields::TransportFields;
 
@@ -1072,9 +1072,9 @@ impl DocumentWindow {
             .gap_3()
             .px_3()
             .py_1()
-            .bg(rgb(colors::BAR))
+            .bg(rgb(colors::bar()))
             .text_xs()
-            .text_color(rgb(colors::DIM))
+            .text_color(rgb(colors::dim()))
             .child(
                 div()
                     .flex_1()
@@ -1084,7 +1084,7 @@ impl DocumentWindow {
                     .child(status),
             )
             .child(
-                transport_bar::button("dismiss-status", "Dismiss", true, colors::BAR, scope)
+                transport_bar::button("dismiss-status", "Dismiss", true, colors::bar(), scope)
                     .h(px(20.))
                     .min_w(px(0.))
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -1566,6 +1566,7 @@ struct RegionParts<'a> {
     tools: ToolbarState,
     lanes: &'a [LaneRow],
     inputs: &'a [HeaderInput],
+    bars: &'a [Option<crate::strip_palette::Bar>],
     picker: Option<(u64, Vec<crate::input_picker::PickerRow>)>,
     selected: &'a [u64],
     arranged: ArrangementState,
@@ -1646,6 +1647,7 @@ impl DocumentWindow {
                                 lanes: parts.lanes,
                                 selected: parts.selected,
                                 inputs: parts.inputs,
+                                bars: parts.bars,
                                 picker: parts.picker,
                                 vertical_offset: self.arrangement.vertical_offset(),
                             },
@@ -1835,8 +1837,8 @@ impl DocumentWindow {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(0x1c1c22))
-            .text_color(rgb(colors::TEXT))
+            .bg(rgb(colors::window()))
+            .text_color(rgb(colors::text()))
             .text_sm()
     }
 
@@ -1972,7 +1974,7 @@ impl DocumentWindow {
             .root(cx)
             .children(menu_bar)
             .children(bar)
-            .child(div().h(px(1.)).flex_none().bg(rgb(colors::BORDER)))
+            .child(div().h(px(1.)).flex_none().bg(rgb(colors::border())))
             .child(
                 div()
                     .flex()
@@ -2008,6 +2010,7 @@ impl Render for DocumentWindow {
             front,
             lanes,
             header_inputs,
+            header_bars,
             picker,
             selected,
             status,
@@ -2031,6 +2034,20 @@ impl Render for DocumentWindow {
                 s.store.front().is_none_or(|f| f == doc),
                 d.map(|d| d.lanes().to_vec()).unwrap_or_default(),
                 d.map(HeaderInput::all).unwrap_or_default(),
+                d.map(|d| {
+                    let bars = crate::appearance::colour_bars();
+                    match d.mixer() {
+                        Some(m) => track_headers::lane_bars(
+                            d.lanes(),
+                            m.destinations(),
+                            &m.snapshot().strips,
+                            bars,
+                        ),
+                        // No mixer: no strip colours (Swift `laneColour`).
+                        None => vec![None; d.lanes().len()],
+                    }
+                })
+                .unwrap_or_default(),
                 d.and_then(|d| self.track_headers.picker_rows(d)),
                 d.map(DocumentModel::selected_lanes).unwrap_or_default(),
                 d.and_then(|d| d.status().map(String::from)),
@@ -2181,6 +2198,7 @@ impl Render for DocumentWindow {
                 tools,
                 lanes: &lanes,
                 inputs: &header_inputs,
+                bars: &header_bars,
                 picker,
                 selected: &selected,
                 arranged,

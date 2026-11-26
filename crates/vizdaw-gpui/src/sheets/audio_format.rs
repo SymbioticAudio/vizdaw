@@ -7,6 +7,7 @@
 //! the rows how to edit them. Also the small pieces those sheets draw
 //! alike: a text line, a labelled row, a toggle, a progress bar.
 
+use crate::appearance::ThemedCorners as _;
 use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
@@ -64,7 +65,7 @@ pub(crate) fn row(label: &str, control: impl IntoElement) -> gpui::Div {
             div()
                 .w(px(LABEL_WIDTH))
                 .flex_none()
-                .text_color(rgb(colors::TEXT))
+                .text_color(rgb(colors::text()))
                 .child(label.to_owned()),
         )
         .child(control)
@@ -89,9 +90,9 @@ pub(crate) fn toggle(
         .items_center()
         .gap_2()
         .text_color(rgb(if enabled {
-            colors::TEXT
+            colors::text()
         } else {
-            colors::DISABLED
+            colors::disabled()
         }))
         .child(if on { "\u{2611}" } else { "\u{2610}" })
         .child(title.to_owned())
@@ -113,14 +114,14 @@ pub(crate) fn progress_bar(p: f32, label: &str, scope: &mut RegistryScope) -> An
         .relative()
         .w_full()
         .h(px(6.))
-        .rounded_sm()
-        .bg(rgb(colors::READOUT))
+        .round_sm()
+        .bg(rgb(colors::readout()))
         .child(
             div()
                 .h_full()
                 .w(relative(p))
-                .rounded_sm()
-                .bg(rgb(colors::ON)),
+                .round_sm()
+                .bg(rgb(colors::on())),
         )
         .child(scope.control_with("progress", label, true, Some(&value), false))
         .into_any_element()
@@ -244,17 +245,17 @@ impl FormatRows {
             .items_center()
             .justify_between()
             .gap_2()
-            .rounded_md()
+            .round_md()
             .border_1()
-            .border_color(rgb(colors::BORDER))
-            .bg(rgb(colors::BUTTON))
+            .border_color(rgb(colors::border()))
+            .bg(rgb(colors::button()))
             .text_color(rgb(if enabled {
-                colors::TEXT
+                colors::text()
             } else {
-                colors::DISABLED
+                colors::disabled()
             }))
             .child(chosen.clone())
-            .child(div().text_color(rgb(colors::DIM)).child("\u{25BE}"))
+            .child(div().text_color(rgb(colors::dim())).child("\u{25BE}"))
             .child(scope.control_with("menu", label, enabled, Some(&chosen), false))
             .when(enabled, |d| {
                 d.cursor_pointer().on_click(move |_, window, cx| {
@@ -274,7 +275,7 @@ impl FormatRows {
                     .px_3()
                     .py_1()
                     .cursor_pointer()
-                    .hover(|s| s.bg(rgb(colors::BUTTON)))
+                    .hover(|s| s.bg(rgb(colors::button())))
                     .child(title.clone())
                     .child(scope.control_selected("menuitem", title, true, None, *title == chosen))
                     .on_click(move |_, window, cx| {
@@ -294,10 +295,10 @@ impl FormatRows {
                                 .flex_col()
                                 .min_w(px(120.))
                                 .py_1()
-                                .bg(rgb(colors::LIST))
+                                .bg(rgb(colors::list()))
                                 .border_1()
-                                .border_color(rgb(colors::BORDER))
-                                .rounded_md()
+                                .border_color(rgb(colors::border()))
+                                .round_md()
                                 .children(rows),
                         ),
                     )
@@ -355,7 +356,7 @@ impl FormatRows {
                 div()
                     .relative()
                     .w(px(120.))
-                    .text_color(rgb(colors::DISABLED))
+                    .text_color(rgb(colors::disabled()))
                     .child(rate.clone())
                     .child(scope.control_with("textfield", OTHER_LABEL, false, Some(&rate), false))
             };

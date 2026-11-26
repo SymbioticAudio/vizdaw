@@ -19,6 +19,7 @@
 //! message ([`present`]), never an alert. Never under the control
 //! channel.
 
+use crate::appearance::ThemedCorners as _;
 use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
 
@@ -50,11 +51,6 @@ use crate::transport_bar::colors;
 const WIDTH: f32 = 480.;
 /// The stems list's height (Swift `.frame(height: 120)`).
 const STEMS_HEIGHT: f32 = 120.;
-/// The warning glyph's colour.
-const WARNING_TEXT: u32 = 0xd8a040;
-/// The error's colour.
-const ERROR_TEXT: u32 = 0xe06060;
-
 /// What the sheet shows of the document, read once per frame.
 struct View {
     choices: ForDawChoices,
@@ -167,11 +163,11 @@ pub(crate) fn waiting_row(t: &str, scope: &mut RegistryScope) -> AnyElement {
         .child(
             div()
                 .relative()
-                .text_color(rgb(colors::DIM))
+                .text_color(rgb(colors::dim()))
                 .child("\u{22EF}")
                 .child(scope.control("progress", WAITING_LABEL, true)),
         )
-        .child(text(t, scope).text_xs().text_color(rgb(colors::DIM)))
+        .child(text(t, scope).text_xs().text_color(rgb(colors::dim())))
         .into_any_element()
 }
 
@@ -181,7 +177,7 @@ pub(crate) fn error_row(e: &str, scope: &mut RegistryScope) -> AnyElement {
         .flex()
         .flex_row()
         .gap_2()
-        .text_color(rgb(ERROR_TEXT))
+        .text_color(rgb(colors::error()))
         .child(div().flex_none().child("\u{2716}"))
         .child(text(e, scope).flex_1())
         .into_any_element()
@@ -231,7 +227,11 @@ impl Sheet for ForDawSheet {
             .flex_col()
             .gap_2()
             .child(text(TITLE, scope).font_weight(gpui::FontWeight::BOLD))
-            .child(text(SUBTITLE, scope).text_xs().text_color(rgb(colors::DIM)))
+            .child(
+                text(SUBTITLE, scope)
+                    .text_xs()
+                    .text_color(rgb(colors::dim())),
+            )
             .child(text(STEMS, scope));
         let mut list = scope.container();
         let clip = list.clip();
@@ -265,8 +265,8 @@ impl Sheet for ForDawSheet {
                 .h(px(STEMS_HEIGHT))
                 .overflow_y_scroll()
                 .border_1()
-                .border_color(rgb(colors::BORDER))
-                .rounded_md()
+                .border_color(rgb(colors::border()))
+                .round_md()
                 .px_2()
                 .py_1()
                 .child(div().flex().flex_col().gap_1().children(rows))
@@ -297,12 +297,12 @@ impl Sheet for ForDawSheet {
                 .child(
                     text(&check.start, scope)
                         .text_xs()
-                        .text_color(rgb(colors::DIM)),
+                        .text_color(rgb(colors::dim())),
                 )
                 .child(
                     text(&format!("Length {}", v.length), scope)
                         .text_xs()
-                        .text_color(rgb(colors::DIM)),
+                        .text_color(rgb(colors::dim())),
                 );
             if let Some(w) = &check.warning {
                 body = body.child(
@@ -313,7 +313,7 @@ impl Sheet for ForDawSheet {
                         .child(
                             div()
                                 .flex_none()
-                                .text_color(rgb(WARNING_TEXT))
+                                .text_color(rgb(colors::warning()))
                                 .child("\u{26A0}"),
                         )
                         .child(text(w, scope).flex_1()),

@@ -11,10 +11,10 @@ use std::ops::Range;
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine,
-    SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div, fill, hsla,
-    point, prelude::*, px, relative, rgb, rgba, size, white,
+    EntityInputHandler, FocusHandle, Focusable, GlobalElementId, Hsla, KeyBinding, LayoutId,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
+    ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
+    fill, point, prelude::*, px, relative, rgb, size,
 };
 use unicode_segmentation::*;
 
@@ -553,7 +553,10 @@ impl Element for TextElement {
         let style = window.text_style();
 
         let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), hsla(0., 0., 0., 0.2))
+            (
+                input.placeholder.clone(),
+                Hsla::from(rgb(crate::transport_bar::colors::disabled())),
+            )
         } else if content.contains(['\n', '\r']) {
             // One line: a line break (a loaded comment, a paste) shows as
             // a space of the same length, so offsets stay the content's.
@@ -611,7 +614,7 @@ impl Element for TextElement {
                         point(bounds.left() + cursor_pos, bounds.top()),
                         size(px(2.), bounds.bottom() - bounds.top()),
                     ),
-                    gpui::blue(),
+                    rgb(crate::transport_bar::colors::accent()),
                 )),
             )
         } else {
@@ -627,7 +630,7 @@ impl Element for TextElement {
                             bounds.bottom(),
                         ),
                     ),
-                    rgba(0x3311ff30),
+                    Hsla::from(rgb(crate::transport_bar::colors::accent())).opacity(0.3),
                 )),
                 None,
             )
@@ -710,7 +713,7 @@ impl Render for TextInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .bg(rgb(0xeeeeee))
+            .bg(rgb(crate::transport_bar::colors::button()))
             .map(|d| {
                 let (line, pad, size) = if self.cell {
                     (16., 1., 12.)
@@ -724,8 +727,8 @@ impl Render for TextInput {
                         .h(px(line + pad * 2.))
                         .w_full()
                         .p(px(pad))
-                        .bg(white())
-                        .text_color(rgb(0x000000))
+                        .bg(rgb(crate::transport_bar::colors::field()))
+                        .text_color(rgb(crate::transport_bar::colors::field_text()))
                         .child(TextElement { input: cx.entity() }),
                 )
             })

@@ -14,6 +14,7 @@
 //! document's list is focused (Return no longer returns to start; Space
 //! still plays), and Delete or Forward Delete deletes the selected rows.
 
+use crate::appearance::ThemedCorners as _;
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -23,7 +24,7 @@ use gpui::{
     AnyElement, AppContext, Bounds, Context, Entity, FocusHandle, Focusable, InteractiveElement,
     IntoElement, KeyBinding, MouseButton, MouseDownEvent, ParentElement, Pixels, ScrollDelta,
     ScrollEvent, StatefulInteractiveElement, Styled, Subscription, Window, actions, anchored,
-    canvas, deferred, div, hsla, point, px, rgb,
+    canvas, deferred, div, point, px, rgb,
 };
 use vizdaw_app::DocumentModel;
 use vizdaw_app::editor::EditorTarget;
@@ -452,11 +453,11 @@ fn bar_button(
         .flex_none()
         .items_center()
         .px_2()
-        .rounded_md()
+        .round_md()
         .cursor_pointer()
         .text_xs()
-        .bg(rgb(colors::BUTTON))
-        .text_color(rgb(colors::TEXT))
+        .bg(rgb(colors::button()))
+        .text_color(rgb(colors::text()))
         .overflow_hidden()
         .whitespace_nowrap()
         .child(text.to_owned())
@@ -574,7 +575,7 @@ fn bar(
         .gap(px(8.))
         .px(px(8.))
         .py(px(4.))
-        .bg(rgb(colors::BAR))
+        .bg(rgb(colors::bar()))
         .child(
             div()
                 .flex()
@@ -591,7 +592,7 @@ fn bar(
             div()
                 .relative()
                 .text_xs()
-                .text_color(rgb(colors::DIM))
+                .text_color(rgb(colors::dim()))
                 .child(count.clone())
                 .child(scope.control("text", &count, true)),
         )
@@ -692,14 +693,14 @@ pub(crate) fn bar_menu(
     let mut list = crate::arrangement::menu_list(id);
     for (n, e) in entries.into_iter().enumerate() {
         list = match e {
-            Entry::Separator => list.child(div().h(px(1.)).my_1().bg(rgb(colors::BORDER))),
+            Entry::Separator => list.child(div().h(px(1.)).my_1().bg(rgb(colors::border()))),
             Entry::Label(title) => list.child(
                 div()
                     .relative()
                     .px_3()
                     .py_1()
                     .text_xs()
-                    .text_color(rgb(colors::DIM))
+                    .text_color(rgb(colors::dim()))
                     .child(title)
                     .child(scope.control("text", title, true)),
             ),
@@ -723,10 +724,10 @@ pub(crate) fn bar_menu(
                         .py_1()
                         .child(format!("{mark}{title}"))
                         .child(scope.control_selected("menuitem", &title, enabled, value, selected))
-                        .when(!enabled, |d| d.text_color(rgb(colors::DIM)))
+                        .when(!enabled, |d| d.text_color(rgb(colors::dim())))
                         .when(enabled, |d| {
                             d.cursor_pointer()
-                                .hover(|s| s.bg(rgb(colors::BUTTON)))
+                                .hover(|s| s.bg(rgb(colors::button())))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     close(this);
                                     act(this, cx);
@@ -759,9 +760,9 @@ fn table(
         .flex_row()
         .flex_none()
         .h(px(ROW_HEIGHT))
-        .bg(rgb(colors::BAR))
+        .bg(rgb(colors::bar()))
         .text_xs()
-        .text_color(rgb(colors::DIM));
+        .text_color(rgb(colors::dim()));
     for &c in &state.columns {
         header = header.child(
             div()
@@ -816,6 +817,7 @@ fn table(
         .flex_1()
         .min_h_0()
         .overflow_hidden()
+        .bg(rgb(crate::arrangement::colors::canvas()))
         .child(measure)
         .child(rows)
         .child(body_scope.clip());
@@ -829,7 +831,7 @@ fn table(
         .flex_1()
         .min_h_0()
         .text_xs()
-        .text_color(rgb(colors::TEXT))
+        .text_color(rgb(colors::text()))
         .on_action(cx.listener(|this, _: &EditRow, window, cx| this.list_return(window, cx)))
         .on_action(cx.listener(|this, _: &DeleteRows, _, cx| this.list_delete_rows(cx)))
         .on_scroll(cx.listener(|this, e: &ScrollEvent, _, cx| this.list_wheel(e, cx)))
@@ -838,6 +840,10 @@ fn table(
         .child(scope.this("table", TABLE, true))
         .into_any_element()
 }
+
+/// Every other row's shade: the label colour at this alpha (Swift
+/// `ListEditorView.swift:122`).
+const ROW_SHADE: f32 = 0.04;
 
 /// One row: its cells (the edited one is the field), shaded every other
 /// row, filled when selected.
@@ -856,8 +862,13 @@ fn row(
         .flex_none()
         .h(px(ROW_HEIGHT))
         .w_full()
-        .when(index % 2 == 1, |d| d.bg(hsla(0., 0., 1., 0.04)))
-        .when(r.selected, |d| d.bg(rgb(colors::ON)));
+        .when(index % 2 == 1, |d| {
+            d.bg(crate::arrangement::with_alpha(colors::text(), ROW_SHADE))
+        })
+        .when(r.selected, |d| {
+            d.bg(rgb(crate::arrangement::colors::selection()))
+                .text_color(rgb(colors::inverse()))
+        });
     for (&column, (text, editable)) in state.columns.iter().zip(&r.cells) {
         let edited = editor
             .editing
@@ -885,7 +896,7 @@ fn row(
                 let id = r.id.clone();
                 cell.px_1()
                     .when(!editable, |c| {
-                        c.when(!r.selected, |c| c.text_color(rgb(colors::DIM)))
+                        c.when(!r.selected, |c| c.text_color(rgb(colors::dim())))
                     })
                     .child(text.clone())
                     .child(scope.control_with(

@@ -140,11 +140,12 @@ fn header(x: &MidiParts, w: f64, scope: &mut RegistryScope) -> AnyElement {
     let name_top = StripLayout::COLOUR_BAR + 2.;
     let kind_top = name_top + 16. + 2.;
     at(0., 0., w, RowHeights::HEADER)
-        .child(
+        // Show channel colour bars (Swift `appearancePreferences.colourBars`).
+        .children(crate::appearance::colour_bars().then(|| {
             at(0., 0., w, StripLayout::COLOUR_BAR)
                 .rounded(px(t.radius))
-                .bg(x.cap),
-        )
+                .bg(x.cap)
+        }))
         .child(
             line(name_top, 16.)
                 .text_size(px(12.))

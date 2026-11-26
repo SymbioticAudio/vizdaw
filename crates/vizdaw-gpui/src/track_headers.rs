@@ -20,17 +20,19 @@
 //! toggles mute. A double-click on the name opens the rename field, which
 //! the document window owns (see [`DocumentWindow::begin_rename`]).
 
+use crate::appearance::ThemedCorners as _;
 use gpui::prelude::FluentBuilder;
 use std::rc::Rc;
 
 use gpui::{
     AnyElement, ClickEvent, Context, Entity, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, Subscription, Window, anchored, deferred, div, point, px,
-    rgb, rgba,
+    rgb,
 };
 use vizdaw_app::DocumentModel;
 use vizdaw_app::lane_inputs::{InputChoice, LaneInputs};
 use vizdaw_app::mixer::MixerMath;
+use vizdaw_app::view::StripFocus;
 use vizdaw_ffi::edit::MonitorModeRow;
 use vizdaw_ffi::snapshot::LaneRow;
 use vizdaw_ffi::tracks::TrackKindRow;
@@ -41,7 +43,7 @@ use crate::menus::RunCommand;
 use crate::registry::RegistryScope;
 use crate::sheet_host::with_help;
 use crate::shell::DocumentWindow;
-use crate::strip_palette::tokens;
+use crate::strip_palette::{Bar, tokens};
 use crate::text_input::TextInput;
 use crate::transport_bar::colors;
 use vizdaw_app::arrangement::RULER_HEIGHT;
@@ -51,15 +53,61 @@ pub const WIDTH: f32 = 200.;
 /// A row's height (Swift `ArrangementLayout.laneHeight`).
 pub const ROW_HEIGHT: f32 = 48.;
 
-const COLUMN: u32 = 0x22222a;
-const SEPARATOR: u32 = 0x3a3a46;
-/// The selection fill at 0.22 alpha (one fixed colour until themes come).
-const SELECTED: u32 = 0x4a7dff38;
-const LIST: u32 = 0x2e2e38;
-const BORDER: u32 = 0x4a4a58;
-const MUTE_ON: u32 = 0xc89b2e;
-const SOLO_ON: u32 = 0x3f8f4f;
-const ARM_ON: u32 = 0xb03a3a;
+/// The selected row's fill: `surface.selection` at 0.22 (Swift
+/// `LaneHeaderView.swift:189`).
+const SELECTED_ALPHA: f32 = 0.22;
+/// The strip colour bar down a row's left edge (Swift
+/// `LaneHeaderLayout.colourBar`): x, y from the row's top, width, and the
+/// height less this.
+const BAR: (f32, f32, f32, f32) = (1., 2., 4., 4.);
+
+/// The monitor button's face and ink, drawn as M/S/R (Swift
+/// `LaneHeaderView.swift:209-211`, `toggle`): lit (input in the warning
+/// colour, auto in the play colour) with the key ink that reads on it;
+/// off, the raised face with the secondary text.
+pub fn monitor_colours(m: MonitorModeRow) -> (u32, u32) {
+    let t = tokens();
+    match m {
+        MonitorModeRow::Off => (colors::button(), colors::dim()),
+        MonitorModeRow::Input => (
+            t.state_warning,
+            crate::appearance::legend_on(crate::appearance::current(), t.state_warning),
+        ),
+        _ => (
+            t.state_play,
+            crate::appearance::legend_on(crate::appearance::current(), t.state_play),
+        ),
+    }
+}
+
+/// Each track's colour bar (Swift `LaneHeaderView.colourBar` over
+/// `StripPalette.lane`): the colour of the strip it plays through, an
+/// external MIDI track's the instrument cap, none for a track that plays
+/// nowhere; none at all when `colour_bars` (Show channel colour bars) is
+/// off. The token is kept, not the colour, so a theme change shows at
+/// the next draw.
+pub fn lane_bars(
+    lanes: &[LaneRow],
+    dests: &[vizdaw_ffi::mixer::DestRow],
+    strips: &[vizdaw_ffi::mixer::StripRow],
+    colour_bars: bool,
+) -> Vec<Option<Bar>> {
+    lanes
+        .iter()
+        .map(|l| {
+            if !colour_bars {
+                return None;
+            }
+            match StripFocus::strip_of(l, dests, strips) {
+                Some(id) => strips.iter().find(|s| s.id == id).map(Bar::of),
+                None if l.midi_dest.is_some() => {
+                    Some(Bar::Cap(vizdaw_ffi::mixer::StripColourRow::Instrument))
+                }
+                None => None,
+            }
+        })
+        .collect()
+}
 
 /// Swift `TrackCommands.addTrackOnChannel`: the status a control-channel
 /// click on "+ Add Track" sets.
@@ -287,6 +335,8 @@ pub struct HeadersState<'a> {
     pub selected: &'a [u64],
     /// Each track's input, in `lanes`' order.
     pub inputs: &'a [HeaderInput],
+    /// Each track's colour bar, in `lanes`' order (see [`lane_bars`]).
+    pub bars: &'a [Option<Bar>],
     /// The open input picker: its track and rows.
     pub picker: Option<(u64, Vec<PickerRow>)>,
     /// The rows' scroll, shared with the arrangement canvas.
@@ -364,7 +414,8 @@ impl TrackHeaders {
                 .as_ref()
                 .filter(|(id, _)| *id == lane.id)
                 .map(|(_, rows)| rows.clone());
-            rows = rows.child(self.row(lane, &input, picker, selected, scope, window, cx));
+            let bar = state.bars.get(i).copied().flatten();
+            rows = rows.child(self.row(lane, &input, bar, picker, selected, scope, window, cx));
         }
         rows = rows.child(self.add_row(scope, window, cx));
         let column = div()
@@ -374,14 +425,15 @@ impl TrackHeaders {
             .flex_none()
             .flex()
             .flex_col()
-            .bg(rgb(COLUMN))
+            .bg(rgb(colors::bar()))
+            .text_color(rgb(colors::text()))
             .child(scope.this("group", "Track Headers", true))
             .child(
                 div()
                     .h(px(RULER_HEIGHT))
                     .flex_none()
                     .border_b_1()
-                    .border_color(rgb(SEPARATOR)),
+                    .border_color(rgb(colors::border())),
             )
             .child(
                 div()
@@ -400,7 +452,7 @@ impl TrackHeaders {
             .h_full()
             .flex_none()
             .child(column)
-            .child(div().w(px(1.)).h_full().bg(rgb(SEPARATOR)))
+            .child(div().w(px(1.)).h_full().bg(rgb(colors::border())))
             .into_any_element()
     }
 
@@ -409,6 +461,7 @@ impl TrackHeaders {
         &self,
         lane: &LaneRow,
         input: &HeaderInput,
+        bar: Option<Bar>,
         picker: Option<Vec<PickerRow>>,
         selected: bool,
         scope: &mut RegistryScope,
@@ -431,7 +484,7 @@ impl TrackHeaders {
             Some(field) => at((nx - 2., 2., nw + 4., 22.))
                 .id(("track-name", id))
                 .overflow_hidden()
-                .text_color(rgb(0x000000))
+                .text_color(rgb(colors::field_text()))
                 .child(field),
             None => at(place::NAME)
                 .id(("track-name", id))
@@ -458,15 +511,11 @@ impl TrackHeaders {
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded_sm()
+                .round_sm()
                 .text_xs()
                 .cursor_pointer()
-                .bg(if lane.monitor == MonitorModeRow::Off {
-                    rgb(colors::BUTTON)
-                } else {
-                    tokens().monitor(lane.monitor)
-                })
-                .text_color(rgb(colors::TEXT))
+                .bg(rgb(monitor_colours(lane.monitor).0))
+                .text_color(rgb(monitor_colours(lane.monitor).1))
                 .child(LaneInputs::monitor_label(lane.monitor))
                 .child(rs.control_with("button", help, true, Some(help), false))
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -483,7 +532,7 @@ impl TrackHeaders {
             .items_center()
             .cursor_pointer()
             .text_xs()
-            .text_color(rgb(colors::DIM))
+            .text_color(rgb(colors::dim()))
             .child(
                 div()
                     .min_w_0()
@@ -536,15 +585,24 @@ impl TrackHeaders {
             .h(px(ROW_HEIGHT))
             .flex_none()
             .border_b_1()
-            .border_color(rgb(SEPARATOR))
-            .when(selected, |d| d.bg(rgba(SELECTED)))
+            .border_color(rgb(colors::border()))
+            .when(selected, |d| {
+                d.bg(crate::arrangement::with_alpha(
+                    crate::arrangement::colors::selection(),
+                    SELECTED_ALPHA,
+                ))
+            })
             .child(rs.this("button", &row_label(lane, input), true))
+            .children(bar.map(|b| {
+                let (x, y, w, h) = BAR;
+                at((x, y, w, (ROW_HEIGHT - h).max(0.))).bg(tokens().resolve(b))
+            }))
             .child(
                 at(place::KIND)
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_color(rgb(colors::DIM))
+                    .text_color(rgb(colors::dim()))
                     .child(kind_glyph(lane.kind)),
             )
             .child(name)
@@ -554,7 +612,7 @@ impl TrackHeaders {
                 place::MUTE,
                 "M",
                 lane.mute,
-                MUTE_ON,
+                tokens().state_mute,
                 cx,
                 move |this, cx| {
                     let mute = this.lane(id, cx).map(|l| !l.mute);
@@ -566,7 +624,7 @@ impl TrackHeaders {
                 place::SOLO,
                 "S",
                 lane.solo,
-                SOLO_ON,
+                tokens().state_solo,
                 cx,
                 move |this, cx| {
                     let solo = this.lane(id, cx).map(|l| !l.solo);
@@ -578,7 +636,7 @@ impl TrackHeaders {
                 place::ARM,
                 "R",
                 lane.arm,
-                ARM_ON,
+                tokens().state_record,
                 cx,
                 move |this, cx| {
                     let arm = this.lane(id, cx).map(|l| !l.arm);
@@ -621,8 +679,8 @@ impl TrackHeaders {
             .flex_none()
             .px(px(6.))
             .cursor_pointer()
-            .text_color(rgb(colors::DIM))
-            .hover(|s| s.text_color(rgb(colors::TEXT)))
+            .text_color(rgb(colors::dim()))
+            .hover(|s| s.text_color(rgb(colors::text())))
             .child("+ Add Track")
             .child(scope.control("button", "Add Track", true))
             .on_click(cx.listener(|this, _, _, cx| {
@@ -684,11 +742,17 @@ fn toggle(
         .flex()
         .items_center()
         .justify_center()
-        .rounded_sm()
+        .round_sm()
         .text_xs()
         .cursor_pointer()
-        .bg(rgb(if on { on_color } else { colors::BUTTON }))
-        .text_color(rgb(colors::TEXT))
+        .bg(rgb(if on { on_color } else { colors::button() }))
+        // Lit: the key ink that reads on the fill; off: the secondary text
+        // (Swift `LaneHeaderView.toggle`).
+        .text_color(rgb(if on {
+            crate::appearance::legend_on(crate::appearance::current(), on_color)
+        } else {
+            colors::dim()
+        }))
         .child(text)
         .on_click(cx.listener(move |this, _, _, cx| {
             // The toggles never change the selection.
@@ -748,12 +812,12 @@ fn add_menu(scope: &mut RegistryScope, cx: &mut Context<DocumentWindow>) -> AnyE
         .flex_col()
         .min_w(px(200.))
         .py_1()
-        .bg(rgb(LIST))
+        .bg(rgb(colors::list()))
         .border_1()
-        .border_color(rgb(BORDER))
-        .rounded_md()
+        .border_color(rgb(colors::border()))
+        .round_md()
         .shadow_md()
-        .text_color(rgb(colors::TEXT));
+        .text_color(rgb(colors::text()));
     for (row, (title, id)) in ADD_TRACK_ITEMS.into_iter().enumerate() {
         list = list.child(
             div()
@@ -762,7 +826,7 @@ fn add_menu(scope: &mut RegistryScope, cx: &mut Context<DocumentWindow>) -> AnyE
                 .px_3()
                 .py_1()
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(colors::BUTTON)))
+                .hover(|s| s.bg(rgb(colors::button())))
                 .child(title)
                 .child(scope.control("menuitem", title, true))
                 .on_click(cx.listener(move |this, _, window, cx| {

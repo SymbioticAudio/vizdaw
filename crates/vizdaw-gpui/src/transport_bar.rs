@@ -11,6 +11,7 @@
 //! into the » menu, where a folded field item is a popover of its live
 //! fields.
 
+use crate::appearance::ThemedCorners as _;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Context, Div, ElementId, Focusable, InteractiveElement, IntoElement, MouseButton,
@@ -173,18 +174,110 @@ impl BarState {
     }
 }
 
-pub(crate) mod colors {
-    pub const BAR: u32 = 0x26262e;
-    pub const BUTTON: u32 = 0x3a3f4f;
-    pub const PLAYING: u32 = 0x2f6f4f;
-    pub const ON: u32 = 0x3f5f8f;
-    pub const READOUT: u32 = 0x15151a;
-    pub const FIELD: u32 = 0xf4f4f6;
-    pub const TEXT: u32 = 0xe8e8ec;
-    pub const DISABLED: u32 = 0x77777f;
-    pub const DIM: u32 = 0x9a9aa6;
-    pub const LIST: u32 = 0x2e2e38;
-    pub const BORDER: u32 = 0x4a4a56;
+/// The chrome's colours (0xRRGGBB), each read from the current theme when
+/// asked, never kept: a theme change redraws every window and each draw
+/// asks again. The Swift bar and sheets use the system's controls tinted
+/// with the theme's text, accent and state colours; where GPUI draws its
+/// own control, the nearest semantic token stands in.
+pub mod colors {
+    use crate::appearance::current;
+    use vizdaw_app::theme::Theme;
+
+    /// `base` with `over` laid on it at `alpha` (0.0 to 1.0).
+    pub fn mix(base: u32, over: u32, alpha: f32) -> u32 {
+        let ch = |shift: u32| {
+            let b = ((base >> shift) & 0xff) as f32;
+            let o = ((over >> shift) & 0xff) as f32;
+            (b + (o - b) * alpha).round() as u32
+        };
+        (ch(16) << 16) | (ch(8) << 8) | ch(0)
+    }
+
+    /// The bar: Swift's `.bar` material is `surface.panel`.
+    pub fn bar() -> u32 {
+        current().surface.panel.rgb
+    }
+    /// A button's face.
+    pub fn button() -> u32 {
+        current().surface.raised.rgb
+    }
+    /// The play button while playing (`state.play`).
+    pub fn playing() -> u32 {
+        current().state.play.rgb
+    }
+    /// A toggle that is on: the accent at 0.18 over the bar (Swift
+    /// `TransportItemViews.swift:204`).
+    pub fn on() -> u32 {
+        on_of(current())
+    }
+    /// [`on`] for `t`.
+    pub fn on_of(t: &Theme) -> u32 {
+        mix(t.surface.panel.rgb, t.accent.accent.rgb, 0.18)
+    }
+    /// The time and tempo readouts' background (`readout.background`).
+    pub fn readout() -> u32 {
+        current().readout.background.rgb
+    }
+    /// The readouts' label: `readout.text` at 0.72 over `readout.background`
+    /// (Swift `TransportReadouts.swift:119-121`).
+    pub fn readout_label() -> u32 {
+        let t = current();
+        mix(t.readout.background.rgb, t.readout.text.rgb, 0.72)
+    }
+    /// The readouts' text (`readout.text`).
+    pub fn readout_text() -> u32 {
+        current().readout.text.rgb
+    }
+    /// A text field's face (`surface.inset`).
+    pub fn field() -> u32 {
+        current().surface.inset.rgb
+    }
+    /// Text typed into a field.
+    pub fn field_text() -> u32 {
+        current().text.primary.rgb
+    }
+    /// Text (`text.primary`).
+    pub fn text() -> u32 {
+        current().text.primary.rgb
+    }
+    /// Disabled text (`text.disabled`).
+    pub fn disabled() -> u32 {
+        current().text.disabled.rgb
+    }
+    /// Secondary text (`text.secondary`).
+    pub fn dim() -> u32 {
+        current().text.secondary.rgb
+    }
+    /// A popover or menu list (`surface.inset`).
+    pub fn list() -> u32 {
+        current().surface.inset.rgb
+    }
+    /// A hairline (`surface.separator`).
+    pub fn border() -> u32 {
+        current().surface.separator.rgb
+    }
+    /// A document window's background (`surface.window`).
+    pub fn window() -> u32 {
+        current().surface.window.rgb
+    }
+    /// The accent (`accent.accent`) and the text on it.
+    pub fn accent() -> u32 {
+        current().accent.accent.rgb
+    }
+    pub fn on_accent() -> u32 {
+        current().accent.on_accent.rgb
+    }
+    /// Warning and error text (`state.warning`, `state.error`).
+    pub fn warning() -> u32 {
+        current().state.warning.rgb
+    }
+    pub fn error() -> u32 {
+        current().state.error.rgb
+    }
+    /// Text on a state-coloured fill.
+    pub fn inverse() -> u32 {
+        current().text.inverse.rgb
+    }
 }
 
 /// The row's padding and the gap between its pieces (Swift: 8 and the
@@ -328,7 +421,7 @@ fn text_width(window: &Window, text: &str, size: gpui::Pixels) -> f32 {
     let run = TextRun {
         len: text.len(),
         font: window.text_style().font(),
-        color: gpui::black(),
+        color: gpui::Hsla::default(),
         background_color: None,
         underline: None,
         strikethrough: None,
@@ -613,9 +706,9 @@ impl Plan {
 
 fn color(enabled: bool) -> Rgba {
     rgb(if enabled {
-        colors::TEXT
+        colors::text()
     } else {
-        colors::DISABLED
+        colors::disabled()
     })
 }
 
@@ -669,7 +762,7 @@ pub(crate) fn face(
         .flex_none()
         .items_center()
         .justify_center()
-        .rounded_md()
+        .round_md()
         .bg(rgb(background))
         .text_color(color(enabled))
         .when(enabled, |b| b.cursor_pointer())
@@ -704,7 +797,7 @@ fn hold_button(
     } else {
         ("rewind", "\u{25c0}\u{25c0}", "Rewind")
     };
-    cluster_button(id, glyph, label, enabled, colors::BUTTON, scope).when(enabled, |b| {
+    cluster_button(id, glyph, label, enabled, colors::button(), scope).when(enabled, |b| {
         b.on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, e: &MouseDownEvent, window, cx| {
@@ -731,7 +824,7 @@ fn cluster(
         "|\u{25c0}",
         "Return to Start",
         seq,
-        colors::BUTTON,
+        colors::button(),
         scope,
     )
     .when(seq, |b| {
@@ -749,13 +842,14 @@ fn cluster(
         glyph,
         label,
         state.can_play,
-        if playing {
-            colors::PLAYING
-        } else {
-            colors::BUTTON
-        },
+        colors::button(),
         scope,
     )
+    // Swift's Play is an untinted system button: only its glyph takes
+    // `state.play` while playing.
+    .when(playing && state.can_play, |b| {
+        b.text_color(rgb(colors::playing()))
+    })
     .when(state.can_play, |b| {
         b.on_click(cx.listener(|this, _, window, cx| this.play_stop(&PlayStop, window, cx)))
     });
@@ -793,7 +887,7 @@ fn record_button(
     };
     let enabled = r.enabled;
     let bounds = fields.record_button.clone();
-    let mut button = face("record", "\u{25cf}", enabled, colors::BUTTON)
+    let mut button = face("record", "\u{25cf}", enabled, colors::button())
         .w(px(CLUSTER_BUTTON))
         .child(scope.control("button", label, enabled))
         // Where it is, so a field's edit knows a press on it.
@@ -805,9 +899,8 @@ fn record_button(
                 .size_full(),
         );
     if r.recording {
-        button = button
-            .bg(rgb(tokens.state_record))
-            .text_color(rgb(colors::TEXT));
+        // Swift tints the bezel's glyph (`RecordControls.swift:27`), no fill.
+        button = button.text_color(rgb(tokens.state_record));
     } else if enabled {
         button = button.text_color(rgb(tokens.state_record));
     }
@@ -842,7 +935,7 @@ fn record_readouts(r: &RecordBar, mut row: Div, scope: &mut RegistryScope) -> Di
                 .whitespace_nowrap()
                 .text_xs()
                 .font_family("Menlo")
-                .text_color(rgb(colors::TEXT))
+                .text_color(rgb(colors::text()))
                 .child(p.clone())
                 .child(scope.control("text", p, true)),
         );
@@ -854,7 +947,7 @@ fn record_readouts(r: &RecordBar, mut row: Div, scope: &mut RegistryScope) -> Di
             .flex_none()
             .whitespace_nowrap()
             .text_xs()
-            .text_color(rgb(colors::DIM))
+            .text_color(rgb(colors::dim()))
             .child(t.clone())
             .child(scope.control("text", t, true));
         row = row.child(crate::sheet_host::with_help(
@@ -879,9 +972,9 @@ fn replace_overdub(
         r.mode_title,
         enabled,
         if r.overdub {
-            colors::ON
+            colors::on()
         } else {
-            colors::BUTTON
+            colors::button()
         },
     )
     .w(px(MODE))
@@ -912,9 +1005,9 @@ fn count_in(
         "Count-in",
         enabled,
         if r.count_in {
-            colors::ON
+            colors::on()
         } else {
-            colors::BUTTON
+            colors::button()
         },
     )
     .w(px(COUNT_IN))
@@ -945,10 +1038,10 @@ fn summary(text: &str, scope: &mut RegistryScope) -> AnyElement {
         .whitespace_nowrap()
         .px_2()
         .py(px(2.))
-        .rounded_sm()
+        .round_sm()
         .bg(Rgba { r, g, b, a: 0.18 })
         .text_xs()
-        .text_color(rgb(colors::TEXT))
+        .text_color(rgb(colors::text()))
         .child(text.to_owned())
         .child(scope.control("text", text, true))
         .into_any_element()
@@ -972,7 +1065,7 @@ fn click_item(
             "click-toggle",
             bar_items::CLICK,
             enabled,
-            if c.on { colors::ON } else { colors::BUTTON },
+            if c.on { colors::on() } else { colors::button() },
         )
         .w(px(CLICK_TOGGLE))
         .child(scope.control_with(
@@ -992,7 +1085,7 @@ fn click_item(
             cx.listener(|this, _, _, cx| this.open_click_menu(cx)),
         );
     let toggle = crate::sheet_host::with_help(toggle, bar_items::CLICK_HELP.to_owned());
-    let options = face("click-options", "\u{2304}", enabled, colors::BUTTON)
+    let options = face("click-options", "\u{2304}", enabled, colors::button())
         .w(px(CLICK_CHEVRON))
         .child(scope.control("button", bar_items::CLICK_OPTIONS, enabled))
         .when(enabled, |b| {
@@ -1074,12 +1167,12 @@ fn bar_menu_list(
         .flex_col()
         .min_w(px(160.))
         .py_1()
-        .bg(rgb(colors::LIST))
+        .bg(rgb(colors::list()))
         .border_1()
-        .border_color(rgb(colors::BORDER))
-        .rounded_md()
+        .border_color(rgb(colors::border()))
+        .round_md()
         .shadow_md()
-        .text_color(rgb(colors::TEXT));
+        .text_color(rgb(colors::text()));
     for (row, e) in entries.iter().enumerate() {
         let mut el = div()
             .id(("bar-menu-item", depth * 1000 + row))
@@ -1098,9 +1191,9 @@ fn bar_menu_list(
             .child(div().flex_1().whitespace_nowrap().child(e.title.clone()))
             .child(scope.control_selected("menuitem", &e.title, e.enabled, None, e.checked));
         el = if e.enabled {
-            el.cursor_pointer().hover(|s| s.bg(rgb(colors::BUTTON)))
+            el.cursor_pointer().hover(|s| s.bg(rgb(colors::button())))
         } else {
-            el.text_color(rgb(colors::DISABLED))
+            el.text_color(rgb(colors::disabled()))
         };
         match &e.kind {
             EntryKind::Action(action) => {
@@ -1113,7 +1206,7 @@ fn bar_menu_list(
                 }
             }
             EntryKind::Submenu(items) => {
-                el = el.child(div().text_color(rgb(colors::DIM)).child("\u{25B8}"));
+                el = el.child(div().text_color(rgb(colors::dim())).child("\u{25B8}"));
                 if e.enabled {
                     el = el.on_click(cx.listener(move |this, _, _, cx| {
                         this.open_bar_submenu(owner, depth, row, cx)
@@ -1153,7 +1246,7 @@ fn caption_item(label: &str, text: &str, width: f32, scope: &mut RegistryScope) 
         .overflow_hidden()
         .whitespace_nowrap()
         .text_xs()
-        .text_color(rgb(colors::DIM))
+        .text_color(rgb(colors::dim()))
         .child(text.to_owned())
         .child(scope.control_with("text", label, true, Some(text), false))
         .into_any_element()
@@ -1170,7 +1263,7 @@ fn command_button(
     cx: &mut Context<DocumentWindow>,
 ) -> AnyElement {
     let id = id.to_owned();
-    let button = face(("command-button", n), &f.label, f.enabled, colors::BUTTON)
+    let button = face(("command-button", n), &f.label, f.enabled, colors::button())
         .px(px(COMMAND_PADDING))
         .whitespace_nowrap()
         .child(scope.control_with(
@@ -1207,7 +1300,7 @@ fn loop_button(
         "loop",
         "Loop",
         true,
-        if on { colors::ON } else { colors::BUTTON },
+        if on { colors::on() } else { colors::button() },
     )
     .w(px(LOOP))
     .child(scope.control_with("button", "Loop", true, Some(value), false))
@@ -1225,17 +1318,21 @@ fn readout(which: ReadoutBox, text: &str, scope: &mut RegistryScope) -> AnyEleme
         .flex()
         .flex_col()
         .justify_center()
-        .rounded_md()
-        .bg(rgb(colors::READOUT))
+        .round_md()
+        .bg(rgb(colors::readout()))
         .overflow_hidden()
         .whitespace_nowrap()
         .child(
             div()
                 .text_xs()
-                .text_color(rgb(colors::DIM))
+                .text_color(rgb(colors::readout_label()))
                 .child(which.title()),
         )
-        .child(div().text_color(rgb(colors::TEXT)).child(text.to_owned()))
+        .child(
+            div()
+                .text_color(rgb(colors::readout_text()))
+                .child(text.to_owned()),
+        )
         .child(scope.control_with("text", which.accessibility_label(), true, Some(text), false))
         .into_any_element()
 }
@@ -1265,9 +1362,9 @@ fn field(
         .flex_none()
         .w(px(FIELD))
         .h(px(24.))
-        .rounded_sm()
+        .round_sm()
         .overflow_hidden()
-        .text_color(rgb(0x000000));
+        .text_color(rgb(colors::field_text()));
     let boxed = if editing {
         boxed.child(input).on_mouse_down_out(cx.listener(
             move |this, e: &MouseDownEvent, window, cx| {
@@ -1278,7 +1375,7 @@ fn field(
         ))
     } else {
         boxed
-            .bg(rgb(colors::FIELD))
+            .bg(rgb(colors::field()))
             .px(px(4.))
             .flex()
             .items_center()
@@ -1309,7 +1406,7 @@ fn field(
                 .w(px(labels.of(f)))
                 .flex_none()
                 .text_xs()
-                .text_color(rgb(colors::DIM))
+                .text_color(rgb(colors::dim()))
                 .whitespace_nowrap()
                 .child(f.title()),
         )
@@ -1353,12 +1450,12 @@ fn field_popover(
         .occlude()
         .relative()
         .p_3()
-        .bg(rgb(colors::LIST))
+        .bg(rgb(colors::list()))
         .border_1()
-        .border_color(rgb(colors::BORDER))
-        .rounded_md()
+        .border_color(rgb(colors::border()))
+        .round_md()
         .shadow_md()
-        .text_color(rgb(colors::TEXT))
+        .text_color(rgb(colors::text()))
         .child(scope.this("group", piece.title(), true))
         .child(field_group(
             piece, state, fields, labels, &mut scope, window, cx,
@@ -1404,7 +1501,7 @@ fn main_view(
                 ("main-view", main as usize),
                 title,
                 true,
-                if on { colors::ON } else { colors::BUTTON },
+                if on { colors::on() } else { colors::button() },
             )
             .w(px(SEGMENT))
             .child(scope.control_selected("button", title, true, None, on))
@@ -1431,7 +1528,11 @@ fn pane_toggles(
                 ("pane-toggle", side as usize),
                 glyph,
                 true,
-                if shown { colors::ON } else { colors::BUTTON },
+                if shown {
+                    colors::on()
+                } else {
+                    colors::button()
+                },
             )
             .w(px(CLUSTER_BUTTON))
             .child(scope.control_with(
@@ -1460,7 +1561,7 @@ fn more_button(
     cx: &mut Context<DocumentWindow>,
 ) -> AnyElement {
     let bounds = fields.more_button.clone();
-    let mut chevron = face("more", "\u{bb}", true, colors::BUTTON)
+    let mut chevron = face("more", "\u{bb}", true, colors::button())
         .w(px(CHEVRON))
         .child(scope.control("button", MORE, true))
         // Where it is, so a field popover knows a press on its opener.
@@ -1530,12 +1631,12 @@ fn more_menu(
         .flex_col()
         .min_w(px(220.))
         .py_1()
-        .bg(rgb(colors::LIST))
+        .bg(rgb(colors::list()))
         .border_1()
-        .border_color(rgb(colors::BORDER))
-        .rounded_md()
+        .border_color(rgb(colors::border()))
+        .round_md()
         .shadow_md()
-        .text_color(rgb(colors::TEXT));
+        .text_color(rgb(colors::text()));
     let mut row: usize = 0;
     for piece in folded.iter().copied() {
         if piece == Piece::Panes {
@@ -1553,7 +1654,7 @@ fn more_menu(
                         .px_3()
                         .py_1()
                         .cursor_pointer()
-                        .hover(|s| s.bg(rgb(colors::BUTTON)))
+                        .hover(|s| s.bg(rgb(colors::button())))
                         .child(
                             div()
                                 .flex_1()
@@ -1581,13 +1682,13 @@ fn more_menu(
                 .px_3()
                 .py_1()
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(colors::BUTTON)))
+                .hover(|s| s.bg(rgb(colors::button())))
                 .child(div().flex_1().child(format!(
                     "{}{}",
                     if e.checked { "\u{2713} " } else { "" },
                     e.title
                 )))
-                .child(div().text_color(rgb(colors::DIM)).child("\u{25B8}"))
+                .child(div().text_color(rgb(colors::dim())).child("\u{25B8}"))
                 .child(scope.control_selected("menuitem", &e.title, true, None, e.checked))
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_more_click(cx)));
             if let (Some(path), EntryKind::Submenu(items)) = (more_click, &e.kind) {
@@ -1616,13 +1717,13 @@ fn more_menu(
             entry = if f.enabled {
                 entry
                     .cursor_pointer()
-                    .hover(|s| s.bg(rgb(colors::BUTTON)))
+                    .hover(|s| s.bg(rgb(colors::button())))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.close_more(cx);
                         this.press_command(&id, window, cx);
                     }))
             } else {
-                entry.text_color(rgb(colors::DISABLED))
+                entry.text_color(rgb(colors::disabled()))
             };
             list = list.child(entry);
             row += 1;
@@ -1702,9 +1803,9 @@ fn more_menu(
             .gap_3()
             .px_3()
             .py_1()
-            .when(check && !acts, |e| e.text_color(rgb(colors::DISABLED)))
+            .when(check && !acts, |e| e.text_color(rgb(colors::disabled())))
             .child(div().flex_1().child(shown))
-            .child(div().text_color(rgb(colors::DIM)).child(detail))
+            .child(div().text_color(rgb(colors::dim())).child(detail))
             .child(scope.control_selected(
                 "menuitem",
                 piece.title(),
@@ -1715,7 +1816,7 @@ fn more_menu(
         if acts {
             entry = entry
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(colors::BUTTON)))
+                .hover(|s| s.bg(rgb(colors::button())))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.close_more(cx);
                     match piece {
@@ -1774,7 +1875,7 @@ pub fn render(
         .items_center()
         .gap(px(GAP))
         .p(px(PADDING))
-        .bg(rgb(colors::BAR))
+        .bg(rgb(colors::bar()))
         .overflow_hidden();
     for piece in plan.shown() {
         let child = match piece {
@@ -1882,7 +1983,7 @@ fn faults_button(
     } else {
         (tokens.state_warning, "warning")
     };
-    let button = face("faults", "\u{26a0}", true, colors::BUTTON)
+    let button = face("faults", "\u{26a0}", true, colors::button())
         .w(px(CLUSTER_BUTTON))
         .text_color(rgb(tint))
         .child(scope.control_with("button", FAULTS, true, Some(value), false))
@@ -1914,12 +2015,12 @@ fn faults_popover(
         .p_4()
         .min_w(px(FAULTS_MIN_WIDTH))
         .max_w(px(3. * FAULTS_MIN_WIDTH))
-        .bg(rgb(colors::LIST))
+        .bg(rgb(colors::list()))
         .border_1()
-        .border_color(rgb(colors::BORDER))
-        .rounded_md()
+        .border_color(rgb(colors::border()))
+        .round_md()
         .shadow_md()
-        .text_color(rgb(colors::TEXT))
+        .text_color(rgb(colors::text()))
         .child(scope.this("group", FAULTS, true));
     for line in &state.lines {
         list = list.child(
