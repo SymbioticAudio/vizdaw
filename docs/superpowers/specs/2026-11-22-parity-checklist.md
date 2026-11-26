@@ -60,7 +60,7 @@ item (false: keys, the Keys settings and the control channel only).
 | ui.toggle_bottom | View | Bottom Pane | ⌃⌘↓ | true | S4 | S4 |
 | ui.toggle_right | View | Right Pane | ⌃⌘→ | true | S6a | S6a |
 | ui.pane | View | Set Pane |  | false | S6a | S6a |
-| ui.theme | View | Theme |  | false | S9b | |
+| ui.theme | View | Theme |  | false | S9b | S9b |
 | ui.set_transport_bar | View | Set Transport Bar |  | false | S3 | S3 |
 | ui.reset_transport_bar | View | Reset Transport Bar |  | false | S3 | S3 |
 | ui.customize_transport | View | Customize Transport Bar… |  | true | | |
@@ -392,7 +392,7 @@ editors). The record popover is a popover, not a window.
 | Plugin Manager | `plugins` | | |
 | Song Notes | `window.song_notes` (opens the notes file in the system's editor, not a window of its own) | | |
 | Licences | `licences` | | |
-| Settings: Appearance | Settings tab | S9b (user themes: later) | |
+| Settings: Appearance | Settings tab | S9b (user themes: later) | S9b (CI; on screen: L27) |
 | Settings: Editing | Settings tab | | |
 | Settings: Keys | Settings tab | | |
 | Settings: Audio | Settings tab | S9a | S9a (CI; on screen: L26) |
@@ -555,7 +555,7 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 | bounces_the_demo_and_checks_the_file | | |
 | edits_a_region_through_the_stub_editor | | |
 | window_views_and_panes_over_the_channel | S6a (views and panes; mixer-window step later), S8c (markers step) | S6a (views via ui.view_*; ⌃2 is ⌘2 on Linux), S8c (markers step) |
-| themes_and_the_strip_over_the_channel | S9b (`gpui_themes_and_the_strip_over_the_channel`; all steps ported) | |
+| themes_and_the_strip_over_the_channel | S9b (`gpui_themes_and_the_strip_over_the_channel`; all steps ported) | S9b (CI run 45762262336) |
 | edits_a_region_in_the_audio_editor | | |
 | transport_jumps_readouts_and_fields_over_the_channel | S3 (steps 0–6), S8b (step 7) | S3 (steps 0–6); step 7 S8b |
 | new_project_tracks_over_the_channel | S3 (passed with the screen locked once the channel draws a fresh frame) | S2 |
