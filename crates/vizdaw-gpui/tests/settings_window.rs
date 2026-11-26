@@ -538,3 +538,236 @@ fn a_stale_window_handle_opens_a_new_window(cx: &mut TestAppContext) {
         SettingsTab::Audio
     );
 }
+
+// ---------------------------------------------------------------------
+// Task 6: the Recording and Automation tabs.
+
+impl Setup {
+    fn enabled(&mut self, role: &str, label: &str) -> bool {
+        self.find(role, label).unwrap().enabled
+    }
+
+    /// The front document window's element `role` `label`'s value.
+    fn doc_value(&mut self, role: &str, label: &str) -> Option<String> {
+        let h = self.doc.unwrap();
+        h.read_with(&self.cx, |v, _| {
+            v.registry()
+                .borrow()
+                .elements()
+                .iter()
+                .find(|e| e.role == role && e.label == label)
+                .and_then(|e| e.value.clone())
+        })
+        .unwrap()
+    }
+
+    fn items(&mut self) -> Vec<String> {
+        self.elements()
+            .into_iter()
+            .filter(|e| e.role == "menuitem")
+            .map(|e| e.label)
+            .collect()
+    }
+}
+
+#[gpui::test]
+fn the_recording_tab_shows_swifts_rows(cx: &mut TestAppContext) {
+    let mut s = setup(cx, true);
+    s.open(Some(SettingsTab::Recording));
+    for t in [
+        "New Projects",
+        "New Documents",
+        "Disk",
+        "Count-in: off",
+        "Pre-roll: off",
+        "Loop recording: each MIDI pass becomes a new take. Off: passes layer into the playing take. Audio passes always become takes.",
+        "Open documents keep their own options: change those in the transport bar's record popover.",
+        "Recording warns below 1 GB of free disk space and stops below 100 MB.",
+    ] {
+        assert!(s.has_text(t), "text {t}");
+    }
+    assert_eq!(s.value("menu", "Sample rate").unwrap(), "48 kHz");
+    assert_eq!(s.value("menu", "Bit depth").unwrap(), "24-bit");
+    assert_eq!(
+        s.value("menu", "Monitoring for new tracks").unwrap(),
+        "Auto"
+    );
+    assert_eq!(s.value("checkbox", "MIDI passes as takes").unwrap(), "off");
+    s.click("menu", "Sample rate");
+    let rates: Vec<String> = vizdaw_ffi::project_rates()
+        .into_iter()
+        .map(vizdaw_app::formats::rate_title)
+        .collect();
+    assert_eq!(s.items(), rates);
+    s.click("menuitem", "48 kHz");
+    s.click("menu", "Bit depth");
+    assert_eq!(s.items(), ["16-bit", "24-bit", "32-bit float"]);
+    s.click("menuitem", "24-bit");
+    s.click("menu", "Monitoring for new tracks");
+    assert_eq!(s.items(), ["Auto", "Input", "Off"]);
+    s.click("menuitem", "Off");
+    assert_eq!(
+        s.value("menu", "Monitoring for new tracks").unwrap(),
+        "Off"
+    );
+    assert!(s.core.calls().iter().any(|c| c.starts_with("set_default_monitor")));
+    // The steppers stop at Swift's ends: count-in 0-4, pre-roll 0-8.
+    assert!(!s.enabled("button", "Decrease Count-in"));
+    assert!(!s.enabled("button", "Decrease Pre-roll"));
+    for _ in 0..4 {
+        s.click("button", "Increase Count-in");
+    }
+    assert!(s.has_text("Count-in: 4 bars"));
+    assert!(!s.enabled("button", "Increase Count-in"));
+    for _ in 0..8 {
+        s.click("button", "Increase Pre-roll");
+    }
+    assert!(s.has_text("Pre-roll: 8 bars"));
+    assert!(!s.enabled("button", "Increase Pre-roll"));
+}
+
+#[gpui::test]
+fn changing_the_format_sets_the_next_new_project(cx: &mut TestAppContext) {
+    let mut s = setup(cx, true);
+    s.open(Some(SettingsTab::Recording));
+    s.choose("Sample rate", "44.1 kHz");
+    s.choose("Bit depth", "16-bit");
+    assert_eq!(s.value("menu", "Sample rate").unwrap(), "44.1 kHz");
+    let (store, saved) = s.app.read_with(&s.cx, |a, _| {
+        (a.store.default_format(), a.prefs.default_format())
+    });
+    assert_eq!(store, saved);
+    assert_eq!(saved.sample_rate, 44_100);
+    assert_eq!(depth_name(saved.depth), "16-bit");
+    // File › New starts at it.
+    s.cx.dispatch_action(vizdaw_gpui::NewDocument);
+    s.cx.run_until_parked();
+    assert_eq!(s.doc_value("menu", "Sample rate").unwrap(), "44.1 kHz");
+    assert_eq!(s.doc_value("menu", "Bit depth").unwrap(), "16-bit");
+}
+
+fn depth_name(d: vizdaw_ffi::BitDepthRow) -> &'static str {
+    vizdaw_app::formats::depth_title(d)
+}
+
+#[gpui::test]
+fn count_in_applies_to_the_next_new_document_not_open_ones(cx: &mut TestAppContext) {
+    let mut s = setup(cx, true);
+    s.core.hand_out("new_demo", Arc::new(demo_fake()));
+    let open_id = s.app.read_with(&s.cx, |a, _| a.store.front().unwrap());
+    s.open(Some(SettingsTab::Recording));
+    s.click("button", "Increase Count-in");
+    s.click("button", "Increase Count-in");
+    s.click("button", "Increase Pre-roll");
+    s.click("checkbox", "MIDI passes as takes");
+    assert!(s.has_text("Count-in: 2 bars"));
+    assert!(s.has_text("Pre-roll: 1 bar"));
+    assert_eq!(s.value("checkbox", "MIDI passes as takes").unwrap(), "on");
+    let saved = s.app.read_with(&s.cx, |a, _| a.audio.settings().count_in_bars);
+    assert_eq!(saved, 2);
+    // The open document keeps its own; the next one starts from these.
+    s.cx.update(|_, cx| vizdaw_gpui::new_demo(cx));
+    s.cx.run_until_parked();
+    let (open, next) = s.app.read_with(&s.cx, |a, _| {
+        let new_id = a.store.front().unwrap();
+        assert_ne!(new_id, open_id);
+        let r = |id| {
+            let d = a.store.document(id).unwrap();
+            (
+                d.record().count_in_bars(),
+                d.record().pre_roll_bars(),
+                d.record().midi_passes_as_takes(),
+            )
+        };
+        (r(open_id), r(new_id))
+    });
+    assert_eq!(open, (0, 0, false));
+    assert_eq!(next, (2, 1, true));
+}
+
+#[gpui::test]
+fn the_automation_tab_shows_swifts_rows(cx: &mut TestAppContext) {
+    let mut s = setup(cx, true);
+    s.open(Some(SettingsTab::Automation));
+    for t in [
+        "Return time: 250 ms",
+        "How closely written automation follows the move: 0.1 dB on faders and sends, 0.25 % elsewhere at Medium.",
+        "Always on: writing every parameter of every plugin would bury the tracks.",
+        "Changes apply from the next Play.",
+    ] {
+        assert!(s.has_text(t), "text {t}");
+    }
+    assert_eq!(s.value("menu", "After Write").unwrap(), "Latch");
+    assert_eq!(s.value("menu", "Thinning").unwrap(), "Medium");
+    let always = s
+        .find("checkbox", "Write plugin parameters only when touched")
+        .expect("the always-on toggle");
+    assert_eq!(always.value.as_deref(), Some("on"));
+    assert!(!always.enabled);
+    // Return time: 0-2000 in steps of 50.
+    s.click("button", "Increase Return time");
+    assert!(s.has_text("Return time: 300 ms"));
+    s.click("button", "Decrease Return time");
+    s.click("button", "Decrease Return time");
+    assert!(s.has_text("Return time: 200 ms"));
+    let saved = s.app.read_with(&s.cx, |a, _| a.automation.settings().return_ms);
+    assert_eq!(saved, 200);
+    s.choose("Thinning", "High");
+    assert_eq!(s.value("menu", "Thinning").unwrap(), "High");
+    s.click("menu", "Thinning");
+    assert_eq!(s.items(), ["Low", "Medium", "High"]);
+}
+
+#[gpui::test]
+fn after_write_never_offers_write(cx: &mut TestAppContext) {
+    let mut s = setup(cx, true);
+    s.open(Some(SettingsTab::Automation));
+    s.click("menu", "After Write");
+    assert_eq!(s.items(), ["Off", "Read", "Touch", "Latch", "Trim"]);
+    s.click("menuitem", "Trim");
+    assert_eq!(s.value("menu", "After Write").unwrap(), "Trim");
+}
+
+#[gpui::test]
+fn a_refused_automation_change_shows_the_problem(cx: &mut TestAppContext) {
+    let mut s = setup(cx, true);
+    s.open(Some(SettingsTab::Automation));
+    s.core.refuse_next(
+        "set_automation_settings",
+        VizError::Busy {
+            message: "Stop recording to change automation.".into(),
+        },
+    );
+    s.choose("After Write", "Touch");
+    assert_eq!(s.value("menu", "After Write").unwrap(), "Latch");
+    let p = s
+        .find("text", "Stop recording to change automation.")
+        .expect("the red problem line");
+    assert_eq!(p.value.as_deref(), Some("problem"));
+    let saved = s
+        .app
+        .read_with(&s.cx, |a, _| a.automation.settings().after_write.clone());
+    assert_eq!(saved, "latch");
+    s.choose("After Write", "Touch");
+    assert!(s.find("text", "Stop recording to change automation.").is_none());
+}
+
+#[gpui::test]
+fn reselecting_audio_while_a_read_hangs_starts_no_second_read(cx: &mut TestAppContext) {
+    let mut s = setup(cx, true);
+    s.fake.set_input(info("Scarlett"));
+    let hold = s.fake.hold_input_info();
+    s.open(Some(SettingsTab::Audio));
+    s.wait_for("the read starts", |_| hold.started());
+    let one = s.fake.reads("input_info");
+    s.click("tab", "Keys");
+    s.click("tab", "Audio");
+    s.cx.executor().advance_clock(Duration::from_millis(2500));
+    s.cx.run_until_parked();
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(s.fake.reads("input_info"), one, "one read is out");
+    hold.release();
+    s.wait_for("the round trip", |s| {
+        s.has_text("Round trip 6.8 ms (input 38 + output 34 + 2 × 128 frames)")
+    });
+}

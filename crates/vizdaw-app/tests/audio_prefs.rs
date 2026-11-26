@@ -6,7 +6,7 @@
 use serde_json::json;
 use vizdaw_app::Prefs;
 use vizdaw_app::audio_prefs::{
-    AudioPrefs, AudioSettings, DISK_TEXT, DeviceChoice, cache_choices, count_text, device_choices,
+    AudioPrefs, AudioSettings, DISK_TEXT, DeviceChoice, cache_choices, cache_text, count_text, device_choices,
     round_trip_text, trim_text,
 };
 use vizdaw_app::testing::FakeCore;
@@ -288,6 +288,16 @@ fn the_cache_picker_keeps_an_off_list_value() {
         cache_choices(300),
         [64, 128, 256, 300, 512, 1024, 2048, 4096, 8192]
     );
+}
+
+#[test]
+fn the_cache_text_is_mb_or_whole_gb() {
+    assert_eq!(cache_text(64), "64 MB");
+    assert_eq!(cache_text(512), "512 MB");
+    assert_eq!(cache_text(1024), "1 GB");
+    assert_eq!(cache_text(8192), "8 GB");
+    // Off the list: never the same words as 1 GB.
+    assert_eq!(cache_text(1536), "1536 MB");
 }
 
 #[test]

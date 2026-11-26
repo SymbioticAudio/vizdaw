@@ -16,10 +16,15 @@ use gpui::{
     WindowBounds, WindowOptions, anchored, deferred, div, point, px, rgb, size,
 };
 use vizdaw_app::audio_prefs::{
-    self, AudioPrefs, BUFFER_SIZES, cache_choices, device_choices, device_tag, round_trip_text,
-    trim_text,
+    self, AudioPrefs, BUFFER_SIZES, cache_choices, cache_text, count_text, device_choices, device_tag,
+    round_trip_text, trim_text,
 };
-use vizdaw_app::{DocSession, Prefs};
+use vizdaw_app::automation_prefs::{
+    AFTER_WRITE_CHOICES, APPLIES_TEXT, AutomationPrefs, MAX_RETURN_MS, PARAMS_ONLY_HELP,
+    PARAMS_ONLY_LABEL, RETURN_STEP, THINNING_CHOICES, THINNING_HELP, return_text,
+};
+use vizdaw_app::record::MIDI_TAKES_HELP;
+use vizdaw_app::{DocSession, Prefs, formats};
 use vizdaw_ffi::InputInfoRow;
 use vizdaw_ffi::host::InputDeviceRow;
 
@@ -36,6 +41,10 @@ pub const WIDTH: f32 = 500.;
 pub const DEFAULT_HEIGHT: f32 = 340.;
 /// The Audio tab's content height: four sections, nine rows, six captions.
 pub const AUDIO_HEIGHT: f32 = 660.;
+/// The Recording tab's content height: three sections, nine rows.
+pub const RECORDING_HEIGHT: f32 = 470.;
+/// The Automation tab's content height: five rows, three captions.
+pub const AUTOMATION_HEIGHT: f32 = 300.;
 /// The tab strip's room: two rows, for where the labels wrap (the body
 /// takes what one row leaves over).
 const STRIP_HEIGHT: f32 = 72.;
@@ -92,6 +101,8 @@ impl SettingsTab {
     pub fn height(self) -> f32 {
         match self {
             SettingsTab::Audio => AUDIO_HEIGHT,
+            SettingsTab::Recording => RECORDING_HEIGHT,
+            SettingsTab::Automation => AUTOMATION_HEIGHT,
             _ => DEFAULT_HEIGHT,
         }
     }
@@ -108,6 +119,11 @@ enum AudioMenu {
     Device,
     Buffer,
     Cache,
+    Rate,
+    Depth,
+    Monitor,
+    AfterWrite,
+    Thinning,
 }
 
 /// What choosing an entry does.
@@ -122,19 +138,20 @@ struct Choice {
 
 /// Runs `work` on its own thread (it may block: a core or HAL read) and
 /// hands its answer to `land` on the UI thread, if the window is still
-/// there.
+/// there. A panicking `work` lands as `None` (so the read is still over
+/// and the take-loop ends).
 fn read_off_thread<T: Send + 'static>(
     cx: &mut Context<SettingsWindow>,
     work: impl FnOnce() -> T + Send + 'static,
-    land: impl FnOnce(&mut SettingsWindow, T, &mut Context<SettingsWindow>) + 'static,
+    land: impl FnOnce(&mut SettingsWindow, Option<T>, &mut Context<SettingsWindow>) + 'static,
 ) {
     // The thread never wakes a GPUI task (a wake from another thread is
     // not allowed under the test scheduler): the answer waits in a slot,
     // and a short timer on the UI side takes it.
-    let slot: Arc<Mutex<Option<T>>> = Arc::new(Mutex::new(None));
+    let slot: Arc<Mutex<Option<Option<T>>>> = Arc::new(Mutex::new(None));
     let put = slot.clone();
     std::thread::spawn(move || {
-        let answer = work();
+        let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).ok();
         *put.lock().unwrap() = Some(answer);
     });
     cx.spawn(async move |this, cx| {
@@ -175,6 +192,9 @@ pub struct SettingsWindow {
     info: Option<InputInfoRow>,
     /// Bumped when the reads stop, so a late answer is dropped.
     round_gen: u64,
+    /// A round-trip read is out (its thread is still running). Apart from
+    /// the generation: re-selecting the tab while one hangs starts no
+    /// second thread.
     reading: bool,
     /// The 1 Hz poll, alive only while the Audio tab shows.
     poll: Option<Task<()>>,
@@ -233,7 +253,6 @@ impl SettingsWindow {
     fn shown(&mut self, cx: &mut Context<Self>) {
         self.poll = None;
         self.round_gen += 1;
-        self.reading = false;
         if self.tab != SettingsTab::Audio {
             return;
         }
@@ -258,6 +277,7 @@ impl SettingsWindow {
             cx,
             move || core.audio_input_device_list(),
             move |t, devices, cx| {
+                let Some(devices) = devices else { return };
                 if t.device_gen == generation && t.devices != devices {
                     t.devices = devices;
                     cx.notify();
@@ -279,10 +299,13 @@ impl SettingsWindow {
             cx,
             move || input_of_holder(&sessions),
             move |t, info, cx| {
+                // Whatever the generation, the read is over.
+                t.reading = false;
                 if t.round_gen != generation {
                     return;
                 }
-                t.reading = false;
+                // A read that panicked leaves what was shown.
+                let Some(info) = info else { return };
                 if t.info != info {
                     t.info = info;
                     cx.notify();
@@ -301,6 +324,26 @@ impl SettingsWindow {
         app.update(cx, |s, cx| {
             let core = s.store.core();
             let _ = f(&mut s.audio, &mut s.prefs, core.as_ref());
+            // New documents start from the (changed) record defaults.
+            s.store.set_record_defaults(s.audio.record_defaults());
+            cx.notify();
+        });
+    }
+
+    /// Changes an automation setting (core first, saved after); a refusal
+    /// is the tab's `problem` line.
+    fn change_automation(
+        cx: &mut App,
+        f: impl FnOnce(
+            &mut AutomationPrefs,
+            &mut Prefs,
+            &dyn vizdaw_app::CoreCalls,
+        ) -> Result<(), String>,
+    ) {
+        let app = AppState::global(cx);
+        app.update(cx, |s, cx| {
+            let core = s.store.core();
+            let _ = f(&mut s.automation, &mut s.prefs, core.as_ref());
             cx.notify();
         });
     }
@@ -332,7 +375,6 @@ impl SettingsWindow {
                 a.audio.problem().map(str::to_owned),
             )
         };
-        let me = cx.entity().downgrade();
         let t = tokens();
 
         // The Input section.
@@ -367,46 +409,21 @@ impl SettingsWindow {
             cx,
         );
 
-        let monitoring = {
-            let on = st.software_monitoring;
-            let mut sw = div()
-                .id("settings-software-monitoring")
-                .relative()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.))
-                .cursor_pointer()
-                .on_click(move |_, _, cx| {
-                    Self::change(cx, move |a, p, core| {
-                        a.set_software_monitoring(!on, p, core)
-                    });
-                    // Every document's meters follow at once.
-                    AppState::global(cx).update(cx, |s, _| s.store.refresh_input_monitoring());
-                })
-                .child(div().flex_1().child("Software Monitoring"))
-                .child(
-                    div()
-                        .w(px(34.))
-                        .h(px(18.))
-                        .rounded_full()
-                        .bg(rgb(if on { t.accent } else { t.surface_inset }))
-                        .border_1()
-                        .border_color(rgb(t.surface_separator))
-                        .flex()
-                        .flex_row()
-                        .when(on, |d| d.justify_end())
-                        .child(div().size(px(16.)).rounded_full().bg(rgb(t.surface_raised))),
-                );
-            sw = sw.child(scope.control_with(
-                "checkbox",
-                "Software Monitoring",
-                true,
-                Some(if on { "on" } else { "off" }),
-                false,
-            ));
-            sw.into_any_element()
-        };
+        let st_on = st.software_monitoring;
+        let monitoring = switch(
+            "settings-software-monitoring",
+            "Software Monitoring",
+            st.software_monitoring,
+            true,
+            scope,
+            move |_, cx| {
+                Self::change(cx, move |a, p, core| {
+                    a.set_software_monitoring(!st_on, p, core)
+                });
+                // Every document's meters follow at once.
+                AppState::global(cx).update(cx, |s, _| s.store.refresh_input_monitoring());
+            },
+        );
 
         // The Latency section.
         let buffer_items = BUFFER_SIZES
@@ -520,7 +537,6 @@ impl SettingsWindow {
                 });
             },
         );
-        let _ = me;
 
         let mut body = div().flex().flex_col().gap(px(6.)).p_4();
         body = body
@@ -581,14 +597,8 @@ impl SettingsWindow {
                     .child(ahead_buttons),
             )
             .child(caption("Cache and read-ahead apply from the next playback.", scope));
-        if let Some(p) = problem {
-            body = body.child(
-                div()
-                    .relative()
-                    .text_color(rgb(t.state_error))
-                    .child(p.clone())
-                    .child(scope.control_with("text", &p, true, Some("problem"), false)),
-            );
+        if let Some(p) = Self::problem_line(problem, scope) {
+            body = body.child(p);
         }
         body.into_any_element()
     }
@@ -694,12 +704,278 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    fn recording_tab(&mut self, scope: &mut RegistryScope) -> AnyElement {
-        placeholder_body(SettingsTab::Recording, scope)
+    /// A stepper row: its label with the value, and the buttons.
+    fn stepper_row(label: &str, buttons: AnyElement, scope: &mut RegistryScope) -> AnyElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.))
+            .child(div().flex_1().child(text(label, scope)))
+            .child(buttons)
+            .into_any_element()
     }
 
-    fn automation_tab(&mut self, scope: &mut RegistryScope) -> AnyElement {
-        placeholder_body(SettingsTab::Automation, scope)
+    /// The red line at a tab's bottom.
+    fn problem_line(problem: Option<String>, scope: &mut RegistryScope) -> Option<AnyElement> {
+        problem.map(|p| {
+            div()
+                .relative()
+                .text_color(rgb(tokens().state_error))
+                .child(p.clone())
+                .child(scope.control_with("text", &p, true, Some("problem"), false))
+                .into_any_element()
+        })
+    }
+
+    fn recording_tab(
+        &mut self,
+        scope: &mut RegistryScope,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (st, problem, format, rates) = {
+            let a = AppState::global(cx).read(cx);
+            (
+                a.audio.settings().clone(),
+                a.audio.problem().map(str::to_owned),
+                a.store.default_format(),
+                a.store.core().project_rates(),
+            )
+        };
+
+        // New Projects: the core's rates, and the current one if it is not
+        // among them.
+        let mut rate_list = rates;
+        if !rate_list.contains(&format.sample_rate) {
+            rate_list.push(format.sample_rate);
+            rate_list.sort_unstable();
+        }
+        let rate_items = rate_list
+            .into_iter()
+            .map(|r| Choice {
+                title: formats::rate_title(r),
+                checked: r == format.sample_rate,
+                pick: Rc::new(move |_, cx| set_format(cx, Some(r), None)),
+            })
+            .collect();
+        let rate = self.picker(
+            "Sample rate",
+            &formats::rate_title(format.sample_rate),
+            AudioMenu::Rate,
+            rate_items,
+            scope,
+            window,
+            cx,
+        );
+        let depth_items = formats::DEPTHS
+            .iter()
+            .map(|&(d, title)| Choice {
+                title: title.to_owned(),
+                checked: d == format.depth,
+                pick: Rc::new(move |_, cx| set_format(cx, None, Some(d))),
+            })
+            .collect();
+        let depth = self.picker(
+            "Bit depth",
+            formats::depth_title(format.depth),
+            AudioMenu::Depth,
+            depth_items,
+            scope,
+            window,
+            cx,
+        );
+
+        // New Documents.
+        let count_in = stepper_buttons(
+            "Count-in",
+            Range {
+                min: 0,
+                max: 4,
+                step: 1,
+            },
+            i64::from(st.count_in_bars),
+            scope,
+            |v, _, cx| {
+                Self::change(cx, move |a, p, core| a.set_count_in_bars(v as u8, p, core));
+            },
+        );
+        let pre_roll = stepper_buttons(
+            "Pre-roll",
+            Range {
+                min: 0,
+                max: 8,
+                step: 1,
+            },
+            i64::from(st.pre_roll_bars),
+            scope,
+            |v, _, cx| {
+                Self::change(cx, move |a, p, core| a.set_pre_roll_bars(v as u8, p, core));
+            },
+        );
+        let takes_on = st.midi_passes_as_takes;
+        let takes = switch(
+            "settings-midi-takes",
+            "MIDI passes as takes",
+            takes_on,
+            true,
+            scope,
+            move |_, cx| {
+                Self::change(cx, move |a, p, core| {
+                    a.set_midi_passes_as_takes(!takes_on, p, core)
+                });
+            },
+        );
+        let monitor_items = [("auto", "Auto"), ("input", "Input"), ("off", "Off")]
+            .into_iter()
+            .map(|(id, title)| Choice {
+                title: title.to_owned(),
+                checked: id == st.default_monitor,
+                pick: Rc::new(move |_, cx| {
+                    Self::change(cx, move |a, p, core| a.set_default_monitor(id, p, core));
+                }),
+            })
+            .collect();
+        let face = match st.default_monitor.as_str() {
+            "input" => "Input",
+            "off" => "Off",
+            _ => "Auto",
+        };
+        let monitor = self.picker(
+            "Monitoring for new tracks",
+            face,
+            AudioMenu::Monitor,
+            monitor_items,
+            scope,
+            window,
+            cx,
+        );
+
+        let mut body = div().flex().flex_col().gap(px(6.)).p_4();
+        body = body
+            .child(section("New Projects", scope))
+            .child(form_row("Sample rate", rate, scope))
+            .child(form_row("Bit depth", depth, scope))
+            .child(section("New Documents", scope))
+            .child(Self::stepper_row(
+                &format!("Count-in: {}", count_text(st.count_in_bars)),
+                count_in,
+                scope,
+            ))
+            .child(Self::stepper_row(
+                &format!("Pre-roll: {}", count_text(st.pre_roll_bars)),
+                pre_roll,
+                scope,
+            ))
+            .child(takes)
+            .child(caption(MIDI_TAKES_HELP, scope))
+            .child(form_row("Monitoring for new tracks", monitor, scope))
+            .child(caption(
+                "Open documents keep their own options: change those in the transport bar's record popover.",
+                scope,
+            ))
+            .child(section("Disk", scope))
+            .child(caption(audio_prefs::DISK_TEXT, scope));
+        if let Some(p) = Self::problem_line(problem, scope) {
+            body = body.child(p);
+        }
+        body.into_any_element()
+    }
+
+    fn automation_tab(
+        &mut self,
+        scope: &mut RegistryScope,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (st, problem) = {
+            let a = AppState::global(cx).read(cx);
+            (
+                a.automation.settings().clone(),
+                a.automation.problem().map(str::to_owned),
+            )
+        };
+        let title_of = |choices: &[(&str, &str)], id: &str| {
+            choices
+                .iter()
+                .find(|(i, _)| *i == id)
+                .map_or("", |(_, t)| *t)
+                .to_owned()
+        };
+        let after_items = AFTER_WRITE_CHOICES
+            .iter()
+            .map(|&(id, title)| Choice {
+                title: title.to_owned(),
+                checked: id == st.after_write,
+                pick: Rc::new(move |_, cx| {
+                    Self::change_automation(cx, move |a, p, core| a.set_after_write(id, p, core));
+                }),
+            })
+            .collect();
+        let after = self.picker(
+            "After Write",
+            &title_of(&AFTER_WRITE_CHOICES, &st.after_write),
+            AudioMenu::AfterWrite,
+            after_items,
+            scope,
+            window,
+            cx,
+        );
+        let ret = stepper_buttons(
+            "Return time",
+            Range {
+                min: 0,
+                max: i64::from(MAX_RETURN_MS),
+                step: i64::from(RETURN_STEP),
+            },
+            i64::from(st.return_ms),
+            scope,
+            |v, _, cx| {
+                Self::change_automation(cx, move |a, p, core| a.set_return_ms(v as u32, p, core));
+            },
+        );
+        let thin_items = THINNING_CHOICES
+            .iter()
+            .map(|&(id, title)| Choice {
+                title: title.to_owned(),
+                checked: id == st.thinning,
+                pick: Rc::new(move |_, cx| {
+                    Self::change_automation(cx, move |a, p, core| a.set_thinning(id, p, core));
+                }),
+            })
+            .collect();
+        let thinning = self.picker(
+            "Thinning",
+            &title_of(&THINNING_CHOICES, &st.thinning),
+            AudioMenu::Thinning,
+            thin_items,
+            scope,
+            window,
+            cx,
+        );
+        // Always on, so it cannot be turned off.
+        let always = switch(
+            "settings-params-only",
+            PARAMS_ONLY_LABEL,
+            true,
+            false,
+            scope,
+            |_, _| {},
+        );
+
+        let mut body = div().flex().flex_col().gap(px(6.)).p_4();
+        body = body
+            .child(form_row("After Write", after, scope))
+            .child(Self::stepper_row(&return_text(st.return_ms), ret, scope))
+            .child(form_row("Thinning", thinning, scope))
+            .child(caption(THINNING_HELP, scope))
+            .child(always)
+            .child(caption(PARAMS_ONLY_HELP, scope))
+            .child(caption(APPLIES_TEXT, scope));
+        if let Some(p) = Self::problem_line(problem, scope) {
+            body = body.child(p);
+        }
+        body.into_any_element()
     }
 
     fn surfaces_tab(&mut self, scope: &mut RegistryScope) -> AnyElement {
@@ -725,8 +1001,8 @@ impl SettingsWindow {
             SettingsTab::Editing => self.editing_tab(scope),
             SettingsTab::Keys => self.keys_tab(scope),
             SettingsTab::Audio => self.audio_tab(scope, window, cx),
-            SettingsTab::Recording => self.recording_tab(scope),
-            SettingsTab::Automation => self.automation_tab(scope),
+            SettingsTab::Recording => self.recording_tab(scope, window, cx),
+            SettingsTab::Automation => self.automation_tab(scope, window, cx),
             SettingsTab::Surfaces => self.surfaces_tab(scope),
             SettingsTab::Plugins => self.plugins_tab(scope),
             SettingsTab::CoProducer => self.co_producer_tab(scope),
@@ -734,13 +1010,66 @@ impl SettingsWindow {
     }
 }
 
-/// "N MB", or "N GB" from 1024 (Swift `AudioSettingsView.swift:90`).
-fn cache_text(mb: u32) -> String {
-    if mb >= 1024 {
-        format!("{} GB", mb / 1024)
-    } else {
-        format!("{mb} MB")
+/// File › New's default format from the Recording tab: `rate` and/or
+/// `depth` replace the current ones.
+fn set_format(cx: &mut App, rate: Option<u32>, depth: Option<vizdaw_ffi::BitDepthRow>) {
+    AppState::global(cx).update(cx, |s, cx| {
+        let cur = s.store.default_format();
+        s.remember_default_format(vizdaw_ffi::ProjectFormatRow {
+            sample_rate: rate.unwrap_or(cur.sample_rate),
+            depth: depth.unwrap_or(cur.depth),
+        });
+        cx.notify();
+    });
+}
+
+/// A switch row (Swift `Toggle`): the label, then the switch at the right;
+/// `checkbox` in the tree, its value `on` or `off`. A disabled one takes
+/// no clicks.
+fn switch(
+    id: &'static str,
+    label: &'static str,
+    on: bool,
+    enabled: bool,
+    scope: &mut RegistryScope,
+    press: impl Fn(&mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let t = tokens();
+    let mut row = div()
+        .id(id)
+        .relative()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.))
+        .opacity(if enabled { 1. } else { 0.6 });
+    if enabled {
+        row = row
+            .cursor_pointer()
+            .on_click(move |_, window, cx| press(window, cx));
     }
+    row.child(div().flex_1().child(label))
+        .child(
+            div()
+                .w(px(34.))
+                .h(px(18.))
+                .rounded_full()
+                .bg(rgb(if on { t.accent } else { t.surface_inset }))
+                .border_1()
+                .border_color(rgb(t.surface_separator))
+                .flex()
+                .flex_row()
+                .when(on, |d| d.justify_end())
+                .child(div().size(px(16.)).rounded_full().bg(rgb(t.surface_raised))),
+        )
+        .child(scope.control_with(
+            "checkbox",
+            label,
+            enabled,
+            Some(if on { "on" } else { "off" }),
+            false,
+        ))
+        .into_any_element()
 }
 
 /// A line of text, in the tree as a `text`.
