@@ -217,6 +217,12 @@ pub mod colors {
     pub fn readout() -> u32 {
         current().readout.background.rgb
     }
+    /// The readouts' label: `readout.text` at 0.72 over `readout.background`
+    /// (Swift `TransportReadouts.swift:119-121`).
+    pub fn readout_label() -> u32 {
+        let t = current();
+        mix(t.readout.background.rgb, t.readout.text.rgb, 0.72)
+    }
     /// The readouts' text (`readout.text`).
     pub fn readout_text() -> u32 {
         current().readout.text.rgb
@@ -244,10 +250,6 @@ pub mod colors {
     /// A popover or menu list (`surface.inset`).
     pub fn list() -> u32 {
         current().surface.inset.rgb
-    }
-    /// A row under the pointer (`surface.selection`).
-    pub fn hover() -> u32 {
-        current().surface.selection.rgb
     }
     /// A hairline (`surface.separator`).
     pub fn border() -> u32 {
@@ -839,13 +841,14 @@ fn cluster(
         glyph,
         label,
         state.can_play,
-        if playing {
-            colors::playing()
-        } else {
-            colors::button()
-        },
+        colors::button(),
         scope,
     )
+    // Swift's Play is an untinted system button: only its glyph takes
+    // `state.play` while playing.
+    .when(playing && state.can_play, |b| {
+        b.text_color(rgb(colors::playing()))
+    })
     .when(state.can_play, |b| {
         b.on_click(cx.listener(|this, _, window, cx| this.play_stop(&PlayStop, window, cx)))
     });
@@ -895,9 +898,8 @@ fn record_button(
                 .size_full(),
         );
     if r.recording {
-        button = button
-            .bg(rgb(tokens.state_record))
-            .text_color(rgb(colors::text()));
+        // Swift tints the bezel's glyph (`RecordControls.swift:27`), no fill.
+        button = button.text_color(rgb(tokens.state_record));
     } else if enabled {
         button = button.text_color(rgb(tokens.state_record));
     }
@@ -1322,10 +1324,14 @@ fn readout(which: ReadoutBox, text: &str, scope: &mut RegistryScope) -> AnyEleme
         .child(
             div()
                 .text_xs()
-                .text_color(rgb(colors::dim()))
+                .text_color(rgb(colors::readout_label()))
                 .child(which.title()),
         )
-        .child(div().text_color(rgb(colors::text())).child(text.to_owned()))
+        .child(
+            div()
+                .text_color(rgb(colors::readout_text()))
+                .child(text.to_owned()),
+        )
         .child(scope.control_with("text", which.accessibility_label(), true, Some(text), false))
         .into_any_element()
 }

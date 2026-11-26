@@ -52,6 +52,16 @@ fn the_transport_bar_takes_the_theme(cx: &mut TestAppContext) {
     assert_ne!(colors::text(), text);
     // The playing and on faces follow too.
     assert_eq!(colors::playing(), dark.state.play.rgb);
+    // The readouts: value in readout.text, label a 0.72 mix.
+    assert_eq!(colors::readout_text(), dark.readout.text.rgb);
+    assert_eq!(
+        colors::readout_label(),
+        colors::mix(dark.readout.background.rgb, dark.readout.text.rgb, 0.72)
+    );
+    let eg13 = use_theme(cx, "eg13");
+    assert_eq!(colors::readout_text(), eg13.readout.text.rgb);
+    assert_ne!(colors::readout_text(), colors::text());
+    use_theme(cx, "studio-dark");
     assert_eq!(colors::on(), colors::on_of(dark));
     assert_ne!(colors::on_of(dark), colors::on_of(light));
 }
@@ -65,7 +75,7 @@ fn a_sheet_card_takes_the_theme(cx: &mut TestAppContext) {
     assert_eq!(a.text, light.text.primary.rgb);
     assert_eq!(a.default_button, light.accent.accent.rgb);
     assert_eq!(a.default_button_text, light.accent.on_accent.rgb);
-    assert_eq!(a.destructive_button, light.state.error.rgb);
+    assert_eq!(a.destructive_text, light.state.error.rgb);
     let dark = use_theme(cx, "studio-dark");
     let b = card_colours();
     assert_eq!(b.background, dark.surface.window.rgb);
@@ -113,6 +123,11 @@ fn no_chrome_file_keeps_a_colour_literal() {
         let text = std::fs::read_to_string(&f).unwrap();
         for (n, line) in text.lines().enumerate() {
             let code = line.split("//").next().unwrap();
+            // The one allowed struct literal: the "on" fill built from the
+            // accent token's channels (alpha applied to a token).
+            if f.ends_with("transport_bar.rs") && code.contains("Rgba { r, g, b, a: 0.18 }") {
+                continue;
+            }
             let hex = code.match_indices("0x").any(|(i, _)| {
                 code[i + 2..]
                     .chars()
@@ -120,7 +135,18 @@ fn no_chrome_file_keeps_a_colour_literal() {
                     .count()
                     >= 6
             });
+            let named = ["blue", "red", "green", "yellow", "white"].iter().any(|n| {
+                code.match_indices(&format!("{n}()")).any(|(i, _)| {
+                    !code[..i]
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                })
+            });
             if hex
+                || named
+                || (code.contains("Rgba {") && !code.contains("-> Rgba {"))
+                || (code.contains("Hsla {") && !code.contains("-> Hsla {"))
                 || code.contains("hsla(")
                 || code.replace("transparent_black()", "").contains("black()")
                 || code.contains("white()")

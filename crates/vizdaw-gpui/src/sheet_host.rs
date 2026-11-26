@@ -44,7 +44,7 @@ const CARD_WIDTH: f32 = 460.;
 /// The colours a sheet or alert card draws, all the current theme's.
 /// Swift's sheets and alerts use the system backgrounds, so the card is
 /// `surface.window` and its text `text.primary`; the default button takes
-/// the accent, a destructive one `state.error`, and the dimmed document
+/// the accent, a destructive one `state.error` text, and the dimmed document
 /// behind is `meter.background` (the one dark token every theme has) at
 /// 0.6.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -54,8 +54,9 @@ pub struct CardColours {
     pub border: u32,
     pub default_button: u32,
     pub default_button_text: u32,
-    pub destructive_button: u32,
-    pub destructive_button_text: u32,
+    /// A destructive button's text (Swift `role: .destructive`: red text,
+    /// the normal face).
+    pub destructive_text: u32,
     pub scrim: gpui::Hsla,
 }
 
@@ -68,8 +69,7 @@ pub fn card_colours() -> CardColours {
         border: t.surface.separator.rgb,
         default_button: t.accent.accent.rgb,
         default_button_text: t.accent.on_accent.rgb,
-        destructive_button: t.state.error.rgb,
-        destructive_button_text: t.text.inverse.rgb,
+        destructive_text: t.state.error.rgb,
         scrim: gpui::Hsla::from(rgb(t.meter.background.rgb)).opacity(0.6),
     }
 }
@@ -467,7 +467,7 @@ pub(crate) fn button_face(i: usize, b: &SheetButton) -> Stateful<Div> {
         ButtonRole::Default | ButtonRole::DefaultCancel if b.enabled => {
             (k.default_button, k.default_button_text)
         }
-        ButtonRole::Destructive if b.enabled => (k.destructive_button, k.destructive_button_text),
+        ButtonRole::Destructive if b.enabled => (colors::button(), k.destructive_text),
         _ => (colors::button(), colors::text()),
     };
     div()
