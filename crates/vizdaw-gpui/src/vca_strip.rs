@@ -168,11 +168,12 @@ fn header(
     }
     holder = holder.children(rename_popover(view, id, scope, window, cx));
     at(0., 0., w, RowHeights::HEADER)
-        .child(
+        // Show channel colour bars (Swift `appearancePreferences.colourBars`).
+        .children(crate::appearance::colour_bars().then(|| {
             at(0., 0., w, StripLayout::COLOUR_BAR)
                 .rounded(px(t.radius))
-                .bg(v.colour),
-        )
+                .bg(v.colour)
+        }))
         .child(holder)
         .child(
             at(0., KIND_TOP, w, KIND_HEIGHT)

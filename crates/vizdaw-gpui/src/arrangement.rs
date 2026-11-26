@@ -76,23 +76,96 @@ pub const RECORDING_TAKE: &str = "Recording take";
 /// The zoom buttons' row above the headers and the canvas.
 pub const TOOLBAR_HEIGHT: f32 = 32.;
 
-/// The fixed colours of this slice (themes come later).
+/// The editors' colours, read from the current theme each time they are
+/// asked (Swift `EditorTheme.swift`): never held, so a theme change shows
+/// at the next draw. The alphas are the editors' own (Swift's drawing
+/// code), apart from a region's fill and the grid, which are the theme's.
 pub mod colors {
-    pub const CANVAS: u32 = 0x1e1e25;
-    pub const RULER: u32 = 0x26262e;
-    pub const BAR_LINE: u32 = 0x3c3c48;
-    pub const BEAT_LINE: u32 = 0x2b2b34;
-    pub const SEPARATOR: u32 = 0x3a3a46;
-    pub const TICK: u32 = 0x9a9aa6;
-    pub const LABEL: u32 = 0xe8e8ec;
-    pub const SELECTION: u32 = 0x4a7dff;
-    pub const REGION_FILL: u32 = 0x3d6fb8;
-    pub const REGION_LINE: u32 = 0x77a3e6;
-    pub const REGION_SELECTED: u32 = 0xffffff;
-    pub const REFERENCE: u32 = 0x9a6fd6;
-    pub const PLAYHEAD: u32 = 0xff5a4a;
-    /// The block fill's alpha (a reference's is 0.30).
-    pub const REGION_ALPHA: f32 = 0.55;
+    use crate::appearance::current;
+    use gpui::{Hsla, rgb};
+    use vizdaw_app::theme::Color;
+
+    /// A theme colour as drawn: its channels at its own alpha.
+    pub fn paint(c: Color) -> Hsla {
+        Hsla::from(rgb(c.rgb)).opacity(f32::from(c.alpha) / 255.)
+    }
+    /// The canvas background (`surface.inset`).
+    pub fn canvas() -> u32 {
+        current().surface.inset.rgb
+    }
+    /// The ruler and header background (`surface.panel`).
+    pub fn ruler() -> u32 {
+        current().surface.panel.rgb
+    }
+    /// A bar line: `graph.grid` at its own alpha.
+    pub fn bar_line() -> Hsla {
+        paint(current().graph.grid)
+    }
+    /// A beat line: `graph.grid` at 0.35 of its alpha.
+    pub fn beat_line() -> Hsla {
+        bar_line().opacity(0.35)
+    }
+    pub fn separator() -> u32 {
+        current().surface.separator.rgb
+    }
+    /// A ruler tick and the fade lines (`text.secondary`).
+    pub fn tick() -> u32 {
+        current().text.secondary.rgb
+    }
+    pub fn label() -> u32 {
+        current().text.primary.rgb
+    }
+    pub fn selection() -> u32 {
+        current().surface.selection.rgb
+    }
+    /// The playhead (`state.record`).
+    pub fn playhead() -> u32 {
+        current().state.record.rgb
+    }
+    /// A region's and a note's fill: `graph.fill` at its own alpha.
+    pub fn region_fill() -> Hsla {
+        paint(current().graph.fill)
+    }
+    /// A region's outline (`graph.line`).
+    pub fn region_line() -> u32 {
+        current().graph.line.rgb
+    }
+    /// A selected region's or note's outline (`graph.handleSelected`).
+    pub fn region_selected() -> u32 {
+        current().graph.handle_selected.rgb
+    }
+    /// A reference block (`swatch.purple`).
+    pub fn reference() -> u32 {
+        current().swatch.purple.rgb
+    }
+    /// Offline media: the hatching and the pill's text (`state.offline`,
+    /// Swift `RegionPalette.offline`), on the canvas.
+    pub fn offline() -> u32 {
+        current().state.offline.rgb
+    }
+    pub fn offline_pill() -> u32 {
+        canvas()
+    }
+    /// The piano keyboard's keys and labels (`keys.*`).
+    pub fn white_key() -> u32 {
+        current().keys.white.rgb
+    }
+    pub fn black_key() -> u32 {
+        current().keys.black.rgb
+    }
+    pub fn key_label() -> u32 {
+        current().keys.black.rgb
+    }
+    /// Track `index`'s colour: the swatches in order (red, orange,
+    /// yellow, green, teal, blue, purple, pink), modulo 8.
+    pub fn swatch(index: usize) -> u32 {
+        let s = &current().swatch;
+        [
+            s.red, s.orange, s.yellow, s.green, s.teal, s.blue, s.purple, s.pink,
+        ][index % 8]
+            .rgb
+    }
+    /// A block's fill alpha for a reference.
     pub const REFERENCE_ALPHA: f32 = 0.30;
     /// A muted block's fill is this much of the usual.
     pub const MUTED_ALPHA: f32 = 0.4;
@@ -101,36 +174,19 @@ pub mod colors {
     pub const BODY_SHADE: f32 = 0.10;
     /// The mini notes' alpha.
     pub const SKETCH_ALPHA: f32 = 0.55;
-    /// An audio region's waveform: `REGION_LINE` at this alpha (Swift
+    /// An audio region's waveform: `region_line` at this alpha (Swift
     /// `RegionPalette.waveform`).
     pub const WAVEFORM_ALPHA: f32 = 0.65;
-    /// Offline media: the hatching (at its alpha) and the pill's text
-    /// (Swift `RegionPalette.offline`), on the pill's background (the
-    /// canvas, Swift `offlineLabelBackground`).
-    pub const OFFLINE: u32 = 0xf0883e;
+    /// The offline hatching's alpha.
     pub const OFFLINE_HATCH_ALPHA: f32 = 0.55;
-    pub const OFFLINE_PILL: u32 = CANVAS;
-    /// A region's fade lines (Swift `RegionPalette.fadeLine`, the
-    /// secondary label colour).
-    pub const FADE_LINE: u32 = TICK;
     /// A recording take's body: the record colour (a theme token) at
     /// this alpha, outlined in it (Swift `drawGrowingTakes`).
     pub const TAKE_ALPHA: f32 = 0.18;
     pub const RADIUS: f32 = 4.;
-    /// The piano keyboard's keys and labels (fixed until themes land).
-    pub const WHITE_KEY: u32 = 0xe6e6ea;
-    pub const BLACK_KEY: u32 = 0x18181d;
-    pub const KEY_LABEL: u32 = 0x18181d;
     /// A black key's bar on the keyboard, and its row's shade in the roll
-    /// (`LABEL` at this alpha).
+    /// (`label` at this alpha).
     pub const BLACK_KEY_ALPHA: f32 = 0.85;
     pub const BLACK_ROW_ALPHA: f32 = 0.05;
-    /// The track colours, in order (red, orange, yellow, green, teal,
-    /// blue, purple, pink); a track takes its place in its sequence's
-    /// tracks, modulo 8.
-    pub const TRACK_SWATCHES: [u32; 8] = [
-        0xe5534b, 0xf0883e, 0xe3b341, 0x56c26a, 0x3fb8af, 0x4a8fe7, 0x9a6fd6, 0xe56fb0,
-    ];
     /// A note's fill alpha on the edit track, and on the others.
     pub const NOTE_ACTIVE_ALPHA: f32 = 0.85;
     pub const NOTE_ALPHA: f32 = 0.4;
@@ -1072,13 +1128,13 @@ impl TimeLayer {
     /// Under the rows: the canvas colour and the grid lines.
     pub(crate) fn paint_grid(&self, o: Point<Pixels>, window: &mut Window) {
         let body_h = self.body_height();
-        window.paint_quad(fill(self.body(o), rgb(colors::CANVAS)));
+        window.paint_quad(fill(self.body(o), rgb(colors::canvas())));
         for (x, kind) in &self.grid {
             let c = match kind {
-                GridKind::Bar(_) => colors::BAR_LINE,
-                GridKind::Beat => colors::BEAT_LINE,
+                GridKind::Bar(_) => colors::bar_line(),
+                GridKind::Beat => colors::beat_line(),
             };
-            window.paint_quad(fill(canvas_rect(o, *x, RULER_HEIGHT, 1., body_h), rgb(c)));
+            window.paint_quad(fill(canvas_rect(o, *x, RULER_HEIGHT, 1., body_h), c));
         }
     }
 
@@ -1088,13 +1144,13 @@ impl TimeLayer {
         if let Some((x, width)) = self.shade {
             window.paint_quad(fill(
                 canvas_rect(o, x, RULER_HEIGHT, width, body_h),
-                hsla(colors::SELECTION, colors::BODY_SHADE),
+                with_alpha(colors::selection(), colors::BODY_SHADE),
             ));
         }
         if let Some(x) = self.playhead {
             window.paint_quad(fill(
                 canvas_rect(o, x, RULER_HEIGHT, 1., body_h),
-                rgb(colors::PLAYHEAD),
+                rgb(colors::playhead()),
             ));
         }
     }
@@ -1104,11 +1160,11 @@ impl TimeLayer {
         let w = self.width;
         let ruler = canvas_rect(o, 0., 0., w, RULER_HEIGHT);
         window.with_content_mask(Some(ContentMask { bounds: ruler }), |window| {
-            window.paint_quad(fill(ruler, rgb(colors::RULER)));
+            window.paint_quad(fill(ruler, rgb(colors::ruler())));
             if let Some((x, width)) = self.shade {
                 window.paint_quad(fill(
                     canvas_rect(o, x, 0., width, RULER_HEIGHT),
-                    hsla(colors::SELECTION, colors::RULER_SHADE),
+                    with_alpha(colors::selection(), colors::RULER_SHADE),
                 ));
             }
             for (x, kind) in &self.ruler {
@@ -1118,15 +1174,22 @@ impl TimeLayer {
                 };
                 window.paint_quad(fill(
                     canvas_rect(o, *x, from, 1., RULER_HEIGHT - from),
-                    rgb(colors::TICK),
+                    rgb(colors::tick()),
                 ));
             }
             for (x, text) in &self.labels {
-                paint_text(text, o.x + px(*x), o.y + px(2.), colors::LABEL, window, cx);
+                paint_text(
+                    text,
+                    o.x + px(*x),
+                    o.y + px(2.),
+                    colors::label(),
+                    window,
+                    cx,
+                );
             }
             window.paint_quad(fill(
                 canvas_rect(o, 0., RULER_HEIGHT - 1., w, 1.),
-                rgb(colors::SEPARATOR),
+                rgb(colors::separator()),
             ));
         });
     }
@@ -1402,7 +1465,7 @@ impl Scene {
     }
 }
 
-pub(crate) fn hsla(c: u32, alpha: f32) -> Hsla {
+pub(crate) fn with_alpha(c: u32, alpha: f32) -> Hsla {
     Hsla::from(rgb(c)).opacity(alpha)
 }
 
@@ -1438,7 +1501,7 @@ impl Prepared {
         window.with_content_mask(Some(ContentMask { bounds: body }), |window| {
             self.time.paint_grid(o, window);
             for y in &self.separators {
-                window.paint_quad(fill(rect(0., *y, w, 1.), rgb(colors::SEPARATOR)));
+                window.paint_quad(fill(rect(0., *y, w, 1.), rgb(colors::separator())));
             }
             for b in &self.blocks {
                 paint_block(b, &rect, window, cx);
@@ -1469,8 +1532,9 @@ fn paint_take(t: &TakeDraw, o: Point<Pixels>, window: &mut Window) {
         (r.width - 1.).max(0.),
         (r.height - 1.).max(0.),
     );
-    window
-        .paint_quad(fill(body, hsla(record, colors::TAKE_ALPHA)).corner_radii(px(colors::RADIUS)));
+    window.paint_quad(
+        fill(body, with_alpha(record, colors::TAKE_ALPHA)).corner_radii(px(colors::RADIUS)),
+    );
     let inside = canvas_rect(o, r.x, r.y, r.width, r.height);
     window.with_content_mask(Some(ContentMask { bounds: inside }), |window| {
         for (wave, rows) in &t.waves {
@@ -1478,7 +1542,7 @@ fn paint_take(t: &TakeDraw, o: Point<Pixels>, window: &mut Window) {
                 rows,
                 *wave,
                 o,
-                hsla(colors::REGION_LINE, colors::WAVEFORM_ALPHA),
+                with_alpha(colors::region_line(), colors::WAVEFORM_ALPHA),
                 window,
             );
         }
@@ -1500,29 +1564,24 @@ fn paint_block(
     cx: &mut App,
 ) {
     let r = b.rect;
-    let (fill_colour, fill_alpha, line) = if b.reference {
+    let (fill_colour, line) = if b.reference {
         (
-            colors::REFERENCE,
-            colors::REFERENCE_ALPHA,
-            colors::REFERENCE,
+            with_alpha(colors::reference(), colors::REFERENCE_ALPHA),
+            colors::reference(),
         )
     } else {
-        (
-            colors::REGION_FILL,
-            colors::REGION_ALPHA,
-            colors::REGION_LINE,
-        )
+        (colors::region_fill(), colors::region_line())
     };
-    let alpha = fill_alpha * if b.muted { colors::MUTED_ALPHA } else { 1. };
+    let fill_colour = fill_colour.opacity(if b.muted { colors::MUTED_ALPHA } else { 1. });
     let (line, width) = if b.selected {
-        (colors::REGION_SELECTED, 2.)
+        (colors::region_selected(), 2.)
     } else {
         (line, 1.)
     };
     window.paint_quad(quad(
         rect(r.x + 0.5, r.y + 0.5, r.width - 1., r.height - 1.),
         px(colors::RADIUS),
-        hsla(fill_colour, alpha),
+        fill_colour,
         px(width),
         rgb(line),
         if b.muted {
@@ -1535,7 +1594,7 @@ fn paint_block(
     for n in &b.sketch {
         window.paint_quad(fill(
             rect(n.x, n.y, n.width, n.height),
-            hsla(colors::LABEL, colors::SKETCH_ALPHA),
+            with_alpha(colors::label(), colors::SKETCH_ALPHA),
         ));
     }
     if let Some(text) = &b.label {
@@ -1550,7 +1609,7 @@ fn paint_block(
                 text,
                 inside.origin.x + px(4.),
                 inside.origin.y + px(3.),
-                colors::LABEL,
+                colors::label(),
                 window,
                 cx,
             );

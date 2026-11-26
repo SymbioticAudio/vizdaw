@@ -23,7 +23,7 @@ use gpui::{
     AnyElement, AppContext, Bounds, Context, Entity, FocusHandle, Focusable, InteractiveElement,
     IntoElement, KeyBinding, MouseButton, MouseDownEvent, ParentElement, Pixels, ScrollDelta,
     ScrollEvent, StatefulInteractiveElement, Styled, Subscription, Window, actions, anchored,
-    canvas, deferred, div, hsla, point, px, rgb,
+    canvas, deferred, div, point, px, rgb,
 };
 use vizdaw_app::DocumentModel;
 use vizdaw_app::editor::EditorTarget;
@@ -816,6 +816,7 @@ fn table(
         .flex_1()
         .min_h_0()
         .overflow_hidden()
+        .bg(rgb(crate::arrangement::colors::canvas()))
         .child(measure)
         .child(rows)
         .child(body_scope.clip());
@@ -839,6 +840,10 @@ fn table(
         .into_any_element()
 }
 
+/// Every other row's shade: the label colour at this alpha (Swift
+/// `ListEditorView.swift:122`).
+const ROW_SHADE: f32 = 0.04;
+
 /// One row: its cells (the edited one is the field), shaded every other
 /// row, filled when selected.
 fn row(
@@ -856,8 +861,13 @@ fn row(
         .flex_none()
         .h(px(ROW_HEIGHT))
         .w_full()
-        .when(index % 2 == 1, |d| d.bg(hsla(0., 0., 1., 0.04)))
-        .when(r.selected, |d| d.bg(rgb(colors::on())));
+        .when(index % 2 == 1, |d| {
+            d.bg(crate::arrangement::with_alpha(colors::text(), ROW_SHADE))
+        })
+        .when(r.selected, |d| {
+            d.bg(rgb(crate::arrangement::colors::selection()))
+                .text_color(rgb(colors::inverse()))
+        });
     for (&column, (text, editable)) in state.columns.iter().zip(&r.cells) {
         let edited = editor
             .editing

@@ -67,7 +67,7 @@ use macos as platform;
 use other as platform;
 
 pub use platform::{EditorHost, Parked};
-pub use view::PluginWindowView;
+pub use view::{PluginWindowView, WindowColours, colours as window_colours};
 
 use std::time::{Duration, Instant};
 

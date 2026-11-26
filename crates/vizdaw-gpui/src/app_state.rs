@@ -124,6 +124,7 @@ impl Global for GlobalAppState {}
 impl AppState {
     pub fn new(store: DocumentStore) -> Self {
         crate::appearance::set_current(vizdaw_app::theme::DEFAULT_THEME_ID);
+        crate::appearance::set_colour_bars(true);
         AppState {
             store,
             keymap: Keymap::default(),
@@ -179,6 +180,14 @@ impl AppState {
         Ok(ran)
     }
 
+    /// Show channel colour bars: sets and saves it (a failed write keeps
+    /// it for this run) and redraws every window.
+    pub fn set_colour_bars(&mut self, on: bool, cx: &mut gpui::App) {
+        self.appearance.set_colour_bars(on, &mut self.prefs);
+        crate::appearance::set_colour_bars(on);
+        cx.refresh_windows();
+    }
+
     /// Takes `prefs` as the app's preferences; new projects are made in
     /// their default format. The saved audio and automation settings go to
     /// the core now (call it before any document opens, so the first
@@ -194,6 +203,7 @@ impl AppState {
         self.store.set_record_defaults(self.audio.record_defaults());
         self.appearance = vizdaw_app::appearance_prefs::AppearancePrefs::load(&prefs);
         crate::appearance::set_current(&self.appearance.theme);
+        crate::appearance::set_colour_bars(self.appearance.colour_bars);
         self.prefs = prefs;
     }
 

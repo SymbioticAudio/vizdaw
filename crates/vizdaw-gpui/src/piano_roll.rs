@@ -56,7 +56,8 @@ use vizdaw_ffi::selection::SelectionRow;
 use vizdaw_ffi::selection::TickRange;
 
 use crate::arrangement::{
-    TimeLayer, bar_button, canvas_rect, colors, hsla, machine_modifiers, paint_text, tool_picker,
+    TimeLayer, bar_button, canvas_rect, colors, machine_modifiers, paint_text, tool_picker,
+    with_alpha,
 };
 use crate::detail_pane;
 use crate::list_editor::{Entry, bar_menu};
@@ -85,7 +86,7 @@ const ZOOM_STEP: f64 = 1.5;
 /// Keys are labelled only when rows are at least this tall.
 const LABEL_ROW_HEIGHT: f32 = 8.;
 /// The rubber band's fill alpha.
-const BAND_ALPHA: f32 = 0.15;
+const BAND_ALPHA: f32 = 0.12;
 /// The keyboard's black key bar, as a part of the strip's width.
 const BLACK_KEY_WIDTH: f32 = 0.62;
 
@@ -389,7 +390,7 @@ impl PianoRoll {
 /// One shown track as the roll draws it.
 struct LaneDraw {
     notes: LaneNotes,
-    colour: u32,
+    colour: usize,
     /// Its name in the notes' labels (only with more than one shown).
     name: Option<String>,
     /// The edit track (drawn on top, brighter).
@@ -442,12 +443,11 @@ impl RollState {
         let lane_notes = doc.roll_lane_notes();
         let several = lane_notes.len() > 1;
         let edit_lane = doc.roll_edit_lane();
-        let swatches = &colors::TRACK_SWATCHES;
         let lanes = lane_notes
             .iter()
             .map(|l| LaneDraw {
                 notes: l.clone(),
-                colour: swatches[doc.roll_color_index(l.lane) % swatches.len()],
+                colour: doc.roll_color_index(l.lane),
                 name: several.then(|| name(l.lane.lane)),
                 active: Some(l.lane) == edit_lane,
             })
@@ -729,21 +729,24 @@ fn paint_keyboard(bounds: Bounds<Pixels>, pitch: &PitchAxis, window: &mut Window
     let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
     let body_h = (h - RULER_HEIGHT).max(0.);
     let rect = |x: f32, y: f32, w: f32, h: f32| canvas_rect(o, x, y, w, h);
-    window.paint_quad(fill(bounds, rgb(colors::RULER)));
+    window.paint_quad(fill(bounds, rgb(colors::ruler())));
     let body = rect(0., RULER_HEIGHT, w, body_h);
     if body_h > 0. {
         window.with_content_mask(Some(ContentMask { bounds: body }), |window| {
             let rh = pitch.row_height();
             for p in pitch.visible(body_h) {
                 let y = RULER_HEIGHT + pitch.top(p);
-                window.paint_quad(fill(rect(0., y, w, rh), rgb(colors::WHITE_KEY)));
+                window.paint_quad(fill(rect(0., y, w, rh), rgb(colors::white_key())));
                 if is_black(p) {
                     window.paint_quad(fill(
                         rect(0., y + 1., w * BLACK_KEY_WIDTH, (rh - 2.).max(0.)),
-                        hsla(colors::BLACK_KEY, colors::BLACK_KEY_ALPHA),
+                        with_alpha(colors::black_key(), colors::BLACK_KEY_ALPHA),
                     ));
                 }
-                window.paint_quad(fill(rect(0., y + rh - 0.5, w, 0.5), rgb(colors::SEPARATOR)));
+                window.paint_quad(fill(
+                    rect(0., y + rh - 0.5, w, 0.5),
+                    rgb(colors::separator()),
+                ));
                 if rh >= LABEL_ROW_HEIGHT
                     && let Some(label) = key_label(p)
                 {
@@ -751,7 +754,7 @@ fn paint_keyboard(bounds: Bounds<Pixels>, pitch: &PitchAxis, window: &mut Window
                         &label,
                         o.x + px(w - 26.),
                         o.y + px(y + (rh - 14.) / 2.),
-                        colors::KEY_LABEL,
+                        colors::key_label(),
                         window,
                         cx,
                     );
@@ -759,7 +762,7 @@ fn paint_keyboard(bounds: Bounds<Pixels>, pitch: &PitchAxis, window: &mut Window
             }
         });
     }
-    window.paint_quad(fill(rect(w - 1., 0., 1., h), rgb(colors::SEPARATOR)));
+    window.paint_quad(fill(rect(w - 1., 0., 1., h), rgb(colors::separator())));
 }
 
 /// The note canvas, recorded in `scope` (the group and its notes).
@@ -895,7 +898,7 @@ struct Prepared {
 
 struct NoteDraw {
     rect: Rect,
-    colour: u32,
+    colour: usize,
     alpha: f32,
     selected: bool,
 }
@@ -1000,25 +1003,28 @@ impl Prepared {
                 if black {
                     window.paint_quad(fill(
                         rect(0., y, w, rh),
-                        hsla(colors::LABEL, colors::BLACK_ROW_ALPHA),
+                        with_alpha(colors::label(), colors::BLACK_ROW_ALPHA),
                     ));
                 }
                 if c {
-                    window.paint_quad(fill(rect(0., y + rh - 0.5, w, 1.), rgb(colors::SEPARATOR)));
+                    window.paint_quad(fill(
+                        rect(0., y + rh - 0.5, w, 1.),
+                        rgb(colors::separator()),
+                    ));
                 }
             }
             for n in &self.notes {
                 let r = n.rect;
                 let (line, width) = if n.selected {
-                    (colors::REGION_SELECTED, 2.)
+                    (colors::region_selected(), 2.)
                 } else {
-                    (colors::REGION_LINE, 1.)
+                    (colors::region_line(), 1.)
                 };
                 let (nw, nh) = ((r.width - 1.).max(0.), (r.height - 1.).max(0.));
                 window.paint_quad(quad(
                     rect(r.x + 0.5, r.y + 0.5, nw, nh),
                     px(colors::RADIUS.min(nh / 2.)),
-                    hsla(n.colour, n.alpha),
+                    with_alpha(colors::swatch(n.colour), n.alpha),
                     px(width),
                     rgb(line),
                     BorderStyle::Solid,
@@ -1029,9 +1035,9 @@ impl Prepared {
                 window.paint_quad(quad(
                     rect(b.x, b.y, b.width, b.height),
                     px(0.),
-                    hsla(colors::REGION_SELECTED, BAND_ALPHA),
+                    with_alpha(colors::selection(), BAND_ALPHA),
                     px(1.),
-                    rgb(colors::REGION_SELECTED),
+                    rgb(colors::selection()),
                     BorderStyle::Solid,
                 ));
             }

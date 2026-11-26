@@ -2150,11 +2150,12 @@ fn header(
         .as_ref()
         .map(|g| group_tag(view, s.id, g, w, scope, window, cx));
     at(x, y, w, h)
-        .child(
+        // Show channel colour bars (Swift `appearancePreferences.colourBars`).
+        .children(crate::appearance::colour_bars().then(|| {
             at(0., 0., w, StripLayout::COLOUR_BAR)
                 .rounded(px(t.radius))
-                .bg(s.bar),
-        )
+                .bg(s.bar)
+        }))
         .child(name_holder)
         .children(tag)
         .child(

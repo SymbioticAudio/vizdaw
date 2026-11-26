@@ -642,7 +642,7 @@ pub(crate) fn frame(
         .flex()
         .flex_col()
         .when(!shown, |d| d.invisible())
-        .bg(rgb(colors::readout()))
+        .bg(rgb(colors::window()))
         .child(picker)
         .child(crate::detail_pane::divider())
         .child(
@@ -887,7 +887,7 @@ pub(crate) fn mixer(content: AnyElement, scope: &RegistryScope) -> AnyElement {
         .min_h_0()
         .size_full()
         .overflow_hidden()
-        .bg(rgb(colors::readout()))
+        .bg(rgb(colors::window()))
         .child(content)
         .child(scope.this("group", MIXER, true))
         .into_any_element()
@@ -926,7 +926,7 @@ pub(crate) fn dividers(
         let label = format!("{} Size", side_title(side));
         let value = format!("{} points", state.setup.pane(side).size as i64);
         let color = if dragging.is_some() {
-            colors::on()
+            colors::accent()
         } else {
             colors::border()
         };

@@ -48,17 +48,78 @@ const MONO: &str = "Menlo";
 #[cfg(not(target_os = "macos"))]
 const MONO: &str = "DejaVu Sans Mono";
 
-/// The colours of this slice (themes come later).
+/// The window's colours, read from the current theme each time they are
+/// asked (the Swift window was system-drawn: the nearest `surface.*`,
+/// `text.*` and `accent.*` tokens).
 mod colors {
-    pub const BACKGROUND: u32 = 0x1e1e25;
-    pub const HEADER: u32 = 0x26262e;
-    pub const DIVIDER: u32 = 0x3a3a46;
-    pub const TEXT: u32 = 0xe6e6ea;
-    pub const DIM: u32 = 0x9a9aa6;
-    pub const BUTTON: u32 = 0x34343e;
-    pub const ON: u32 = 0x3d6fd9;
-    pub const TRACK: u32 = 0x4a4a56;
-    pub const THUMB: u32 = 0xd8d8de;
+    use crate::appearance::current;
+    use crate::transport_bar::colors as bar;
+
+    /// The window (`surface.window`).
+    pub fn background() -> u32 {
+        current().surface.window.rgb
+    }
+    /// The header (`surface.panel`).
+    pub fn header() -> u32 {
+        current().surface.panel.rgb
+    }
+    pub fn divider() -> u32 {
+        current().surface.separator.rgb
+    }
+    pub fn text() -> u32 {
+        current().text.primary.rgb
+    }
+    pub fn dim() -> u32 {
+        current().text.secondary.rgb
+    }
+    pub fn button() -> u32 {
+        current().surface.raised.rgb
+    }
+    /// A toggle that is on: the transport's lit face.
+    pub fn on() -> u32 {
+        bar::on()
+    }
+    /// A slider's track and its filled part.
+    pub fn track() -> u32 {
+        current().surface.separator.rgb
+    }
+    pub fn fill() -> u32 {
+        current().accent.accent.rgb
+    }
+    pub fn thumb() -> u32 {
+        current().text.primary.rgb
+    }
+}
+
+/// The plug-in window's colours (the test seam of what render draws).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowColours {
+    pub background: u32,
+    pub header: u32,
+    pub divider: u32,
+    pub text: u32,
+    pub dim: u32,
+    pub button: u32,
+    pub on: u32,
+    pub track: u32,
+    pub fill: u32,
+    pub thumb: u32,
+}
+
+/// The colours the plug-in window draws now.
+pub fn colours() -> WindowColours {
+    WindowColours {
+        background: colors::background(),
+        header: colors::header(),
+        divider: colors::divider(),
+        text: colors::text(),
+        dim: colors::dim(),
+        button: colors::button(),
+        on: colors::on(),
+        track: colors::track(),
+        fill: colors::fill(),
+        thumb: colors::thumb(),
+    }
 }
 
 /// A slider's drag under way: its parameter and its track as drawn.
@@ -280,8 +341,8 @@ impl Render for PluginWindowView {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .bg(rgb(colors::BACKGROUND))
-            .text_color(rgb(colors::TEXT))
+            .bg(rgb(colors::background()))
+            .text_color(rgb(colors::text()))
             .text_size(px(12.));
         let s = self.app.read(cx);
         let Some(e) = s.plugin_windows.entry(token) else {
@@ -341,7 +402,7 @@ impl Render for PluginWindowView {
                 .child(
                     div()
                         .relative()
-                        .text_color(rgb(colors::DIM))
+                        .text_color(rgb(colors::dim()))
                         .child(text.clone())
                         .child(scope.control("text", &text, true)),
                 )
@@ -373,7 +434,7 @@ fn header_view(
         .flex()
         .items_center()
         .rounded(px(4.))
-        .bg(rgb(if on { colors::ON } else { colors::BUTTON }))
+        .bg(rgb(if on { colors::on() } else { colors::button() }))
         .child(BYPASS)
         .child(scope.control_selected("checkbox", BYPASS, enabled, None, on));
     if enabled {
@@ -394,7 +455,7 @@ fn header_view(
         .flex()
         .items_center()
         .rounded(px(4.))
-        .bg(rgb(colors::BUTTON))
+        .bg(rgb(colors::button()))
         .opacity(0.45)
         .child(LEARN)
         .child(scope.control_with("button", LEARN, false, Some(&h.learn_help), false));
@@ -406,7 +467,7 @@ fn header_view(
             .overflow_hidden()
             .whitespace_nowrap()
             .text_ellipsis()
-            .text_color(rgb(colors::DIM))
+            .text_color(rgb(colors::dim()))
             .child(r.clone())
             .child(scope.control("text", &r, true))
     });
@@ -419,9 +480,9 @@ fn header_view(
         .items_center()
         .gap(px(8.))
         .px(px(8.))
-        .bg(rgb(colors::HEADER))
+        .bg(rgb(colors::header()))
         .border_b_1()
-        .border_color(rgb(colors::DIVIDER))
+        .border_color(rgb(colors::divider()))
         .child(bypass)
         .child(learn)
         .children(reason)
@@ -525,7 +586,7 @@ fn slider(view: &WeakEntity<PluginWindowView>, l: &Line, scope: &mut RegistrySco
                 .top(px(9.))
                 .h(px(2.))
                 .rounded(px(1.))
-                .bg(rgb(colors::TRACK)),
+                .bg(rgb(colors::track())),
         )
         .child(
             div()
@@ -535,7 +596,7 @@ fn slider(view: &WeakEntity<PluginWindowView>, l: &Line, scope: &mut RegistrySco
                 .h(px(2.))
                 .w(relative(share))
                 .rounded(px(1.))
-                .bg(rgb(colors::ON)),
+                .bg(rgb(colors::fill())),
         )
         .child(
             div()
@@ -545,7 +606,7 @@ fn slider(view: &WeakEntity<PluginWindowView>, l: &Line, scope: &mut RegistrySco
                 .ml(px(-7.))
                 .size(px(14.))
                 .rounded_full()
-                .bg(rgb(colors::THUMB)),
+                .bg(rgb(colors::thumb())),
         )
         .child(scope.control_with("slider", &l.name, l.editable, Some(&l.accessibility), false));
     if l.editable {
@@ -635,7 +696,7 @@ fn synth_body(
     let caption = div()
         .relative()
         .text_size(px(11.))
-        .text_color(rgb(colors::DIM))
+        .text_color(rgb(colors::dim()))
         .child(CAPTION)
         .child(scope.control("text", CAPTION, true));
     div()

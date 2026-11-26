@@ -227,13 +227,16 @@ impl StripTokens {
     /// The colour bar: the strip's own colour, else the accent for a
     /// Co-Producer strip, else its kind's.
     pub fn bar(&self, s: &StripRow) -> Rgba {
-        if let Some(c) = s.colour {
-            return self.swatch(c);
+        self.resolve(Bar::of(s))
+    }
+
+    /// The colour a [`Bar`] names in the current theme.
+    pub fn resolve(&self, b: Bar) -> Rgba {
+        match b {
+            Bar::Swatch(c) => self.swatch(c),
+            Bar::Accent => rgb(self.accent),
+            Bar::Cap(k) => self.cap(k),
         }
-        if s.co_producer {
-            return rgb(self.accent);
-        }
-        self.cap(s.kind_colour)
     }
 
     pub fn knob(&self, f: KnobFunction) -> Rgba {
@@ -288,6 +291,31 @@ impl StripTokens {
         } else {
             self.text_inverse
         })
+    }
+}
+
+/// Which token a colour bar takes, kept instead of the colour so a
+/// theme change shows at the next draw (Swift `StripPalette.bar`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bar {
+    /// The strip's own colour.
+    Swatch(SwatchRow),
+    /// A Co-Producer strip's: the accent.
+    Accent,
+    /// Its kind's cap colour.
+    Cap(StripColourRow),
+}
+
+impl Bar {
+    /// The bar of strip `s`.
+    pub fn of(s: &StripRow) -> Bar {
+        if let Some(c) = s.colour {
+            Bar::Swatch(c)
+        } else if s.co_producer {
+            Bar::Accent
+        } else {
+            Bar::Cap(s.kind_colour)
+        }
     }
 }
 
