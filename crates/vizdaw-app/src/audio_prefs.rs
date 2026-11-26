@@ -531,6 +531,18 @@ pub fn cache_choices(current: u32) -> Vec<u32> {
     v
 }
 
+/// The RAM cache picker's title: "N MB", or "N GB" for a whole number of
+/// them from 1024 (Swift `AudioSettingsView.swift:90` writes `mb / 1024`,
+/// so an off-list 1536 would read "1 GB" twice in one list; it stays
+/// "1536 MB" here).
+pub fn cache_text(mb: u32) -> String {
+    if mb >= 1024 && mb % 1024 == 0 {
+        format!("{} GB", mb / 1024)
+    } else {
+        format!("{mb} MB")
+    }
+}
+
 /// The count-in stepper's value: "off", "1 bar" or "n bars".
 pub fn count_text(bars: u8) -> String {
     match bars {

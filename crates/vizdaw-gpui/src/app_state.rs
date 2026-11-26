@@ -104,6 +104,9 @@ pub struct AppState {
     /// The plug-in and Built-in Synth windows, with their models and
     /// native editor hosts.
     pub(crate) plugin_windows: PluginWindows,
+    /// The Settings window, while it is open. It belongs to no document,
+    /// so it is not one of `windows`.
+    pub settings_window: Option<WindowHandle<crate::settings_window::SettingsWindow>>,
 }
 
 /// The poll's interval while a retry waits on Busy (Swift's 60 Hz tick).
@@ -130,6 +133,7 @@ impl AppState {
             next_token: 1,
             last_idle: HashMap::new(),
             plugin_windows: PluginWindows::default(),
+            settings_window: None,
         }
     }
 

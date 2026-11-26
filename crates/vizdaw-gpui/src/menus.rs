@@ -44,6 +44,7 @@ actions!(
         SaveAs,
         CloseWindow,
         Quit,
+        OpenSettings,
         PlayStop,
         StopAndReturn,
     ]
@@ -161,6 +162,8 @@ pub enum MixerOp {
 pub const WINDOW_CONTEXT: &str = "DocumentWindow";
 /// The key context of a plug-in or Built-in Synth window's root.
 pub const PLUGIN_WINDOW_CONTEXT: &str = "PluginWindow";
+/// The Settings window's key context: no document key acts in it.
+pub const SETTINGS_WINDOW_CONTEXT: &str = "SettingsWindow";
 /// The editor commands (`commands::EDITOR_COMMANDS`) the GPUI app routes
 /// to its menus, keys and control channel: the grid, the Piano Roll, the
 /// List, closing the detail and Insert Event (the List's).
@@ -323,6 +326,9 @@ pub enum ItemSpec {
 // Slice 1's items. Where the registry has the command its ID is used (for
 // the keys shown).
 const APP_QUIT: &str = "app.quit";
+/// VizDAW › Settings… (menu-local: Swift's was the app menu's built-in
+/// item, never a registry command).
+const APP_SETTINGS: &str = "app.settings";
 const FILE_NEW: &str = "file.new";
 const FILE_CREATE_DEMO: &str = "file.create_demo";
 const FILE_OPEN: &str = "file.open";
@@ -366,6 +372,7 @@ const FILE_BOUND: &[&str] = &["file.open_copy", "media.import", "media.relink"];
 pub fn action_for(id: &str) -> Box<dyn Action> {
     match id {
         APP_QUIT => Box::new(Quit),
+        APP_SETTINGS => Box::new(OpenSettings),
         FILE_NEW => Box::new(NewDocument),
         FILE_CREATE_DEMO => Box::new(NewDemo),
         FILE_OPEN => Box::new(OpenDocument),
@@ -594,7 +601,11 @@ pub fn menu_model(front: Option<&DocumentModel>, keymap: &Keymap) -> MenuModel {
         menus: vec![
             menu(
                 "VizDAW",
-                vec![slice1(APP_QUIT, quit_title, Some(quit_key), keymap)],
+                vec![
+                    slice1(APP_SETTINGS, "Settings…", Some(","), keymap),
+                    ItemSpec::Separator,
+                    slice1(APP_QUIT, quit_title, Some(quit_key), keymap),
+                ],
             ),
             menu("File", file_items(front, keymap)),
             menu(
@@ -866,6 +877,8 @@ pub fn bindings(keymap: &Keymap) -> Vec<KeyBinding> {
         KeyBinding::new(secondary!("n"), NewDocument, None),
         KeyBinding::new(secondary!("o"), OpenDocument, None),
         KeyBinding::new(secondary!("q"), Quit, None),
+        KeyBinding::new(secondary!(","), OpenSettings, None),
+        KeyBinding::new(secondary!("w"), CloseWindow, Some(SETTINGS_WINDOW_CONTEXT)),
         KeyBinding::new(secondary!("s"), Save, Some(WINDOW_CONTEXT)),
         KeyBinding::new(secondary!("shift-s"), SaveAs, Some(WINDOW_CONTEXT)),
         KeyBinding::new(secondary!("w"), CloseWindow, Some(WINDOW_CONTEXT)),

@@ -403,6 +403,8 @@ struct Files {
     cancelled: Vec<u64>,
     /// Reads by call name.
     reads: HashMap<String, usize>,
+    /// Holds on the next `input_info` reads (queued).
+    input_holds: VecDeque<Arc<ReadHold>>,
     media: Vec<MediaRow>,
     recheck: bool,
     project_info: Option<ProjectInfoRow>,
@@ -1635,6 +1637,14 @@ impl FakeSession {
     /// Every `run_click(id, args)`, in order.
     pub fn clicks_run(&self) -> Vec<(String, Vec<ControlArg>)> {
         self.st().rec.clicks_run.clone()
+    }
+
+    /// Holds the next `input_info` read (queued): it takes its answer,
+    /// then waits for the release.
+    pub fn hold_input_info(&self) -> Arc<ReadHold> {
+        let h = Arc::new(ReadHold::default());
+        self.st().files.input_holds.push_back(h.clone());
+        h
     }
 
     /// What `input_info` answers (default: no input).
@@ -3343,9 +3353,16 @@ impl DocSession for FakeSession {
         Ok(s.snap.clone())
     }
     fn input_info(&self) -> Result<InputInfoRow, VizError> {
-        let mut s = self.st();
-        Self::read(&mut s, "input_info")?;
-        Ok(s.rec.input.clone().unwrap_or_else(no_input))
+        let (answer, hold) = {
+            let mut s = self.st();
+            Self::read(&mut s, "input_info")?;
+            let hold = s.files.input_holds.pop_front();
+            (s.rec.input.clone().unwrap_or_else(no_input), hold)
+        };
+        if let Some(h) = hold {
+            h.hold();
+        }
+        Ok(answer)
     }
     fn input_levels(&self) -> Result<Vec<f32>, VizError> {
         let mut s = self.st();

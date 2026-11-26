@@ -289,6 +289,25 @@ impl DocumentStore {
         self.key_window
     }
 
+    /// Every open document's session, in the order they were opened
+    /// (Settings › Audio reads the input from them).
+    pub fn sessions(&self) -> Vec<Arc<dyn DocSession>> {
+        let mut ids: Vec<DocId> = self.documents.keys().copied().collect();
+        ids.sort();
+        ids.iter()
+            .map(|id| self.documents[id].session().clone())
+            .collect()
+    }
+
+    /// Every document reads Software Monitoring again (Swift
+    /// `AudioSettingsView.swift:35`: the meters follow a change at once,
+    /// not at the next poll).
+    pub fn refresh_input_monitoring(&mut self) {
+        for d in self.documents.values_mut() {
+            d.inputs_mut().refresh_monitoring();
+        }
+    }
+
     /// The front-most document still open: the one key last.
     pub fn front(&self) -> Option<DocId> {
         self.recent_key
