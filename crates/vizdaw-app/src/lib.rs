@@ -44,6 +44,7 @@ pub mod step_entry;
 pub mod store;
 #[cfg(feature = "test-support")]
 pub mod testing;
+pub mod theme;
 pub mod transport;
 pub mod transport_bar;
 pub mod transport_fields;
