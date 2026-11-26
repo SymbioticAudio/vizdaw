@@ -5,6 +5,8 @@
 //! Space in it does not play. A tab whose slice has not come shows
 //! "`<Tab>` comes in a later version.".
 
+mod keys;
+
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -49,6 +51,8 @@ pub const AUTOMATION_HEIGHT: f32 = 300.;
 /// The Appearance tab's content height: six theme rows, a switch and a
 /// caption.
 pub const APPEARANCE_HEIGHT: f32 = 300.;
+/// The Keys tab's content width and height (Swift's frame, 720×520).
+pub use keys::{KEYS_HEIGHT, KEYS_WIDTH};
 /// The tab strip's room: two rows, for where the labels wrap (the body
 /// takes what one row leaves over).
 const STRIP_HEIGHT: f32 = 72.;
@@ -100,6 +104,14 @@ impl SettingsTab {
         }
     }
 
+    /// The window's width with this tab shown.
+    pub fn width(self) -> f32 {
+        match self {
+            SettingsTab::Keys => KEYS_WIDTH,
+            _ => WIDTH,
+        }
+    }
+
     /// The window's content height with this tab shown (Tasks 5-6 give
     /// their tabs their own).
     pub fn height(self) -> f32 {
@@ -108,6 +120,7 @@ impl SettingsTab {
             SettingsTab::Audio => AUDIO_HEIGHT,
             SettingsTab::Recording => RECORDING_HEIGHT,
             SettingsTab::Automation => AUTOMATION_HEIGHT,
+            SettingsTab::Keys => KEYS_HEIGHT,
             _ => DEFAULT_HEIGHT,
         }
     }
@@ -204,6 +217,12 @@ pub struct SettingsWindow {
     /// The 1 Hz poll, alive only while the Audio tab shows.
     poll: Option<Task<()>>,
     menu: Option<AudioMenu>,
+    /// The command whose key the Keys tab awaits.
+    recording: Option<&'static str>,
+    /// What gives the recorder its keys, and what ends it when the
+    /// window loses the keyboard.
+    capture: Option<gpui::Subscription>,
+    activation: Option<gpui::Subscription>,
 }
 
 impl SettingsWindow {
@@ -230,7 +249,11 @@ impl SettingsWindow {
             reading: false,
             poll: None,
             menu: None,
+            recording: None,
+            capture: None,
+            activation: None,
         };
+        this.watch_keys(window, cx);
         this.shown(cx);
         this
     }
@@ -248,7 +271,8 @@ impl SettingsWindow {
     fn select(&mut self, tab: SettingsTab, window: &mut Window, cx: &mut Context<Self>) {
         self.tab = tab;
         self.menu = None;
-        window.resize(size(px(WIDTH), px(tab.height() + STRIP_HEIGHT)));
+        self.recording = None;
+        window.resize(size(px(tab.width()), px(tab.height() + STRIP_HEIGHT)));
         self.shown(cx);
         cx.notify();
     }
@@ -439,10 +463,6 @@ impl SettingsWindow {
 
     fn editing_tab(&mut self, scope: &mut RegistryScope) -> AnyElement {
         placeholder_body(SettingsTab::Editing, scope)
-    }
-
-    fn keys_tab(&mut self, scope: &mut RegistryScope) -> AnyElement {
-        placeholder_body(SettingsTab::Keys, scope)
     }
 
     fn audio_tab(
@@ -1082,7 +1102,7 @@ impl SettingsWindow {
         match self.tab {
             SettingsTab::Appearance => self.appearance_tab(scope, cx),
             SettingsTab::Editing => self.editing_tab(scope),
-            SettingsTab::Keys => self.keys_tab(scope),
+            SettingsTab::Keys => self.keys_tab(scope, cx),
             SettingsTab::Audio => self.audio_tab(scope, window, cx),
             SettingsTab::Recording => self.recording_tab(scope, window, cx),
             SettingsTab::Automation => self.automation_tab(scope, window, cx),
@@ -1281,6 +1301,9 @@ impl Render for SettingsWindow {
             .track_focus(&self.focus)
             .key_context(SETTINGS_WINDOW_CONTEXT)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
+            // A press anywhere ends a recording (the recorder lost the
+            // keyboard); the recorder's own press then starts it again.
+            .capture_any_mouse_down(cx.listener(|this, _, _, cx| this.stop_recording(cx)))
             .size_full()
             .flex()
             .flex_col()
@@ -1330,7 +1353,11 @@ pub fn open_settings(tab: Option<SettingsTab>, cx: &mut App) {
         app.update(cx, |s, _| s.settings_window = None);
     }
     let tab = tab.unwrap_or(SettingsTab::Appearance);
-    let bounds = Bounds::centered(None, size(px(WIDTH), px(tab.height() + STRIP_HEIGHT)), cx);
+    let bounds = Bounds::centered(
+        None,
+        size(px(tab.width()), px(tab.height() + STRIP_HEIGHT)),
+        cx,
+    );
     let opened = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),

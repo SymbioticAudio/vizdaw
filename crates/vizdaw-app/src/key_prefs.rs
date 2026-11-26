@@ -64,6 +64,11 @@ impl KeyBindings {
         self.message.as_deref()
     }
 
+    /// Says `message` on the Keys page (a save that failed).
+    pub fn set_message(&mut self, message: impl Into<String>) {
+        self.message = Some(message.into());
+    }
+
     /// A recorded key another command has, waiting for Replace.
     pub fn pending(&self) -> Option<&PendingKey> {
         self.pending.as_ref()
