@@ -17,6 +17,7 @@ pub mod knob;
 pub mod menu_face;
 pub mod meter;
 pub mod number_box;
+pub mod stepper;
 pub mod toggle;
 
 use std::time::Instant;
