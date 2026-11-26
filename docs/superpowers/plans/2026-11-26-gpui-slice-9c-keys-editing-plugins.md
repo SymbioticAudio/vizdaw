@@ -367,3 +367,21 @@
   - Each task's review leftovers.
 - [ ] **Step 4:** Add owner rows to manual-checks: on macOS, rebinding a key and seeing the menu change, and installing Multi-Q; on Linux, the Keys tab and the Customize sheet. Add on-screen rows to controller-checks.
 - [ ] **Step 5: Commit** `Plan 9c: checks, checklist, backlog`.
+
+## Outcome (2026-11-26)
+
+All nine tasks are done, each with a task review; the final whole-branch review found one Important issue, which is fixed.
+
+- Commits `2e5a3f7f..021f283e` on `next`. The Mac run is green: `cargo fmt --check`, clippy `-D warnings`, `cargo test --workspace`, and the e2e `gpui_keys_drive_step_entry_and_locators`, `gpui_multiq_install_and_switch_over_the_channel`, `gpui_new_bus_and_sends_over_the_channel`, `gpui_arms_meters_counts_in_and_draws_the_take` and `gpui_themes_and_the_strip_over_the_channel`.
+- **Final review fix:** New, Open, Close, Save, Save As, Play/Stop, Stop, Rewind and Fast Forward had fixed keys, so a rebind in Settings › Keys did nothing for them. They now take their keys from the keymap (`abf0a459`). The Multi-Q e2e now decides from the app under test whether Multi-Q is there (`021f283e`).
+- **Not seen on screen yet:** the three tabs and the sheet (controller-checks "9c"), and recording ⌘W and ⌘Q through the real macOS menus (M21).
+- One flaky run: `core-io` `hostile_xml_never_panics` went over its time budget while another build ran beside it, and passed alone. Its new proptest seed was not kept.
+
+### Rulings
+
+1. A stored `vst3` default-EQ choice is kept, though Swift's `readEq` dropped it, because the command can set one. Cost if wrong: a kept preference.
+2. The nudge preference uses Swift's Codable JSON shape (`{"ticks":{"_0":240}}`). No compatibility is needed and it is harmless. Cost if wrong: an odd-looking preference.
+3. Task 7's two selection bugs (an insert before the selection, and `move_to` past it) were fixed in Task 8, because a drag that moved the selection would let the inspector edit the wrong item. Cost: a little extra Task 8 scope.
+4. The customize sheet's Remove, Move Left and Move Right are inspector buttons for the selected chip, not actions on each chip, because the registry has no per-element action list. Cost: one more click, and a backlog row.
+5. With no document or mixer window open, View › Customize Transport Bar… does nothing: there is no window to hold the sheet.
+
