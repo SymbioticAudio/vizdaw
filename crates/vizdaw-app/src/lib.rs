@@ -7,6 +7,7 @@ pub mod arrangement;
 pub mod audio_format;
 pub mod audio_prefs;
 pub mod audition;
+pub mod automation_prefs;
 pub mod banners;
 pub mod bar_items;
 pub mod bounce;

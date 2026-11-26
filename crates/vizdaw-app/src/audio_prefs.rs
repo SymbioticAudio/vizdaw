@@ -182,7 +182,8 @@ impl AudioPrefs {
 
     /// Hands every setting to the core (at launch, before a document
     /// opens). The refusal of a buffer or stream size, if any, is the
-    /// answer (the core kept going: the rest were handed over).
+    /// answer; a refused buffer size skips the stream settings call (as
+    /// in Swift).
     pub fn apply_all(&self, core: &dyn CoreCalls) -> Option<String> {
         let s = &self.settings;
         core.set_software_monitoring(s.software_monitoring);

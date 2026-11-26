@@ -10,7 +10,6 @@ use vizdaw_app::audio_prefs::{
     round_trip_text, trim_text,
 };
 use vizdaw_app::testing::FakeCore;
-use vizdaw_ffi::edit::MonitorModeRow;
 use vizdaw_ffi::host::InputDeviceRow;
 use vizdaw_ffi::{InputInfoRow, VizError};
 
@@ -357,7 +356,6 @@ fn trim_and_count_texts() {
         DISK_TEXT,
         "Recording warns below 1 GB of free disk space and stops below 100 MB."
     );
-    let _ = MonitorModeRow::Auto;
 }
 
 #[test]
