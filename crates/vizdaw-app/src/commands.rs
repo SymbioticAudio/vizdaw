@@ -194,6 +194,7 @@ pub const ARM_DID_NOT_MOVE: &str = "Record arm did not move.";
 pub const APP_COMMANDS: &[&str] = &[
     "ui.set_transport_bar",
     "ui.reset_transport_bar",
+    "ui.customize_transport",
     "automation.suspend",
     "audio.set",
     "ui.theme",
@@ -285,6 +286,8 @@ pub fn run_app(
                 layout.items.len()
             )))
         }
+        // The View menu's sheet; over the channel it only asks for it.
+        "ui.customize_transport" => Err(ControlError::dialog("Customize Transport Bar", &[])),
         "ui.reset_transport_bar" => {
             check_names(id, args)?;
             write(prefs.reset_transport_bar())?;

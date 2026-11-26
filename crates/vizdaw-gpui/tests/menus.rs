@@ -128,8 +128,21 @@ fn the_menu_model_follows_the_swift_order() {
             Some("ui.toggle_left"),
             Some("ui.toggle_bottom"),
             Some("ui.toggle_right"),
+            None,
+            Some("ui.customize_transport"),
         ]
     );
+    // The bar is a preference: its sheet is offered with or without a
+    // document.
+    for front in [None, Some(&doc)] {
+        let m = menu_model(front, &keymap);
+        let (id, title, _, enabled) = item(&m, "View", "Customize Transport Bar\u{2026}");
+        assert_eq!(
+            (id, title),
+            ("ui.customize_transport", "Customize Transport Bar\u{2026}")
+        );
+        assert!(enabled);
+    }
     assert_eq!(ids(10), [Some("window.mixer")]);
     // Swift `AppCommands.swift:354-365`.
     assert_eq!(

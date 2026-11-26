@@ -51,6 +51,7 @@ pub mod testing;
 pub mod theme;
 pub mod transport;
 pub mod transport_bar;
+pub mod transport_customize;
 pub mod transport_fields;
 pub mod view;
 

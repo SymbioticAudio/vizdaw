@@ -620,7 +620,6 @@ pub fn menu_model(front: Option<&DocumentModel>, keymap: &Keymap) -> MenuModel {
                     slice1(EDIT_SELECT_ALL, "Select All", Some("a"), keymap),
                 ],
             ),
-            // The bar's customizing comes with its sheet.
             menu(
                 "View",
                 vec![
@@ -630,6 +629,16 @@ pub fn menu_model(front: Option<&DocumentModel>, keymap: &Keymap) -> MenuModel {
                     cmd("ui.toggle_left"),
                     cmd("ui.toggle_bottom"),
                     cmd("ui.toggle_right"),
+                    ItemSpec::Separator,
+                    // App-wide: the bar is a preference, so it is enabled
+                    // with or without a document. Its sheet comes with the
+                    // sheet; until then the item does nothing.
+                    slice1(
+                        "ui.customize_transport",
+                        "Customize Transport Bar\u{2026}",
+                        None,
+                        keymap,
+                    ),
                 ],
             ),
             // The other detail editors, their windows and the nudges come
