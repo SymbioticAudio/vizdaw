@@ -63,7 +63,7 @@ item (false: keys, the Keys settings and the control channel only).
 | ui.theme | View | Theme |  | false | S9b | S9b |
 | ui.set_transport_bar | View | Set Transport Bar |  | false | S3 | S3 |
 | ui.reset_transport_bar | View | Reset Transport Bar |  | false | S3 | S3 |
-| ui.customize_transport | View | Customize Transport Bar… |  | true | S9c | |
+| ui.customize_transport | View | Customize Transport Bar… |  | true | S9c | S9c |
 
 ### Editors
 
@@ -353,9 +353,9 @@ item (false: keys, the Keys settings and the control channel only).
 
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
-| plugins.new_channel_eq | Settings | Put an EQ on New Channels |  | false | S9c | |
-| plugins.install_multiq | Settings | Install Multi-Q for Other Apps |  | false | S9c | |
-| plugins.default_eq | Settings | EQ for New Channels |  | false | S9c | |
+| plugins.new_channel_eq | Settings | Put an EQ on New Channels |  | false | S9c | S9c |
+| plugins.install_multiq | Settings | Install Multi-Q for Other Apps |  | false | S9c | S9c (unavailable: no bundled EQ on Linux) |
+| plugins.default_eq | Settings | EQ for New Channels |  | false | S9c | S9c |
 | settings.co_producer | Settings | Co-Producer |  | false | | |
 | settings.co_producer_answer | Settings | Answer Co-Producer Approval |  | false | | |
 | settings.co_producer_metrics | Settings | Count Where My Time Goes |  | false | | |
@@ -365,9 +365,9 @@ item (false: keys, the Keys settings and the control channel only).
 
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
-| keys.save | Key Bindings | Save Key Bindings… |  | false | S9c | |
-| keys.load | Key Bindings | Load Key Bindings… |  | false | S9c | |
-| keys.reset | Key Bindings | Reset Key Bindings |  | false | S9c | |
+| keys.save | Key Bindings | Save Key Bindings… |  | false | S9c | S9c |
+| keys.load | Key Bindings | Load Key Bindings… |  | false | S9c | S9c |
+| keys.reset | Key Bindings | Reset Key Bindings |  | false | S9c | S9c |
 
 ## Windows
 
@@ -393,13 +393,13 @@ editors). The record popover is a popover, not a window.
 | Song Notes | `window.song_notes` (opens the notes file in the system's editor, not a window of its own) | | |
 | Licences | `licences` | | |
 | Settings: Appearance | Settings tab | S9b (user themes: later) | S9b (CI; on screen: L27) |
-| Settings: Editing | Settings tab | S9c (no consumers yet: backlog) | |
-| Settings: Keys | Settings tab | S9c (Learn MIDI: Surfaces slice) | |
+| Settings: Editing | Settings tab | S9c (no consumers yet: backlog) | S9c (CI; on screen: owner check) |
+| Settings: Keys | Settings tab | S9c (Learn MIDI: Surfaces slice) | S9c (CI; on screen: L28) |
 | Settings: Audio | Settings tab | S9a | S9a (CI; on screen: L26) |
 | Settings: Recording | Settings tab | S9a | S9a (CI; on screen: L26) |
 | Settings: Automation | Settings tab | S9a | S9a (CI; on screen: L26) |
 | Settings: Surfaces | Settings tab | | |
-| Settings: Plug-ins | Settings tab | S9c | |
+| Settings: Plug-ins | Settings tab | S9c | S9c (CI; no bundled EQ) |
 | Settings: Co-Producer | Settings tab | | |
 
 ## Sheets and dialogs
@@ -429,7 +429,7 @@ Maps is opened from two places.
 | Report: Export Report, Merge Report, Import Report (`ReportSheet`) | document | | |
 | Project Settings | document | | |
 | Merge DAWproject | document | | |
-| Customize Transport Bar | document and mixer windows | S9c (on screen: pending) | |
+| Customize Transport Bar | document and mixer windows | S9c (on screen: pending) | S9c (CI; on screen: L29) |
 | MIDI Learn Maps | mixer and panes (two `.sheet(` sites, one sheet) | | |
 | Comment (`CommentSheet`) | sequence sidebar | | |
 | Key slot (`KeySlotSheet`) | sequence sidebar | | |
@@ -448,7 +448,7 @@ Maps is opened from two places.
 | Delete notes and copies? | Settings > Co-Producer | | |
 | Delete all time records? | Settings > Co-Producer | | |
 | Delete this sequence and every reference to it? | sequence sidebar | | |
-| Replace the (EQ name) in your Components folder? | Settings > Plug-ins | S9c | |
+| Replace the (EQ name) in your Components folder? | Settings > Plug-ins | S9c | Linux gap (no bundled EQ) |
 
 ### File panels
 
@@ -543,7 +543,7 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 | demo_play_screenshot_stop | S3, S4 (List step restored) | S3, S4 (List step restored) |
 | click_play_and_press_space | S3 | S3 |
 | drum_grid_paints_and_erases_by_element | | |
-| keys_drive_step_entry_locators_and_bindings | S4, S8a, S9c (bindings half: `gpui_keys_drive_step_entry_and_locators`) | partial S4, S8a |
+| keys_drive_step_entry_locators_and_bindings | S4, S8a, S9c (bindings half: `gpui_keys_drive_step_entry_and_locators`) | S4, S8a, S9c (CI run 45876230282) |
 | audio_import_plays_and_reports_media | | |
 | regions_normalize_relink_and_trash | | |
 | records_audio_loop_takes_and_midi | S8a (`gpui_records_audio_loop_takes_and_midi`; `record.recover`: `gpui_record_recover_trash_over_the_channel`) | S8a (offline device, fake input; Trash: gap H4) |
@@ -569,8 +569,8 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 | dawproject_round_trip_over_the_channel | | |
 | aaf_round_trip_over_the_channel | | |
 | dawproject_merge_over_the_channel | | |
-| multiq_install_and_switch_over_the_channel | S9c (`gpui_multiq_install_and_switch_over_the_channel`) | |
-| default_eq_and_new_bus_over_the_channel | S6b, S9c (default-EQ steps in `gpui_new_bus_and_sends_over_the_channel`) | S6b (New Bus part) |
+| multiq_install_and_switch_over_the_channel | S9c (`gpui_multiq_install_and_switch_over_the_channel`) | S9c (unavailable branch, CI run 45876230282) |
+| default_eq_and_new_bus_over_the_channel | S6b, S9c (default-EQ steps in `gpui_new_bus_and_sends_over_the_channel`) | S6b, S9c (CI run 45876230282) |
 | takes_and_layered_midi_loop_over_the_channel | | |
 | co_producer_over_mcp | | |
 | co_producer_librarian_over_mcp | | |
