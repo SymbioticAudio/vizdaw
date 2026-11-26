@@ -89,6 +89,10 @@ enum ReadOut {
     Midi(Result<MidiFileInfoRow, VizError>),
     Dawproject(Result<DawprojectInfoRow, VizError>),
     Aaf(Result<AafInfoRow, VizError>),
+    /// `plugins.default_eq`'s catalogue read.
+    Eqs(vizdaw_app::plugin_prefs::EqRead),
+    /// `plugins.install_multiq`'s copy.
+    Installed(Result<String, VizError>),
 }
 
 /// What a background call's answer leads to.
@@ -101,6 +105,11 @@ enum Then {
     Dawproject(DawprojectRead),
     /// `file.import_aaf` with `new_project`.
     Aaf(AafImportRequestRow),
+    /// A `plugins.*` command whose slow work ran.
+    Plugins {
+        id: String,
+        args: Vec<(String, ArgValue)>,
+    },
 }
 
 /// A call whose answer is read off the UI thread.
@@ -667,10 +676,94 @@ fn finish(then: Then, out: ReadOut, cx: &mut App) -> Handled {
                 ic::IMPORT_AAF,
             ),
         },
-        _ => Handled::Reply(Err(ControlError::new(
-            ErrorCode::Failed,
-            "the call read the wrong thing",
-        ))),
+        (Then::Plugins { id, args }, out) => {
+            use vizdaw_app::plugin_prefs::{Step, run_plugins_with};
+            let step = match out {
+                ReadOut::Eqs(r) => Step::Read(r),
+                ReadOut::Installed(r) => Step::Installed(r),
+                _ => return Handled::Reply(Err(wrong_read())),
+            };
+            Handled::Reply(plugins_reply(&id, cx, |s, core| {
+                run_plugins_with(&id, &args, &mut s.plugins, &mut s.prefs, core, step)
+            }))
+        }
+        _ => Handled::Reply(Err(wrong_read())),
+    }
+}
+
+fn wrong_read() -> ControlError {
+    ControlError::new(ErrorCode::Failed, "the call read the wrong thing")
+}
+
+/// Runs `run` over the app's plug-in settings and answers as an app-wide
+/// command does (no document, no window).
+fn plugins_reply(
+    id: &str,
+    cx: &mut App,
+    run: impl FnOnce(
+        &mut AppState,
+        &dyn vizdaw_app::session::CoreCalls,
+    ) -> Result<vizdaw_app::commands::Ran, ControlError>,
+) -> Result<Value, ControlError> {
+    let app = AppState::global(cx);
+    let ran = app.update(cx, |s, cx| {
+        let core = s.store.core();
+        let ran = run(s, core.as_ref());
+        cx.notify();
+        ran
+    })?;
+    Ok(serde_json::json!({
+        "command": id, "doc": Value::Null, "window": Value::Null,
+        "undo": ran.undo, "status": ran.status,
+    }))
+}
+
+/// `plugins.default_eq` (naming an installed plug-in) reads the catalogue
+/// and `plugins.install_multiq` copies a bundle: both run off the UI
+/// thread and are answered when they land. `plugins.new_channel_eq` and
+/// `plugins.default_eq multi-q` are quick and answer at once.
+pub(super) fn run_plugins(id: &str, args: &[(String, ArgValue)], cx: &mut App) -> Handled {
+    use vizdaw_app::plugin_prefs::{PluginPrefs, Step, install_request, run_plugins_with};
+    let app = AppState::global(cx);
+    let then = || Then::Plugins {
+        id: id.to_owned(),
+        args: args.to_vec(),
+    };
+    match id {
+        "plugins.install_multiq" => {
+            let (replace, dest, core) = {
+                let s = app.read(cx);
+                match install_request(args, &s.plugins) {
+                    Ok(r) => (
+                        r,
+                        s.plugins.install_destination().map(str::to_owned),
+                        s.store.core(),
+                    ),
+                    Err(e) => return Handled::Reply(Err(e)),
+                }
+            };
+            later(
+                Box::new(move || ReadOut::Installed(core.install_multiq(dest, replace))),
+                then(),
+                cx,
+            )
+        }
+        "plugins.default_eq"
+            if !matches!(
+                args.iter().find(|(n, _)| n == "plugin"),
+                Some((_, ArgValue::Text(t))) if t == "multi-q"
+            ) && args.iter().any(|(n, _)| n == "plugin") =>
+        {
+            let core = app.read(cx).store.core();
+            later(
+                Box::new(move || ReadOut::Eqs(PluginPrefs::read(core.as_ref()))),
+                then(),
+                cx,
+            )
+        }
+        _ => Handled::Reply(plugins_reply(id, cx, |s, core| {
+            run_plugins_with(id, args, &mut s.plugins, &mut s.prefs, core, Step::Whole)
+        })),
     }
 }
 

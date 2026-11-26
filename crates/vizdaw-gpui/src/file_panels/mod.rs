@@ -61,6 +61,7 @@ pub struct MacPanel {
     /// chosen whole).
     pub packages_as_folders: bool,
     pub prompt: String,
+    pub title: Option<String>,
     pub message: Option<String>,
     /// `allowedContentTypes`; empty allows any.
     pub types: Vec<MacType>,
@@ -103,6 +104,7 @@ pub fn mac_panel(spec: &PanelSpec, place: &PanelPlace) -> MacPanel {
         can_create_folders: spec.can_create_folders,
         packages_as_folders: false,
         prompt: spec.prompt.to_owned(),
+        title: spec.title.map(str::to_owned),
         message: spec.message_for(&place.name),
         types,
         directory: place.directory.clone(),
@@ -175,7 +177,9 @@ pub fn portal_request(spec: &PanelSpec, place: &PanelPlace) -> PortalRequest {
     PortalRequest {
         save: spec.kind == PanelKind::Save,
         title: spec
-            .message_for(&place.name)
+            .title
+            .map(str::to_owned)
+            .or_else(|| spec.message_for(&place.name))
             .unwrap_or_else(|| spec.prompt.to_owned()),
         accept_label: spec.prompt.to_owned(),
         multiple: spec.multiple,

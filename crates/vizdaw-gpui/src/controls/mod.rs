@@ -13,6 +13,7 @@
 //! `button` with `on` / `off`, menu faces `menu`.
 
 pub mod fader;
+pub mod key_recorder;
 pub mod knob;
 pub mod menu_face;
 pub mod meter;

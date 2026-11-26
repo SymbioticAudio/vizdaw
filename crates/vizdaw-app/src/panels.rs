@@ -39,6 +39,8 @@ pub enum FileType {
     Audio,
     /// Plain text (`UTType.plainText`).
     PlainText,
+    /// An application (`UTType.application`; macOS only).
+    Application,
     /// The type of the extension the caller gives (Swift
     /// `UTType(filenameExtension: ext)`: Bounce and MIDI exports).
     GivenExtension,
@@ -56,7 +58,7 @@ impl FileType {
                 "wav", "wave", "aif", "aiff", "aifc", "caf", "mp3", "m4a", "aac", "flac",
             ],
             FileType::PlainText => &["txt"],
-            FileType::Folder | FileType::GivenExtension => &[],
+            FileType::Folder | FileType::GivenExtension | FileType::Application => &[],
         }
     }
 
@@ -71,6 +73,7 @@ impl FileType {
             FileType::Aaf => &["org.vizdaw.aaf"],
             FileType::Audio => &["public.audio"],
             FileType::PlainText => &["public.plain-text"],
+            FileType::Application => &["com.apple.application"],
             FileType::GivenExtension => &[],
         }
     }
@@ -86,6 +89,7 @@ impl FileType {
             FileType::Aaf => "AAF file",
             FileType::Audio => "audio file",
             FileType::PlainText => "text file",
+            FileType::Application => "application",
             FileType::GivenExtension => "file",
         }
     }
@@ -120,6 +124,8 @@ pub struct PanelSpec {
     pub kind: PanelKind,
     /// The default button's title (`panel.prompt`; Save's default `Save`).
     pub prompt: &'static str,
+    /// `panel.title`, where Swift sets one (the system's own otherwise).
+    pub title: Option<&'static str>,
     /// `panel.message`; `{name}` stands for the caller's name.
     pub message: Option<&'static str>,
     pub types: &'static [FileType],
@@ -199,6 +205,7 @@ const fn open(row: &'static str, prompt: &'static str, message: &'static str) ->
     PanelSpec {
         row,
         kind: PanelKind::Open,
+        title: None,
         prompt,
         message: Some(message),
         types: &[],
@@ -218,6 +225,7 @@ const fn folder(
 ) -> PanelSpec {
     PanelSpec {
         kind: PanelKind::Folder,
+        title: None,
         can_create_folders,
         ..open(row, prompt, message)
     }
@@ -233,6 +241,7 @@ const fn save(
     PanelSpec {
         row,
         kind: PanelKind::Save,
+        title: None,
         prompt,
         message: None,
         types,

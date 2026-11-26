@@ -429,14 +429,12 @@ fn a_job_busy_until_the_deadline_answers_the_expiry_once(cx: &mut TestAppContext
 
 #[gpui::test]
 fn a_key_run_file_command_starts_no_job(cx: &mut TestAppContext) {
-    use core_control::bindings::Chord;
     let s = setup(cx);
     // F6 bound to Convert Media (a user's own binding).
     cx.update(|cx| {
         AppState::global(cx).update(cx, |a, _| {
-            a.keymap
-                .bind("media.convert", &[Chord::new(97, 0).unwrap()], true)
-                .unwrap();
+            a.keys.record("media.convert", "F6", &mut a.prefs);
+            assert!(a.keys.pending().is_none(), "{:?}", a.keys.message());
         });
     });
     s.fake.script_job(JobScript::done().steps(&[0.5]));
@@ -1174,4 +1172,109 @@ fn a_made_project_whose_window_fails_answers_the_failure(cx: &mut TestAppContext
     assert!(e.message.contains("no transport"), "{e:?}");
     assert_eq!(window_numbers(&s, cx), before);
     assert_eq!(documents(cx), 1, "the made project is not kept hidden");
+}
+
+// ---------------------------------------------------------------------
+// plugins.*: no document; the slow ones run off the UI thread
+
+fn load_prefs(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        AppState::global(cx).update(cx, |st, _| {
+            st.set_prefs(vizdaw_app::Prefs::in_memory());
+        })
+    });
+}
+
+#[gpui::test]
+fn plugins_commands_answer_without_a_document(cx: &mut TestAppContext) {
+    let s = setup(cx);
+    load_prefs(cx);
+    let r = ok(run(&s, cx, "plugins.new_channel_eq", json!({"on": false})));
+    assert_eq!(r["status"], "new-channel EQ off");
+    assert_eq!(r["window"], serde_json::Value::Null);
+    assert!(
+        s.core
+            .calls()
+            .contains(&"set_new_channel_eq(false)".to_string())
+    );
+
+    // The install copies off the UI thread, then answers its path.
+    let r = ok(run(&s, cx, "plugins.install_multiq", json!({})));
+    assert_eq!(
+        r["status"],
+        "/Library/Audio/Plug-Ins/Components/Multi-Q.component"
+    );
+    let threads = s.core.read_threads("install_multiq");
+    assert_eq!(threads.len(), 1);
+    // Something in the way: the dialog, then replace answers it.
+    s.core.fail_next(
+        "install_multiq",
+        VizError::Exists {
+            path: "/x/Multi-Q.component".into(),
+        },
+    );
+    let e = run(&s, cx, "plugins.install_multiq", json!({})).unwrap_err();
+    assert_eq!(e.code, ErrorCode::DialogRequired);
+    assert!(e.message.contains("Replace"), "{}", e.message);
+    ok(run(
+        &s,
+        cx,
+        "plugins.install_multiq",
+        json!({"replace": true}),
+    ));
+    assert!(
+        s.core
+            .calls()
+            .contains(&"install_multiq(None,true)".to_string())
+    );
+}
+
+#[gpui::test]
+fn plugins_default_eq_reads_the_catalogue_off_the_ui_thread(cx: &mut TestAppContext) {
+    let s = setup(cx);
+    load_prefs(cx);
+    s.core
+        .set_eq_choices(vec![vizdaw_ffi::bundled::DefaultEqRow {
+            format: vizdaw_ffi::snapshot::PluginFormatTag::Clap,
+            id: "vizdaw.test.gain".into(),
+            name: "Test Gain".into(),
+        }]);
+    let r = ok(run(
+        &s,
+        cx,
+        "plugins.default_eq",
+        json!({"plugin": "multi-q"}),
+    ));
+    assert_eq!(r["status"], "default EQ Multi-Q");
+    assert!(
+        s.core.read_threads("eq_choices").is_empty(),
+        "Multi-Q reads nothing"
+    );
+    let r = ok(run(
+        &s,
+        cx,
+        "plugins.default_eq",
+        json!({"plugin": "clap:vizdaw.test.gain"}),
+    ));
+    assert_eq!(r["status"], "default EQ Test Gain");
+    assert_eq!(s.core.read_threads("eq_choices").len(), 1);
+    let e = run(
+        &s,
+        cx,
+        "plugins.default_eq",
+        json!({"plugin": "clap:vizdaw.e2e.none"}),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::UnknownId);
+}
+
+#[gpui::test]
+fn plugins_install_without_multiq_is_unavailable(cx: &mut TestAppContext) {
+    let s = setup(cx);
+    s.core.set_bundled(None, false);
+    load_prefs(cx);
+    let e = run(&s, cx, "plugins.install_multiq", json!({})).unwrap_err();
+    assert_eq!(e.code, ErrorCode::Unavailable);
+    assert_eq!(e.message, "Multi-Q is not in this build of VizDAW.");
+    assert!(s.core.read_threads("install_multiq").is_empty());
 }

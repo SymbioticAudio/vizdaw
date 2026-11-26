@@ -208,6 +208,18 @@ impl Prefs {
         Ok(())
     }
 
+    /// Removes `key` and writes; on a failure the old value stays.
+    pub fn remove_raw(&mut self, key: &str) -> Result<(), String> {
+        let Some(old) = self.map.remove(key) else {
+            return Ok(());
+        };
+        if let Err(e) = self.save() {
+            self.map.insert(key.into(), old);
+            return Err(e);
+        }
+        Ok(())
+    }
+
     fn save(&self) -> Result<(), String> {
         let Some(path) = &self.path else {
             return Ok(());

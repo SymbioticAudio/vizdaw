@@ -108,12 +108,11 @@ fn no_chrome_file_keeps_a_colour_literal() {
         "text_input",
         "format_panel",
         "shell",
-        "settings_window",
     ]
     .iter()
     .map(|n| src.join(format!("{n}.rs")))
     .collect();
-    for dir in ["sheets", "controls"] {
+    for dir in ["sheets", "controls", "settings_window"] {
         for e in std::fs::read_dir(src.join(dir)).unwrap() {
             files.push(e.unwrap().path());
         }

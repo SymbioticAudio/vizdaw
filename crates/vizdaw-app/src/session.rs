@@ -7,6 +7,7 @@ use vizdaw_ffi::automation::{
     AutomationModeRow, AutomationSettingsRow, AutomationStateRow, GestureHolderRow, GesturePhaseRow,
 };
 use vizdaw_ffi::blocks::{BlockRow, BlockRule};
+use vizdaw_ffi::bundled::DefaultEqRow;
 use vizdaw_ffi::control::ControlArg;
 use vizdaw_ffi::edit::{EditCommand, MonitorModeRow};
 use vizdaw_ffi::events::{AutomationTargetRow, LaneEvents, MarkerRow, SequenceInfo};
@@ -979,6 +980,41 @@ pub trait CoreCalls: Send + Sync {
     /// The automation settings (after Write, return time, thinning).
     fn set_automation_settings(&self, row: AutomationSettingsRow) -> Result<(), VizError> {
         vizdaw_ffi::automation::set_automation_settings(row)
+    }
+    /// "Put an EQ on new channels" on or off (core `set_new_channel_eq`).
+    fn set_new_channel_eq(&self, on: bool) {
+        vizdaw_ffi::bundled::set_new_channel_eq(on)
+    }
+    /// The EQ new channels get; `None`: Multi-Q.
+    fn set_default_eq(&self, choice: Option<DefaultEqRow>) {
+        vizdaw_ffi::bundled::set_default_eq(choice)
+    }
+    /// The core's line on the chosen EQ; `None` when it is usable, unset,
+    /// or the switch is off.
+    fn default_eq_note(&self) -> Option<String> {
+        vizdaw_ffi::bundled::default_eq_note()
+    }
+    /// The bundled EQ's name; `None` when the build has none.
+    fn bundled_eq_name(&self) -> Option<String> {
+        vizdaw_ffi::bundled::bundled_eq_name()
+    }
+    /// Whether the build has the AU "Install Multi-Q" copies.
+    fn bundled_au_present(&self) -> bool {
+        vizdaw_ffi::bundled::bundled_au_present()
+    }
+    /// Copies the bundled AU into `dest` (`None`: the user's Components
+    /// folder); `Exists` when something is in the way and `replace` is off.
+    fn install_multiq(&self, dest: Option<String>, replace: bool) -> Result<String, VizError> {
+        vizdaw_ffi::bundled::install_multiq(dest, replace)
+    }
+    /// The installed effects the EQ picker offers (the plug-in catalog's
+    /// usable, enabled effects, Multi-Q's own CLAP left out). Reads the
+    /// catalog: call it off the UI thread when it may be slow.
+    fn eq_choices(&self) -> Vec<DefaultEqRow> {
+        live_catalog()
+            .and_then(|c| c.rows())
+            .map(|rows| crate::plugin_prefs::eq_choices_from(&rows))
+            .unwrap_or_default()
     }
     /// Turns `plugins` off in the app's plug-in settings (the Plugin
     /// Manager's catalog, saved), the crash question's "Disable <names>".

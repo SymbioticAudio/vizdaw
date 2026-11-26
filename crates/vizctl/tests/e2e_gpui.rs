@@ -27,6 +27,20 @@ struct App {
     client: Client,
 }
 
+/// Whether `app` (a `.app`, or a binary in `X.app/Contents/MacOS/`) bundles
+/// Multi-Q in `Contents/PlugIns`.
+fn multiq_in_app(app: &std::path::Path) -> bool {
+    let contents = if app.extension().is_some_and(|e| e == "app") {
+        app.join("Contents")
+    } else {
+        match app.parent().and_then(|p| p.parent()) {
+            Some(c) if c.file_name().is_some_and(|n| n == "Contents") => c.to_path_buf(),
+            _ => return false,
+        }
+    };
+    contents.join("PlugIns/Multi-Q.component").exists()
+}
+
 fn app_path() -> PathBuf {
     let app =
         std::env::var("VIZDAW_E2E_APP").expect("set VIZDAW_E2E_APP to the GPUI .app or its binary");
@@ -1857,15 +1871,24 @@ fn gpui_groups_and_vcas_over_the_channel() {
 /// that takes the bus and its send together (undo and redo), a bus alone
 /// is "Add Bus", the master is refused; `mixer.set_send {index: 1}` edits
 /// the first send (1-based on the channel, 0-based in the FFI), and Add,
-/// Set and Remove Send are each one named step. Not ported: the default
-/// EQ (`plugins.default_eq` and the EQ install need the plug-in
-/// catalogue, a later Plug-in Manager slice).
+/// Set and Remove Send are each one named step; the default-EQ command
+/// answers and refuses first.
 #[test]
 #[ignore = "needs a window server and VIZDAW_E2E_APP"]
 fn gpui_new_bus_and_sends_over_the_channel() {
     use core_control::ErrorCode;
     let home = temp_home();
     let mut app = App::start(home.path(), false);
+
+    // The picker's command: Multi-Q answers, an unknown plug-in is refused.
+    let r = app.command("plugins.default_eq", json!({"plugin": "multi-q"}));
+    assert_eq!(r["status"], "default EQ Multi-Q", "{r}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "plugins.default_eq", "params": {"plugin": "clap:vizdaw.e2e.none"}}),
+    );
+    assert_eq!(e.code, ErrorCode::UnknownId, "{e:?}");
+
     let w = app.command("file.new", json!({}))["window"].clone();
     wait_for_node(&mut app, &w, "Track Headers");
     app.call("command.run", json!({"id": "track.new_audio", "window": w}));
@@ -2009,6 +2032,86 @@ fn gpui_new_bus_and_sends_over_the_channel() {
     app.call("command.run", json!({"id": "edit.undo", "window": w}));
     let m = mixer_state(&mut app, &w);
     assert_eq!(sends(&m), s, "the send is back where it was: {m}");
+    app.quit();
+}
+
+/// Ported from `multiq_install_and_switch_over_the_channel`: the switch
+/// answers both ways, Multi-Q installs into the throwaway home's Components
+/// folder, a second install asks to Replace and `replace` answers it. Needs
+/// Multi-Q in the app (`scripts/make-gpui-app.sh`) or `target/multiq/out` (macOS,
+/// `scripts/build-multiq.sh`), named to the app by `VIZDAW_BUNDLED_PLUGINS`;
+/// without either the install is `unavailable`.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_multiq_install_and_switch_over_the_channel() {
+    use core_control::ErrorCode;
+    let home = temp_home();
+    let bundled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/multiq/out");
+    // Available when the app under test carries Multi-Q itself (a .app from
+    // scripts/make-gpui-app.sh, or a binary inside one), else through the
+    // built bundles on macOS, else not at all.
+    let in_app = multiq_in_app(&app_path());
+    let env_route = cfg!(target_os = "macos")
+        && bundled.join("Multi-Q.component").is_dir()
+        && bundled.join("Multi-Q.clap").is_dir();
+    if !in_app && !env_route {
+        // No Multi-Q to install (Linux, or scripts/build-multiq.sh has not
+        // run): the build says so.
+        eprintln!(
+            "no Multi-Q in the app or at {} (macOS only, built by scripts/build-multiq.sh): checking that the install is unavailable",
+            bundled.display()
+        );
+        let mut app = App::start(home.path(), false);
+        let e = app.call_err(
+            "command.run",
+            json!({"id": "plugins.install_multiq", "params": {}}),
+        );
+        assert_eq!(e.code, ErrorCode::Unavailable, "{e:?}");
+        assert_eq!(
+            e.message, "Multi-Q is not in this build of VizDAW.",
+            "{e:?}"
+        );
+        app.quit();
+        return;
+    }
+    let mut app = if in_app {
+        App::start(home.path(), false)
+    } else {
+        let bundled = bundled.canonicalize().unwrap();
+        App::start_with(
+            home.path(),
+            false,
+            &[("VIZDAW_BUNDLED_PLUGINS", bundled.to_str().unwrap())],
+        )
+    };
+
+    // The switch answers its status both ways.
+    for (on, status) in [(false, "new-channel EQ off"), (true, "new-channel EQ on")] {
+        let r = app.command("plugins.new_channel_eq", json!({"on": on}));
+        assert_eq!(r["status"], status, "{r}");
+    }
+
+    // Install into the throwaway home.
+    let components = home.path().join("Library/Audio/Plug-Ins/Components");
+    let target = components.join("Multi-Q.component");
+    let r = app.command("plugins.install_multiq", json!({}));
+    assert_eq!(r["status"], target.display().to_string(), "{r}");
+    assert!(
+        components.is_dir(),
+        "the folder exists in the throwaway home"
+    );
+    assert!(target.exists(), "{}", target.display());
+
+    // A second install asks; replace answers it.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "plugins.install_multiq", "params": {}}),
+    );
+    assert_eq!(e.code, ErrorCode::DialogRequired, "{e:?}");
+    assert!(e.message.contains("Replace"), "{e:?}");
+    let r = app.command("plugins.install_multiq", json!({"replace": true}));
+    assert_eq!(r["status"], target.display().to_string(), "{r}");
+    assert!(target.exists());
     app.quit();
 }
 
@@ -3868,11 +3971,12 @@ fn gpui_arpeggiates_an_injected_chord_while_recording() {
 }
 
 /// Ported from `keys_drive_step_entry_locators_and_bindings` (README
-/// steps 99–104), the step entry and locator half (the bindings file
-/// waits for Keys settings; G is `gpui_g_toggles_snap`): T on, 4 an
+/// steps 99–104), the step entry and locator half (G is
+/// `gpui_g_toggles_snap`): T on, 4 an
 /// eighth, a typed chord, 0 a rest, Delete takes steps back; P gives the
 /// Position field the keyboard and a typed bar moves there, ⌥2 sets a
-/// locator there, Return goes to the start and 2 jumps to the locator.
+/// locator there, Return goes to the start and 2 jumps to the locator; a
+/// bindings file moves Go to Locator 2 to X, and Reset puts it back.
 #[test]
 #[ignore = "needs a window server and VIZDAW_E2E_APP"]
 fn gpui_keys_drive_step_entry_and_locators() {
@@ -3950,6 +4054,33 @@ fn gpui_keys_drive_step_entry_and_locators() {
     wait_for_editor(&mut app, &window, "locator 2", |e| {
         e["transport"]["locators"][2] == 8 * Q
     });
+    key(&mut app, "return", json!([]));
+    wait_for_tick(&mut app, &window, 0);
+    key(&mut app, "2", json!([]));
+    wait_for_tick(&mut app, &window, 8 * Q);
+
+    // A bindings file moves Go to Locator 2 to X.
+    let keys = app.launched.home.join("mine.vizkeys");
+    std::fs::write(
+        &keys,
+        r#"{"vizdaw_keys": 1, "bindings": {"locator.go_2": ["X"]}}"#,
+    )
+    .unwrap();
+    app.call(
+        "command.run",
+        json!({"id": "keys.load", "params": {"path": keys}}),
+    );
+    key(&mut app, "return", json!([]));
+    wait_for_tick(&mut app, &window, 0);
+    key(&mut app, "2", json!([]));
+    let t = app.call(
+        "state.get",
+        json!({"target": "transport", "window": window}),
+    );
+    assert_eq!(t["tick"], 0, "2 no longer goes to the locator");
+    key(&mut app, "x", json!([]));
+    wait_for_tick(&mut app, &window, 8 * Q);
+    app.call("command.run", json!({"id": "keys.reset"}));
     key(&mut app, "return", json!([]));
     wait_for_tick(&mut app, &window, 0);
     key(&mut app, "2", json!([]));

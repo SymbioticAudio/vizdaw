@@ -96,6 +96,9 @@ pub(super) fn present(
         p.setCanCreateDirectories(panel.can_create_folders);
         p.setTreatsFilePackagesAsDirectories(panel.packages_as_folders);
         p.setPrompt(Some(&NSString::from_str(&panel.prompt)));
+        if let Some(t) = &panel.title {
+            p.setTitle(Some(&NSString::from_str(t)));
+        }
         if let Some(m) = &panel.message {
             p.setMessage(Some(&NSString::from_str(m)));
         }
@@ -125,6 +128,9 @@ pub(super) fn present(
     p.setCanCreateDirectories(panel.can_create_folders);
     p.setTreatsFilePackagesAsDirectories(panel.packages_as_folders);
     p.setPrompt(Some(&NSString::from_str(&panel.prompt)));
+    if let Some(t) = &panel.title {
+        p.setTitle(Some(&NSString::from_str(t)));
+    }
     if let Some(m) = &panel.message {
         p.setMessage(Some(&NSString::from_str(m)));
     }

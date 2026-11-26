@@ -178,6 +178,10 @@ pub trait Sheet: 'static {
     fn width(&self) -> f32 {
         CARD_WIDTH
     }
+    /// The card's least height (0: as tall as its body).
+    fn min_height(&self) -> f32 {
+        0.
+    }
 }
 
 /// A window's sheet, if one is up.
@@ -379,6 +383,7 @@ impl DocumentWindow {
             self.sheet.focus.contains_focused(window, cx) && !self.sheet.focus.is_focused(window);
         self.set_sheet_editing(editing, cx);
         let width = sheet.width();
+        let min_height = sheet.min_height();
         let buttons = sheet.buttons(cx);
         let mut card_scope = scope.container();
         let body = sheet.render(&mut card_scope.container(), window, cx);
@@ -395,6 +400,7 @@ impl DocumentWindow {
         self.sheet.sheet = Some(sheet);
         let card = card()
             .w(px(width))
+            .min_h(px(min_height))
             .id("sheet-card")
             .track_focus(&self.sheet.focus)
             .child(body)

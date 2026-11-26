@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Builds target/VizDAW-GPUI.app: a minimal dev wrapper around the GPUI
 # app's binary. A shell-launched macOS binary cannot take focus; one
-# inside an .app can. Not signed, not for release. `vizctl launch --app
-# target/VizDAW-GPUI.app` finds the binary through CFBundleExecutable.
+# inside an .app can. Not signed (but for the bundled Multi-Q, ad hoc),
+# not for release. `vizctl launch --app target/VizDAW-GPUI.app` finds the
+# binary through CFBundleExecutable.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
@@ -38,4 +39,24 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+
+# The bundled Multi-Q EQ, as scripts/make-app.sh bundles it: both builds in
+# PlugIns, its licence texts and SOURCE.txt in Resources/Licences/Multi-Q,
+# the bundles signed ad hoc. A missing build is made with
+# scripts/build-multiq.sh; if that fails, so does this.
+multiq="target/multiq/out"
+if [[ ! -d "$multiq/Multi-Q.clap" || ! -d "$multiq/Multi-Q.component" || ! -d "$multiq/licences" ]]; then
+    echo "make-gpui-app: $multiq is missing; running scripts/build-multiq.sh" >&2
+    scripts/build-multiq.sh || { echo "make-gpui-app: scripts/build-multiq.sh failed" >&2; exit 1; }
+fi
+for f in Multi-Q.clap Multi-Q.component licences; do
+    [[ -d "$multiq/$f" ]] || { echo "make-gpui-app: $multiq/$f is missing" >&2; exit 1; }
+done
+licences="$app/Contents/Resources/Licences/Multi-Q"
+mkdir -p "$app/Contents/PlugIns" "$licences"
+ditto "$multiq/Multi-Q.clap" "$app/Contents/PlugIns/Multi-Q.clap"
+ditto "$multiq/Multi-Q.component" "$app/Contents/PlugIns/Multi-Q.component"
+ditto "$multiq/licences" "$licences"
+codesign --force -s - "$app/Contents/PlugIns/Multi-Q.clap"
+codesign --force -s - "$app/Contents/PlugIns/Multi-Q.component"
 echo "$app"

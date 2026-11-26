@@ -76,6 +76,7 @@ use vizdaw_app::audio_prefs;
 use vizdaw_app::commands::{
     self, APP_COMMANDS, LANE_INPUT_COMMANDS, RECORD_COMMANDS, TRANSPORT_COMMANDS,
 };
+use vizdaw_app::key_prefs as keys_prefs;
 use vizdaw_app::step_entry::STEP_COMMANDS;
 use vizdaw_app::{DocId, SaveAction};
 use vizdaw_ffi::control::{
@@ -443,6 +444,11 @@ pub fn handle(command: &Command, cx: &mut App) -> Handled {
                 Ok(entry) => files::run(id, args, &entry, cx),
                 Err(e) => Handled::Reply(Err(e)),
             }
+        }
+        Command::CommandRun { id, args, .. }
+            if vizdaw_app::plugin_prefs::PLUGIN_COMMANDS.contains(&id.as_str()) =>
+        {
+            files::run_plugins(id, args, cx)
         }
         other => Handled::Reply(answer(other, cx)),
     }
@@ -814,7 +820,7 @@ fn app_wide(
     if files::APP_IDS.contains(&id) {
         return Some(files::run_app(id, args, cx));
     }
-    if !APP_COMMANDS.contains(&id) {
+    if !APP_COMMANDS.contains(&id) && !keys_prefs::KEYS_COMMANDS.contains(&id) {
         return None;
     }
     let app = AppState::global(cx);
@@ -827,6 +833,8 @@ fn app_wide(
             ran
         } else if id == "ui.theme" {
             s.run_ui_theme(args, cx)
+        } else if keys_prefs::KEYS_COMMANDS.contains(&id) {
+            keys_prefs::run_keys(id, args, &mut s.keys, &mut s.prefs)
         } else {
             commands::run_app(id, args, &mut s.prefs)
         };
@@ -834,6 +842,10 @@ fn app_wide(
         cx.notify();
         ran
     });
+    // A load or a reset changed the keys: bind and show them again.
+    if ran.is_ok() && matches!(id, "keys.load" | "keys.reset") {
+        menus::rebind(cx);
+    }
     Some(ran.map(|ran| {
         json!({
             "command": id, "doc": Value::Null, "window": Value::Null,
@@ -1327,7 +1339,7 @@ fn bound_command(entry: &WindowEntry, k: &KeyStroke, cx: &App) -> Option<&'stati
         .store
         .document(entry.doc)
         .is_some_and(|d| d.step_entry_on());
-    let reserve = s.prefs.reserve_number_row();
+    let reserve = s.keys.reserve_number_row(&s.prefs);
     let mut mods = 0;
     for (on, bit) in [
         (m.shift, bindings::SHIFT),
@@ -1341,8 +1353,8 @@ fn bound_command(entry: &WindowEntry, k: &KeyStroke, cx: &App) -> Option<&'stati
     }
     let chord = Chord::new(k.key_code, mods)?;
     // As the keyboard: off macOS a ⌃ chord a ⌘ chord owns runs the ⌘ one.
-    let chord = menus::owner(&chord, &s.keymap, cfg!(target_os = "macos")).unwrap_or(chord);
-    let id = s.keymap.lookup(chord, step_entry, reserve);
+    let chord = menus::owner(&chord, s.keys.keymap(), cfg!(target_os = "macos")).unwrap_or(chord);
+    let id = s.keys.keymap().lookup(chord, step_entry, reserve);
     // Step entry's keys win over the List's and the Piano Roll's own
     // (Delete is Delete Last Step there too, as Swift's key monitor).
     if step_entry && id.is_some_and(|id| STEP_COMMANDS.contains(&id)) {

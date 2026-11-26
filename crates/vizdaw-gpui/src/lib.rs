@@ -70,7 +70,7 @@ pub fn install(store: DocumentStore, cx: &mut App) -> gpui::Entity<AppState> {
     // The store's file reads (DAWproject and AAF opens) run off the UI
     // thread from now on.
     control::files::install_spawner(cx);
-    let keymap = state.read(cx).keymap.clone();
+    let keymap = state.read(cx).keys.keymap().clone();
     menus::install(&keymap, cx);
     // File › New asks for the format first.
     cx.on_action(|_: &NewDocument, cx| file_menu::new_project(cx));
@@ -337,6 +337,8 @@ pub fn run() {
         // The preferences under the launch home (a throwaway e2e home
         // keeps its own).
         state.update(cx, |s, _| s.set_prefs(vizdaw_app::Prefs::open()));
+        // The saved key bindings, in the keys and the menus.
+        menus::rebind(cx);
         // Before any document opens, so their plug-ins load.
         if let Some(problem) = vizdaw_app::session::open_plugin_catalog() {
             eprintln!("{problem}");

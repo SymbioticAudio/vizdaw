@@ -81,3 +81,13 @@ theme, nothing unreadable seen. Still open, on an unlocked screen:
 - [ ] A plug-in window header and the Mixer window in each theme.
 - [ ] Every look row above in each of the six themes (monitor tints, waveform colour, region fill, Markers colours, group tag and VCA strip).
 - [ ] Menus, popovers (record options, input picker, » overflow) and a sheet card in a dark and a light theme.
+
+## Keys, Editing, Plug-ins, Customize sheet (9c)
+
+Not yet seen on screen. Open, on an unlocked Mac:
+
+- [ ] Settings › Keys at 720×520: rows grouped by menu, changed keys in accent, the recorder's "Record" / "Press a key…", the Replace line, Save… and Load… panels.
+- [ ] Recording ⌘W and ⌘Q through the real macOS menu path (the interceptor should take them).
+- [ ] Settings › Editing: the height (600, estimated) fits; root and scale disable; the "Choose External Sample Editor" panel title.
+- [ ] Settings › Plug-ins with the bundled Multi-Q: the switch, the picker, "(not available)" for a missing choice, the Replace question.
+- [ ] The Customize Transport Bar sheet (760 wide): chips in the bar's faces, the palette grid, drag onto, along and off, the inspector's size, command and label, in a dark and a light theme.

@@ -190,7 +190,7 @@ impl Setup {
 
     /// The front document's menu item `title` in `menu`: (enabled, checked).
     fn menu_item(&mut self, menu: &str, title: &str) -> (bool, Option<bool>) {
-        let keymap = self.app.read_with(&self.cx, |a, _| a.keymap.clone());
+        let keymap = self.app.read_with(&self.cx, |a, _| a.keys.keymap().clone());
         let model = self.model(|d| menus::menu_model(Some(d), &keymap));
         model
             .menus
