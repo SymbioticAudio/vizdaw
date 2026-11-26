@@ -24,6 +24,7 @@ use vizdaw_app::automation_prefs::{
     PARAMS_ONLY_LABEL, RETURN_STEP, THINNING_CHOICES, THINNING_HELP, return_text,
 };
 use vizdaw_app::record::MIDI_TAKES_HELP;
+use vizdaw_app::theme::{Theme, themes};
 use vizdaw_app::{DocSession, Prefs, formats};
 use vizdaw_ffi::InputInfoRow;
 use vizdaw_ffi::host::InputDeviceRow;
@@ -45,6 +46,9 @@ pub const AUDIO_HEIGHT: f32 = 660.;
 pub const RECORDING_HEIGHT: f32 = 470.;
 /// The Automation tab's content height: five rows, three captions.
 pub const AUTOMATION_HEIGHT: f32 = 300.;
+/// The Appearance tab's content height: six theme rows, a switch and a
+/// caption.
+pub const APPEARANCE_HEIGHT: f32 = 300.;
 /// The tab strip's room: two rows, for where the labels wrap (the body
 /// takes what one row leaves over).
 const STRIP_HEIGHT: f32 = 72.;
@@ -100,6 +104,7 @@ impl SettingsTab {
     /// their tabs their own).
     pub fn height(self) -> f32 {
         match self {
+            SettingsTab::Appearance => APPEARANCE_HEIGHT,
             SettingsTab::Audio => AUDIO_HEIGHT,
             SettingsTab::Recording => RECORDING_HEIGHT,
             SettingsTab::Automation => AUTOMATION_HEIGHT,
@@ -350,8 +355,86 @@ impl SettingsWindow {
 
     // One body per tab; Tasks 5-6 fill Audio, Recording and Automation.
 
-    fn appearance_tab(&mut self, scope: &mut RegistryScope) -> AnyElement {
-        placeholder_body(SettingsTab::Appearance, scope)
+    /// Settings › Appearance (Swift `AppearanceSettingsView.swift:15-27`):
+    /// the Theme radio list with each theme's swatches, the colour-bars
+    /// switch and the caption. No "Your Themes" until user themes come.
+    fn appearance_tab(&mut self, scope: &mut RegistryScope, cx: &mut Context<Self>) -> AnyElement {
+        let (current, bars, problem) = {
+            let a = AppState::global(cx).read(cx);
+            (
+                a.appearance.resolved().id.clone(),
+                a.appearance.colour_bars,
+                a.appearance.problem.clone(),
+            )
+        };
+        let t = tokens();
+        let mut group = scope.container();
+        let rows: Vec<AnyElement> = themes()
+            .iter()
+            .enumerate()
+            .map(|(i, th)| {
+                let on = th.id == current;
+                let id = th.id.clone();
+                let swatches = theme_swatches(th).into_iter().map(|c| {
+                    div()
+                        .flex_none()
+                        .size(px(12.))
+                        .bg(rgb(c))
+                        .border_1()
+                        .border_color(rgb(th.surface.separator.rgb))
+                });
+                div()
+                    .id(("settings-theme", i))
+                    .relative()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.))
+                    .cursor_pointer()
+                    .child(if on { "\u{25C9}" } else { "\u{25CB}" })
+                    .child(div().flex_1().child(th.name.clone()))
+                    .child(div().flex().flex_row().gap(px(2.)).children(swatches))
+                    .child(group.control_selected("radio", &th.name, true, None, on))
+                    .on_click(move |_, _, cx| {
+                        let id = id.clone();
+                        AppState::global(cx).update(cx, |s, cx| {
+                            s.set_theme(&id, cx);
+                            cx.notify();
+                        });
+                    })
+                    .into_any_element()
+            })
+            .collect();
+        let list = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .child(div().flex().flex_col().gap(px(4.)).children(rows))
+            .child(group.this("radiogroup", "Theme", true));
+        let bars_row = switch(
+            "settings-colour-bars",
+            "Show channel colour bars",
+            bars,
+            true,
+            scope,
+            |_, cx| {
+                AppState::global(cx).update(cx, |s, cx| {
+                    let on = !s.appearance.colour_bars;
+                    s.set_colour_bars(on, cx);
+                    cx.notify();
+                });
+            },
+        );
+        let mut body = div().flex().flex_col().gap(px(6.)).p_4();
+        body = body
+            .child(div().text_color(rgb(t.text_primary)).child(list))
+            .child(bars_row)
+            .child(caption(&appearance_caption(), scope));
+        if let Some(p) = Self::problem_line(problem, scope) {
+            body = body.child(p);
+        }
+        body.into_any_element()
     }
 
     fn editing_tab(&mut self, scope: &mut RegistryScope) -> AnyElement {
@@ -997,7 +1080,7 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match self.tab {
-            SettingsTab::Appearance => self.appearance_tab(scope),
+            SettingsTab::Appearance => self.appearance_tab(scope, cx),
             SettingsTab::Editing => self.editing_tab(scope),
             SettingsTab::Keys => self.keys_tab(scope),
             SettingsTab::Audio => self.audio_tab(scope, window, cx),
@@ -1021,6 +1104,35 @@ fn set_format(cx: &mut App, rate: Option<u32>, depth: Option<vizdaw_ffi::BitDept
         });
         cx.notify();
     });
+}
+
+/// A theme's eight swatches: window, panel, accent, then the five strip
+/// kinds (Swift `ThemeSwatches`, `AppearanceSettingsView.swift:75-94`).
+pub fn theme_swatches(t: &Theme) -> [u32; 8] {
+    [
+        t.surface.window.rgb,
+        t.surface.panel.rgb,
+        t.accent.accent.rgb,
+        t.strip.channel.rgb,
+        t.strip.instrument.rgb,
+        t.strip.aux_return.rgb,
+        t.strip.bus.rgb,
+        t.strip.master.rgb,
+    ]
+}
+
+/// The caption under the switch (Swift `AppearanceSettingsView.swift:26`).
+/// Swift says only "this Mac"; ruling: other platforms say "this
+/// computer".
+fn appearance_caption() -> String {
+    let machine = if cfg!(target_os = "macos") {
+        "this Mac"
+    } else {
+        "this computer"
+    };
+    format!(
+        "The theme applies to every window. It is a preference of {machine}, not saved in projects."
+    )
 }
 
 /// A switch row (Swift `Toggle`): the label, then the switch at the right;

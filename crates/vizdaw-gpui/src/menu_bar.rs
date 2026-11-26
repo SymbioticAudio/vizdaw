@@ -5,6 +5,7 @@
 //! window passes it on, see [`MenuBar::close`]) or a click outside the
 //! list closes it. Titles record as `menu`, items as `menuitem`.
 
+use crate::appearance::ThemedCorners as _;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Context, InteractiveElement, IntoElement, ParentElement,
@@ -123,7 +124,7 @@ impl MenuBar {
             .relative()
             .px_2()
             .py_1()
-            .rounded_sm()
+            .round_sm()
             .cursor_pointer()
             .when(open, |d| d.bg(rgb(colors::button())))
             .child(spec.title.clone())
@@ -169,7 +170,7 @@ impl MenuBar {
             .bg(rgb(colors::list()))
             .border_1()
             .border_color(rgb(colors::border()))
-            .rounded_md()
+            .round_md()
             .shadow_md();
         for (row, item) in items.iter().enumerate() {
             list = list.child(match item {

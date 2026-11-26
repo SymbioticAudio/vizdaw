@@ -17,6 +17,7 @@
 //!   Pad, Lead, Drums) and its caption; it follows every document step.
 //! - ⌘W (Ctrl-W) closes the window as its close button does.
 
+use crate::appearance::ThemedCorners as _;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Instant;
@@ -433,7 +434,7 @@ fn header_view(
         .px(px(10.))
         .flex()
         .items_center()
-        .rounded(px(4.))
+        .round_px(4.)
         .bg(rgb(if on { colors::on() } else { colors::button() }))
         .child(BYPASS)
         .child(scope.control_selected("checkbox", BYPASS, enabled, None, on));
@@ -454,7 +455,7 @@ fn header_view(
         .px(px(10.))
         .flex()
         .items_center()
-        .rounded(px(4.))
+        .round_px(4.)
         .bg(rgb(colors::button()))
         .opacity(0.45)
         .child(LEARN)

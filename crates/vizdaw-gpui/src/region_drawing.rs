@@ -276,7 +276,9 @@ pub(crate) fn paint_region(
         (r.width - 1.).max(0.),
         (r.height - 1.).max(0.),
     );
-    window.paint_quad(fill(body, region_fill).corner_radii(px(colors::RADIUS)));
+    window.paint_quad(
+        fill(body, region_fill).corner_radii(px(crate::appearance::corner(colors::RADIUS))),
+    );
     let inside = canvas_rect(o, r.x, r.y, r.width, r.height);
     window.with_content_mask(Some(ContentMask { bounds: inside }), |window| {
         if d.offline {
@@ -311,7 +313,7 @@ pub(crate) fn paint_region(
     };
     window.paint_quad(quad(
         body,
-        px(colors::RADIUS),
+        px(crate::appearance::corner(colors::RADIUS)),
         gpui::transparent_black(),
         px(width),
         gpui::rgb(line),
@@ -348,7 +350,7 @@ fn paint_pill(d: &RegionDraw, o: gpui::Point<Pixels>, window: &mut Window, cx: &
             canvas_rect(o, pill.x, pill.y, pill.width, pill.height),
             gpui::rgb(colors::offline_pill()),
         )
-        .corner_radii(px(colors::RADIUS)),
+        .corner_radii(px(crate::appearance::corner(colors::RADIUS))),
     );
     paint_text(
         OFFLINE,

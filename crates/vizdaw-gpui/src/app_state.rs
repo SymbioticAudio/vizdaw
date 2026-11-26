@@ -180,6 +180,16 @@ impl AppState {
         Ok(ran)
     }
 
+    /// Settings › Appearance: makes `id` the theme, saves it (a failed write
+    /// keeps it for this run, as `appearance.problem`) and redraws every
+    /// window. `ui.theme` ends in the same `apply`. An id that names no
+    /// theme changes nothing.
+    pub fn set_theme(&mut self, id: &str, cx: &mut gpui::App) {
+        if self.appearance.set_theme(id, &mut self.prefs).is_ok() {
+            crate::appearance::apply(&self.appearance.theme, cx);
+        }
+    }
+
     /// Show channel colour bars: sets and saves it (a failed write keeps
     /// it for this run) and redraws every window.
     pub fn set_colour_bars(&mut self, on: bool, cx: &mut gpui::App) {

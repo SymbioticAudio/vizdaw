@@ -18,6 +18,7 @@
 //! ([`use_sheet_prompts`]: GPUI's own Linux prompt has no keys and no
 //! theme).
 
+use crate::appearance::ThemedCorners as _;
 use futures::channel::oneshot;
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -427,7 +428,7 @@ fn card() -> Div {
         .flex_col()
         .gap_3()
         .p_4()
-        .rounded_lg()
+        .round_lg()
         .border_1()
         .border_color(rgb(card_colours().border))
         .bg(rgb(card_colours().background))
@@ -480,7 +481,7 @@ pub(crate) fn button_face(i: usize, b: &SheetButton) -> Stateful<Div> {
         .flex_none()
         .items_center()
         .justify_center()
-        .rounded_md()
+        .round_md()
         .bg(rgb(background))
         .text_color(rgb(if b.enabled {
             face_text
@@ -510,7 +511,7 @@ impl Render for HelpTip {
             .max_w(px(280.))
             .px_2()
             .py_1()
-            .rounded_md()
+            .round_md()
             .border_1()
             .border_color(rgb(colors::border()))
             .bg(rgb(card_colours().background))

@@ -7,6 +7,7 @@
 //! the rows how to edit them. Also the small pieces those sheets draw
 //! alike: a text line, a labelled row, a toggle, a progress bar.
 
+use crate::appearance::ThemedCorners as _;
 use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
@@ -113,13 +114,13 @@ pub(crate) fn progress_bar(p: f32, label: &str, scope: &mut RegistryScope) -> An
         .relative()
         .w_full()
         .h(px(6.))
-        .rounded_sm()
+        .round_sm()
         .bg(rgb(colors::readout()))
         .child(
             div()
                 .h_full()
                 .w(relative(p))
-                .rounded_sm()
+                .round_sm()
                 .bg(rgb(colors::on())),
         )
         .child(scope.control_with("progress", label, true, Some(&value), false))
@@ -244,7 +245,7 @@ impl FormatRows {
             .items_center()
             .justify_between()
             .gap_2()
-            .rounded_md()
+            .round_md()
             .border_1()
             .border_color(rgb(colors::border()))
             .bg(rgb(colors::button()))
@@ -297,7 +298,7 @@ impl FormatRows {
                                 .bg(rgb(colors::list()))
                                 .border_1()
                                 .border_color(rgb(colors::border()))
-                                .rounded_md()
+                                .round_md()
                                 .children(rows),
                         ),
                     )

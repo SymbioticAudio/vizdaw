@@ -1023,7 +1023,7 @@ impl Prepared {
                 let (nw, nh) = ((r.width - 1.).max(0.), (r.height - 1.).max(0.));
                 window.paint_quad(quad(
                     rect(r.x + 0.5, r.y + 0.5, nw, nh),
-                    px(colors::RADIUS.min(nh / 2.)),
+                    px(crate::appearance::corner(colors::RADIUS.min(nh / 2.))),
                     with_alpha(colors::swatch(n.colour), n.alpha),
                     px(width),
                     rgb(line),

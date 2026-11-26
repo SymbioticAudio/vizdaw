@@ -11,6 +11,7 @@
 //! with such items and when idle or a recheck finds new ones (each item
 //! once); never under the control channel.
 
+use crate::appearance::ThemedCorners as _;
 use gpui::{
     AnyElement, App, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
     Styled, Window, div, px, rgb,
@@ -217,7 +218,7 @@ impl Sheet for RelinkSheet {
                     .overflow_y_scroll()
                     .border_1()
                     .border_color(rgb(colors::border()))
-                    .rounded_md()
+                    .round_md()
                     .px_2()
                     .child(div().flex().flex_col().children(items))
                     .child(clip),

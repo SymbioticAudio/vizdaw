@@ -28,6 +28,7 @@
 //! `Import`. A new project is made at the file's rate and its window
 //! opens. Never under the control channel.
 
+use crate::appearance::ThemedCorners as _;
 use std::panic::AssertUnwindSafe;
 
 use gpui::prelude::FluentBuilder;
@@ -102,7 +103,7 @@ fn picker(
         .items_center()
         .justify_between()
         .gap_2()
-        .rounded_md()
+        .round_md()
         .border_1()
         .border_color(rgb(colors::border()))
         .bg(rgb(colors::button()))
@@ -154,7 +155,7 @@ fn picker(
                             .bg(rgb(colors::list()))
                             .border_1()
                             .border_color(rgb(colors::border()))
-                            .rounded_md()
+                            .round_md()
                             .children(rows),
                     ),
                 )

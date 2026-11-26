@@ -14,6 +14,7 @@
 //! document's list is focused (Return no longer returns to start; Space
 //! still plays), and Delete or Forward Delete deletes the selected rows.
 
+use crate::appearance::ThemedCorners as _;
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -452,7 +453,7 @@ fn bar_button(
         .flex_none()
         .items_center()
         .px_2()
-        .rounded_md()
+        .round_md()
         .cursor_pointer()
         .text_xs()
         .bg(rgb(colors::button()))

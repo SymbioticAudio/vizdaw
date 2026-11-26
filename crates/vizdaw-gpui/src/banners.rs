@@ -12,6 +12,7 @@
 //! first.` (Swift `MergeModel.heldHelp`), as their tooltip and their
 //! `value` in the tree.
 
+use crate::appearance::ThemedCorners as _;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     Context, IntoElement, ParentElement, StatefulInteractiveElement, Styled, div, px, relative, rgb,
@@ -141,13 +142,13 @@ fn progress_bar(progress: f32, label: &str, scope: &mut RegistryScope) -> gpui::
         .flex_none()
         .w(px(PROGRESS_WIDTH))
         .h(px(6.))
-        .rounded_sm()
+        .round_sm()
         .bg(rgb(colors::field()))
         .child(
             div()
                 .h_full()
                 .w(relative(p))
-                .rounded_sm()
+                .round_sm()
                 .bg(rgb(colors::accent())),
         )
         .child(scope.control_with("progress", label, true, Some(&value), false))

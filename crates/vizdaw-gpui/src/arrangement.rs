@@ -20,6 +20,7 @@
 //! menu, and the zoom buttons. The maths and the drag are
 //! `vizdaw_app`'s; this canvas only feeds them pointer events.
 
+use crate::appearance::ThemedCorners as _;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -601,7 +602,7 @@ pub(crate) fn menu_list(id: &'static str) -> gpui::Stateful<gpui::Div> {
         .bg(rgb(bar_colors::list()))
         .border_1()
         .border_color(rgb(bar_colors::border()))
-        .rounded_md()
+        .round_md()
         .shadow_md()
         .text_color(rgb(bar_colors::text()))
 }
@@ -650,7 +651,7 @@ pub(crate) fn bar_button(
         .flex_none()
         .items_center()
         .justify_center()
-        .rounded_md()
+        .round_md()
         .cursor_pointer()
         .text_xs()
         .bg(rgb(if on {
@@ -1533,7 +1534,8 @@ fn paint_take(t: &TakeDraw, o: Point<Pixels>, window: &mut Window) {
         (r.height - 1.).max(0.),
     );
     window.paint_quad(
-        fill(body, with_alpha(record, colors::TAKE_ALPHA)).corner_radii(px(colors::RADIUS)),
+        fill(body, with_alpha(record, colors::TAKE_ALPHA))
+            .corner_radii(px(crate::appearance::corner(colors::RADIUS))),
     );
     let inside = canvas_rect(o, r.x, r.y, r.width, r.height);
     window.with_content_mask(Some(ContentMask { bounds: inside }), |window| {
@@ -1549,7 +1551,7 @@ fn paint_take(t: &TakeDraw, o: Point<Pixels>, window: &mut Window) {
     });
     window.paint_quad(quad(
         body,
-        px(colors::RADIUS),
+        px(crate::appearance::corner(colors::RADIUS)),
         gpui::transparent_black(),
         px(1.),
         rgb(record),
@@ -1580,7 +1582,7 @@ fn paint_block(
     };
     window.paint_quad(quad(
         rect(r.x + 0.5, r.y + 0.5, r.width - 1., r.height - 1.),
-        px(colors::RADIUS),
+        px(crate::appearance::corner(colors::RADIUS)),
         fill_colour,
         px(width),
         rgb(line),

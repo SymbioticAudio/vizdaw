@@ -7,6 +7,7 @@
 //! when the drag ends). A window too small for every shown pane drops
 //! some for the frame only (the layout keeps them shown).
 
+use crate::appearance::ThemedCorners as _;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Context, DispatchPhase, Div, Focusable, InteractiveElement, IntoElement,
@@ -680,7 +681,7 @@ fn picker(
         .items_center()
         .px_2()
         .gap_1()
-        .rounded_md()
+        .round_md()
         .cursor_pointer()
         .text_xs()
         .bg(rgb(colors::button()))

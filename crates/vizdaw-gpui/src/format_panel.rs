@@ -9,6 +9,7 @@
 //! value the choice); a click opens its items (`menuitem`, the chosen one
 //! selected), and a click on one chooses it.
 
+use crate::appearance::ThemedCorners as _;
 use futures::channel::oneshot;
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -119,7 +120,7 @@ pub(crate) fn popup(
         .items_center()
         .justify_between()
         .gap_2()
-        .rounded_md()
+        .round_md()
         .border_1()
         .border_color(rgb(colors::border()))
         .bg(rgb(colors::button()))
@@ -172,7 +173,7 @@ pub(crate) fn popup(
                             .bg(rgb(colors::list()))
                             .border_1()
                             .border_color(rgb(colors::border()))
-                            .rounded_md()
+                            .round_md()
                             .children(rows),
                     ),
                 )

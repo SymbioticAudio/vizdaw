@@ -18,6 +18,7 @@
 //! under the control channel, which cancels nothing. Merge and Cancel run
 //! once: the model ends the job and the hold before anything else.
 
+use crate::appearance::ThemedCorners as _;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 
@@ -155,7 +156,7 @@ fn snapshot_list(
                 .justify_between()
                 .px_2()
                 .py_1()
-                .rounded_sm()
+                .round_sm()
                 .cursor_pointer()
                 .when(on, |d| d.bg(rgb(colors::on())))
                 .child(when(r.exported_at))
@@ -187,7 +188,7 @@ fn snapshot_list(
                 .overflow_y_scroll()
                 .border_1()
                 .border_color(rgb(colors::border()))
-                .rounded_md()
+                .round_md()
                 .bg(rgb(colors::list()))
                 .children(items)
                 .child(list.this("list", EXPORTS_LABEL, true))

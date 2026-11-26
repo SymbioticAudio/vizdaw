@@ -20,6 +20,7 @@
 //! toggles mute. A double-click on the name opens the rename field, which
 //! the document window owns (see [`DocumentWindow::begin_rename`]).
 
+use crate::appearance::ThemedCorners as _;
 use gpui::prelude::FluentBuilder;
 use std::rc::Rc;
 
@@ -510,7 +511,7 @@ impl TrackHeaders {
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded_sm()
+                .round_sm()
                 .text_xs()
                 .cursor_pointer()
                 .bg(rgb(monitor_colours(lane.monitor).0))
@@ -741,7 +742,7 @@ fn toggle(
         .flex()
         .items_center()
         .justify_center()
-        .rounded_sm()
+        .round_sm()
         .text_xs()
         .cursor_pointer()
         .bg(rgb(if on { on_color } else { colors::button() }))
@@ -814,7 +815,7 @@ fn add_menu(scope: &mut RegistryScope, cx: &mut Context<DocumentWindow>) -> AnyE
         .bg(rgb(colors::list()))
         .border_1()
         .border_color(rgb(colors::border()))
-        .rounded_md()
+        .round_md()
         .shadow_md()
         .text_color(rgb(colors::text()));
     for (row, (title, id)) in ADD_TRACK_ITEMS.into_iter().enumerate() {

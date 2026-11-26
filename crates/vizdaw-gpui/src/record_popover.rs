@@ -14,6 +14,7 @@
 //! field holding the keyboard, so Record refuses and says why
 //! (`RecordModel::close_allowed`).
 
+use crate::appearance::ThemedCorners as _;
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -432,7 +433,7 @@ fn panel(
         .bg(rgb(colors::list()))
         .border_1()
         .border_color(rgb(colors::border()))
-        .rounded_md()
+        .round_md()
         .shadow_md()
         .text_color(rgb(colors::text()))
         .child(scope.this("group", RECORD_OPTIONS, on))
@@ -657,7 +658,7 @@ fn punch_field(
         .relative()
         .flex_1()
         .h(px(24.))
-        .rounded_sm()
+        .round_sm()
         .overflow_hidden()
         .text_color(rgb(colors::field_text()));
     let boxed = if editing {

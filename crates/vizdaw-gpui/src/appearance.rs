@@ -39,6 +39,37 @@ pub fn current() -> &'static Theme {
     &themes()[CURRENT.with(Cell::get)]
 }
 
+/// A corner radius as the theme draws it: `r` points, or 0 where the
+/// theme's `styles.corners` is square (Flat, Symbiotic).
+pub fn corner(r: f32) -> f32 {
+    if current().styles.corners == theme::Corners::Square {
+        0.
+    } else {
+        r
+    }
+}
+
+/// The rounded-corner calls, themed: the same radii as GPUI's
+/// `rounded_sm`/`md`/`lg` (2, 6, 8 points) in a rounded theme, 0 in a
+/// square one. Chrome calls these, never the plain ones.
+pub trait ThemedCorners: gpui::Styled + Sized {
+    fn round_sm(self) -> Self {
+        self.rounded(gpui::px(corner(2.)))
+    }
+    fn round_md(self) -> Self {
+        self.rounded(gpui::px(corner(6.)))
+    }
+    fn round_lg(self) -> Self {
+        self.rounded(gpui::px(corner(8.)))
+    }
+    /// A fixed radius, themed.
+    fn round_px(self, r: f32) -> Self {
+        self.rounded(gpui::px(corner(r)))
+    }
+}
+
+impl<T: gpui::Styled + Sized> ThemedCorners for T {}
+
 /// The index of the current theme in `themes()`.
 pub(crate) fn current_index() -> usize {
     CURRENT.with(Cell::get)

@@ -19,6 +19,7 @@
 //! message ([`present`]), never an alert. Never under the control
 //! channel.
 
+use crate::appearance::ThemedCorners as _;
 use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
 
@@ -265,7 +266,7 @@ impl Sheet for ForDawSheet {
                 .overflow_y_scroll()
                 .border_1()
                 .border_color(rgb(colors::border()))
-                .rounded_md()
+                .round_md()
                 .px_2()
                 .py_1()
                 .child(div().flex().flex_col().gap_1().children(rows))

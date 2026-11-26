@@ -11,6 +11,7 @@
 //! into the » menu, where a folded field item is a popover of its live
 //! fields.
 
+use crate::appearance::ThemedCorners as _;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Context, Div, ElementId, Focusable, InteractiveElement, IntoElement, MouseButton,
@@ -761,7 +762,7 @@ pub(crate) fn face(
         .flex_none()
         .items_center()
         .justify_center()
-        .rounded_md()
+        .round_md()
         .bg(rgb(background))
         .text_color(color(enabled))
         .when(enabled, |b| b.cursor_pointer())
@@ -1037,7 +1038,7 @@ fn summary(text: &str, scope: &mut RegistryScope) -> AnyElement {
         .whitespace_nowrap()
         .px_2()
         .py(px(2.))
-        .rounded_sm()
+        .round_sm()
         .bg(Rgba { r, g, b, a: 0.18 })
         .text_xs()
         .text_color(rgb(colors::text()))
@@ -1169,7 +1170,7 @@ fn bar_menu_list(
         .bg(rgb(colors::list()))
         .border_1()
         .border_color(rgb(colors::border()))
-        .rounded_md()
+        .round_md()
         .shadow_md()
         .text_color(rgb(colors::text()));
     for (row, e) in entries.iter().enumerate() {
@@ -1317,7 +1318,7 @@ fn readout(which: ReadoutBox, text: &str, scope: &mut RegistryScope) -> AnyEleme
         .flex()
         .flex_col()
         .justify_center()
-        .rounded_md()
+        .round_md()
         .bg(rgb(colors::readout()))
         .overflow_hidden()
         .whitespace_nowrap()
@@ -1361,7 +1362,7 @@ fn field(
         .flex_none()
         .w(px(FIELD))
         .h(px(24.))
-        .rounded_sm()
+        .round_sm()
         .overflow_hidden()
         .text_color(rgb(colors::field_text()));
     let boxed = if editing {
@@ -1452,7 +1453,7 @@ fn field_popover(
         .bg(rgb(colors::list()))
         .border_1()
         .border_color(rgb(colors::border()))
-        .rounded_md()
+        .round_md()
         .shadow_md()
         .text_color(rgb(colors::text()))
         .child(scope.this("group", piece.title(), true))
@@ -1633,7 +1634,7 @@ fn more_menu(
         .bg(rgb(colors::list()))
         .border_1()
         .border_color(rgb(colors::border()))
-        .rounded_md()
+        .round_md()
         .shadow_md()
         .text_color(rgb(colors::text()));
     let mut row: usize = 0;
@@ -2017,7 +2018,7 @@ fn faults_popover(
         .bg(rgb(colors::list()))
         .border_1()
         .border_color(rgb(colors::border()))
-        .rounded_md()
+        .round_md()
         .shadow_md()
         .text_color(rgb(colors::text()))
         .child(scope.this("group", FAULTS, true));

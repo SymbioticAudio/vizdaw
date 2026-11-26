@@ -780,3 +780,170 @@ fn reselecting_audio_while_a_read_hangs_starts_no_second_read(cx: &mut TestAppCo
         s.has_text("Round trip 6.8 ms (input 38 + output 34 + 2 × 128 frames)")
     });
 }
+
+// ---- Appearance (slice 9b Task 5) ----
+
+const THEME_NAMES: [&str; 6] = [
+    "Classic Light",
+    "Studio Dark",
+    "Flat",
+    "Console",
+    "Symbiotic",
+    "EG13",
+];
+
+fn caption_text() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "The theme applies to every window. It is a preference of this Mac, not saved in projects."
+    } else {
+        "The theme applies to every window. It is a preference of this computer, not saved in projects."
+    }
+}
+
+#[gpui::test]
+fn the_appearance_tab_lists_the_six_with_swatches(cx: &mut TestAppContext) {
+    let mut s = setup(cx, true);
+    s.open(Some(SettingsTab::Appearance));
+    let radios: Vec<_> = s
+        .elements()
+        .into_iter()
+        .filter(|e| e.role == "radio")
+        .collect();
+    let names: Vec<&str> = radios.iter().map(|e| e.label.as_str()).collect();
+    assert_eq!(names, THEME_NAMES);
+    assert_eq!(
+        radios.iter().filter(|e| e.selected).count(),
+        1,
+        "{radios:#?}"
+    );
+    assert!(radios[0].selected, "Classic Light is the default");
+    assert!(s.find("radiogroup", "Theme").is_some());
+    assert!(s.has_text(caption_text()));
+    assert!(s.find("checkbox", "Show channel colour bars").is_some());
+    assert_eq!(
+        s.value("checkbox", "Show channel colour bars").as_deref(),
+        Some("on")
+    );
+    assert!(!s.has_text("Your Themes"));
+    // Eight swatches a theme: window, panel, accent, then the five strip
+    // kinds.
+    let t = vizdaw_app::theme::theme("studio-dark").unwrap();
+    let sw = vizdaw_gpui::settings_window::theme_swatches(t);
+    assert_eq!(
+        sw,
+        [
+            t.surface.window.rgb,
+            t.surface.panel.rgb,
+            t.accent.accent.rgb,
+            t.strip.channel.rgb,
+            t.strip.instrument.rgb,
+            t.strip.aux_return.rgb,
+            t.strip.bus.rgb,
+            t.strip.master.rgb,
+        ]
+    );
+}
+
+#[gpui::test]
+fn choosing_a_theme_switches_every_window_and_saves(cx: &mut TestAppContext) {
+    let mut s = setup(cx, true);
+    s.app.update(&mut s.cx, |a, _| {
+        a.set_prefs(vizdaw_app::Prefs::in_memory());
+    });
+    s.open(Some(SettingsTab::Appearance));
+    s.click("radio", "Flat");
+    assert_eq!(vizdaw_gpui::appearance::current().id, "flat");
+    let (saved, shown) = s.app.read_with(&s.cx, |a, _| {
+        (
+            a.prefs.raw("appearance").cloned(),
+            a.appearance.theme.clone(),
+        )
+    });
+    assert_eq!(shown, "flat");
+    assert_eq!(saved.unwrap()["theme"], "flat");
+    let sel = s
+        .elements()
+        .into_iter()
+        .find(|e| e.role == "radio" && e.selected)
+        .unwrap();
+    assert_eq!(sel.label, "Flat");
+    // The command and the tab share one path.
+    s.app.update(&mut s.cx, |a, cx| {
+        let args = [(
+            "theme".to_owned(),
+            core_control::registry::ArgValue::Text("eg13".into()),
+        )];
+        a.run_ui_theme(&args, cx).unwrap();
+    });
+    s.cx.run_until_parked();
+    let sel = s
+        .elements()
+        .into_iter()
+        .find(|e| e.role == "radio" && e.selected)
+        .unwrap();
+    assert_eq!(sel.label, "EG13");
+}
+
+#[gpui::test]
+fn the_colour_bars_toggle_saves_and_hides_the_bars(cx: &mut TestAppContext) {
+    let mut s = setup(cx, true);
+    s.app.update(&mut s.cx, |a, _| {
+        a.set_prefs(vizdaw_app::Prefs::in_memory());
+    });
+    s.open(Some(SettingsTab::Appearance));
+    assert!(vizdaw_gpui::appearance::colour_bars());
+    s.click("checkbox", "Show channel colour bars");
+    assert!(!vizdaw_gpui::appearance::colour_bars());
+    assert_eq!(
+        s.value("checkbox", "Show channel colour bars").as_deref(),
+        Some("off")
+    );
+    let saved = s
+        .app
+        .read_with(&s.cx, |a, _| a.prefs.raw("appearance").cloned())
+        .unwrap();
+    assert_eq!(saved["colourBars"], false);
+    s.click("checkbox", "Show channel colour bars");
+    assert!(vizdaw_gpui::appearance::colour_bars());
+}
+
+#[gpui::test]
+fn a_failed_theme_write_still_switches_and_shows_the_problem(cx: &mut TestAppContext) {
+    let mut s = setup(cx, true);
+    let dir = std::env::temp_dir().join(format!("vizdaw-appearance-tab-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let blocker = dir.join("blocker");
+    std::fs::write(&blocker, b"x").unwrap();
+    s.app.update(&mut s.cx, |a, _| {
+        a.set_prefs(vizdaw_app::Prefs::at(blocker.join("prefs.json")));
+    });
+    s.open(Some(SettingsTab::Appearance));
+    s.click("radio", "Console");
+    assert_eq!(vizdaw_gpui::appearance::current().id, "console");
+    let p = s
+        .elements()
+        .into_iter()
+        .find(|e| e.role == "text" && e.value.as_deref() == Some("problem"))
+        .expect("the red problem line");
+    assert!(p.label.contains("could not be written"), "{}", p.label);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[gpui::test]
+fn square_corners_in_flat(cx: &mut TestAppContext) {
+    let mut s = setup(cx, true);
+    s.app.update(&mut s.cx, |a, _| {
+        a.set_prefs(vizdaw_app::Prefs::in_memory());
+    });
+    s.open(Some(SettingsTab::Appearance));
+    assert_eq!(vizdaw_gpui::appearance::corner(5.), 5.);
+    assert!(vizdaw_gpui::strip_palette::tokens().radius > 0.);
+    for (name, id) in [("Flat", "flat"), ("Symbiotic", "symbiotic")] {
+        s.click("radio", name);
+        assert_eq!(vizdaw_gpui::appearance::current().id, id);
+        assert_eq!(vizdaw_gpui::appearance::corner(5.), 0.);
+        assert_eq!(vizdaw_gpui::strip_palette::tokens().radius, 0.);
+    }
+    s.click("radio", "Console");
+    assert_eq!(vizdaw_gpui::appearance::corner(5.), 5.);
+}
