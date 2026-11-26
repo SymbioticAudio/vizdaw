@@ -1244,6 +1244,7 @@ pub fn background() -> u32 {
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = tokens();
+        let selected = selected_tab_colours();
         let mut scope = RegistryScope::root(&self.registry);
         let mut strip = scope.container();
         let mut tabs = div()
@@ -1266,7 +1267,7 @@ impl Render for SettingsWindow {
                     .px_2()
                     .py_1()
                     .rounded(px(t.radius))
-                    .when_selected(on, t.accent, t.text_inverse, t.text_primary)
+                    .when_selected(on, selected.0, selected.1, t.text_primary)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.select(tab, window, cx);
                     }))
@@ -1289,6 +1290,12 @@ impl Render for SettingsWindow {
             .child(tabs)
             .child(body)
     }
+}
+
+/// The selected tab's fill and label: the accent with its own ink.
+pub fn selected_tab_colours() -> (u32, u32) {
+    let t = crate::strip_palette::tokens();
+    (t.accent, t.on_accent)
 }
 
 trait Selected: Styled + Sized {

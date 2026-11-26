@@ -58,6 +58,7 @@ pub struct StripTokens {
     pub surface_separator: u32,
     pub focus_ring: u32,
     pub accent: u32,
+    pub on_accent: u32,
     pub text_primary: u32,
     pub text_secondary: u32,
     pub text_inverse: u32,
@@ -112,6 +113,7 @@ pub const CLASSIC_LIGHT: StripTokens = StripTokens {
     surface_separator: 0x7A7A7A,
     focus_ring: 0x1F4FBF,
     accent: 0x1F4FBF,
+    on_accent: 0xFFFFFF,
     text_primary: 0x000000,
     text_secondary: 0x3A3A3A,
     text_inverse: 0xFFFFFF,
@@ -185,6 +187,7 @@ impl StripTokens {
             surface_separator: t.surface.separator.rgb,
             focus_ring: t.surface.focus_ring.rgb,
             accent: t.accent.accent.rgb,
+            on_accent: t.accent.on_accent.rgb,
             text_primary: t.text.primary.rgb,
             text_secondary: t.text.secondary.rgb,
             text_inverse: t.text.inverse.rgb,
@@ -281,16 +284,13 @@ impl StripTokens {
         })
     }
 
-    /// The legend on a lit toggle: dark text on a light fill, light on a
-    /// dark one.
+    /// The legend on a lit toggle: the current theme's key ink with the
+    /// higher contrast on `fill` (Swift `Theme.legend(on:)`).
     pub fn legend_on(&self, fill: u32) -> Rgba {
-        let c = rgb(fill);
-        let luma = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
-        rgb(if luma > 0.5 {
-            self.text_primary
-        } else {
-            self.text_inverse
-        })
+        rgb(crate::appearance::legend_on(
+            crate::appearance::current(),
+            fill,
+        ))
     }
 }
 
@@ -368,7 +368,12 @@ mod tests {
     #[test]
     fn lit_legends_contrast_with_their_fill() {
         let t = tokens();
-        assert_eq!(t.legend_on(t.state_solo), rgb(t.text_primary));
-        assert_eq!(t.legend_on(t.state_record), rgb(t.text_inverse));
+        let now = crate::appearance::current();
+        for fill in [t.state_solo, t.state_record] {
+            assert_eq!(
+                t.legend_on(fill),
+                rgb(crate::appearance::legend_on(now, fill))
+            );
+        }
     }
 }

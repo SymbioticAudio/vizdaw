@@ -295,3 +295,56 @@ fn no_source_file_keeps_a_colour_literal() {
     }
     assert!(hits.is_empty(), "colour literals: {hits:#?}");
 }
+
+#[gpui::test]
+fn the_lit_mixer_toggles_read_on_their_fills(cx: &mut TestAppContext) {
+    app(cx);
+    for id in [
+        "classic-light",
+        "studio-dark",
+        "flat",
+        "console",
+        "symbiotic",
+        "eg13",
+    ] {
+        let t = use_theme(cx, id);
+        let s = tokens();
+        for (name, fill) in [
+            ("mute", s.state_mute),
+            ("solo", s.state_solo),
+            ("record", s.state_record),
+            ("play", s.state_play),
+            ("warning", s.state_warning),
+            ("send", s.control_send),
+        ] {
+            let ink = s.legend_on(fill);
+            assert_eq!(
+                ink,
+                gpui::rgb(vizdaw_gpui::appearance::legend_on(t, fill)),
+                "{id} {name}"
+            );
+            let c = contrast(vizdaw_gpui::appearance::legend_on(t, fill), fill);
+            assert!(c >= 4.3, "{id} {name}: {c}");
+        }
+    }
+}
+
+#[gpui::test]
+fn the_selected_settings_tab_reads_on_the_accent(cx: &mut TestAppContext) {
+    app(cx);
+    for id in [
+        "classic-light",
+        "studio-dark",
+        "flat",
+        "console",
+        "symbiotic",
+        "eg13",
+    ] {
+        let t = use_theme(cx, id);
+        let (fill, ink) = vizdaw_gpui::settings_window::selected_tab_colours();
+        assert_eq!(fill, t.accent.accent.rgb, "{id}");
+        assert_eq!(ink, t.accent.on_accent.rgb, "{id}");
+        let c = contrast(ink, fill);
+        assert!(c >= 4.5, "{id}: {c}");
+    }
+}
