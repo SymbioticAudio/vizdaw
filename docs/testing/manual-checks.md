@@ -17,7 +17,7 @@ Status: **open**, **pass**, **fail** (with the bug's number).
 - **Linux:** in `~/vizdaw-next` on the test box, `git pull`, then
   `cargo run -p vizdaw-gpui --release`.
 
-Not in the app yet, so not on this list: Settings (themes, Audio, Keys,
+Not in the app yet, so not on this list: the rest of Settings (themes, Keys,
 the Customize Transport Bar sheet), Co-Producer, the Strip Chart, Drum
 Grid and Audio editors, torn-off editor windows, the Plugin Manager and
 Media Pool. Their checks come with their slices.
@@ -44,6 +44,8 @@ Media Pool. Their checks come with their slices.
 | M16 | Unplug the keyboard | The track keeps its choice and shows it as offline | open |
 | M17 | With a second display at a different scale (2× and 1×), drag a plug-in window from one to the other | The editor stays sharp and the same size | open |
 | M18 | Export For Another DAW and Export DAWproject, then open the results in another DAW | The tracks, stems and positions arrive as "What won't transfer" said | open |
+| M19 | Settings › Audio with your interface plugged in, then unplugged | Its name is in the Input device list; after unplugging, "<name> (not connected)" stays chosen | open |
+| M20 | Change I/O Buffer Size while playing | The new size is heard without a glitch or a stop | open |
 
 ## Linux (your desktop)
 
@@ -74,3 +76,4 @@ Media Pool. Their checks come with their slices.
 | L23 | Record a few minutes with the offline device; compare just before and after Stop | The take looks the same; no lag while it grows | open |
 | L24 | The Markers pane with many markers | Rows and digits aligned; "Go to <name>" on hover; a click moves the playhead; it scrolls to the last | open |
 | L25 | (After host track H3) a real audio interface and MIDI keyboard | As M8–M16 | waits for H3 |
+| L26 | VizDAW › Settings… (Ctrl-,) in the in-window menu bar | The Settings window opens; the Audio, Recording and Automation tabs draw with the system font, nothing clipped | open |

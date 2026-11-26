@@ -59,6 +59,17 @@ and host track H2.
 - [ ] A long hand-recorded take (minutes, several tracks): no UI lag, playhead on time, control channel answers.
 - [ ] Markers: "Go to <name>" tooltip; a failed move shows "Go to Marker Failed:" with the reason.
 
+## Settings window (9a)
+
+Checked 2026-11-25 on the Mac (debug bundle, offline device): ⌘, opens one
+Settings window; the nine tabs wrap to two rows in 500 pt; the Audio,
+Recording and Automation tabs match Swift's forms, nothing clipped, each
+window height fits its tab. Still open:
+
+- [ ] The red problem line while recording (change the buffer size during a take).
+- [ ] The round-trip caption changes to "Round trip … ms" once a track's input opens.
+- [ ] Steppers at their ends (count-in 4, pre-roll 8, return time 2000 ms) and the disabled buttons.
+
 ## After the Settings slice
 
 - [ ] Every look row above in each of the five themes (monitor tints, waveform colour, region fill, Markers colours, group tag and VCA strip).
