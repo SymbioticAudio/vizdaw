@@ -15,7 +15,7 @@ use vizdaw_gpui::appearance::{colour_bars, contrast, region_name_ink};
 use vizdaw_gpui::arrangement::colors;
 use vizdaw_gpui::plugin_windows::window_colours;
 use vizdaw_gpui::strip_palette::tokens;
-use vizdaw_gpui::track_headers::lane_bars;
+use vizdaw_gpui::track_headers::{lane_bars, monitor_colours};
 
 fn use_prefs(cx: &mut TestAppContext, prefs_json: serde_json::Value) {
     cx.update(|cx| {
@@ -197,11 +197,43 @@ fn a_plugin_window_header_takes_the_theme(cx: &mut TestAppContext) {
     assert_ne!(c.text, d.text);
 }
 
+#[gpui::test]
+fn the_lit_monitor_button_reads_on_its_fill(cx: &mut TestAppContext) {
+    use vizdaw_ffi::edit::MonitorModeRow;
+    app(cx);
+    for id in [
+        "classic-light",
+        "studio-dark",
+        "flat",
+        "console",
+        "symbiotic",
+        "eg13",
+    ] {
+        let t = use_theme(cx, id);
+        for m in [MonitorModeRow::Input, MonitorModeRow::Auto] {
+            let (fill, ink) = monitor_colours(m);
+            assert_eq!(ink, vizdaw_gpui::appearance::legend_on(t, fill), "{id}");
+            assert!(
+                contrast(ink, fill) >= 4.3,
+                "{id} {m:?}: {}",
+                contrast(ink, fill)
+            );
+        }
+        // Off: the raised face with the secondary text, as M/S/R off.
+        let (fill, ink) = monitor_colours(MonitorModeRow::Off);
+        assert_eq!(
+            (fill, ink),
+            (t.surface.raised.rgb, t.text.secondary.rgb),
+            "{id}"
+        );
+    }
+}
+
 /// Every file of `src` is scanned; no colour literal stays. The allow-list,
 /// each with its reason: `strip_palette.rs` holds the hand-written Classic
-/// Light table a test holds to the theme; `appearance.rs` is the theme
-/// accessor, whose pure black and white are Swift's `swatchLegend` and
-/// `regionNameInk` inks; and the transport bar's "on" fill is built from
+/// Light table a test holds to the theme; `appearance.rs` has two lines,
+/// the pure black and white inks of Swift's `swatchLegend` and
+/// `regionNameInk`; and the transport bar's "on" fill is built from
 /// the accent token's channels (alpha applied to a token).
 #[test]
 fn no_source_file_keeps_a_colour_literal() {
@@ -218,12 +250,18 @@ fn no_source_file_keeps_a_colour_literal() {
             }
         }
     }
-    files.retain(|f| !f.ends_with("strip_palette.rs") && !f.ends_with("appearance.rs"));
+    files.retain(|f| !f.ends_with("strip_palette.rs"));
     let mut hits = Vec::new();
     for f in files {
         let text = std::fs::read_to_string(&f).unwrap();
         for (n, line) in text.lines().enumerate() {
             let code = line.split("//").next().unwrap();
+            if f.ends_with("appearance.rs")
+                && (code.contains("const PURE_BLACK: u32 = 0x000000;")
+                    || code.contains("const PURE_WHITE: u32 = 0xffffff;"))
+            {
+                continue;
+            }
             if f.ends_with("transport_bar.rs") && code.contains("Rgba { r, g, b, a: 0.18 }") {
                 continue;
             }

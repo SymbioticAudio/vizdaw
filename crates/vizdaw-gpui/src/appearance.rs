@@ -58,6 +58,10 @@ pub(crate) fn apply(id: &str, cx: &mut App) {
     cx.refresh_windows();
 }
 
+/// Swift's pure inks (`swatchLegend`, `regionNameInk`).
+const PURE_BLACK: u32 = 0x000000;
+const PURE_WHITE: u32 = 0xffffff;
+
 /// An sRGB colour's WCAG relative luminance (0 black to 1 white).
 fn luminance(rgb: u32) -> f32 {
     let lin = |shift: u32| {
@@ -102,7 +106,7 @@ pub fn legend_on(t: &Theme, fill: u32) -> u32 {
 /// Text on a track swatch: pure black or the white key ink, whichever
 /// has the higher contrast (Swift `Theme.swatchLegend(on:)`).
 fn swatch_legend_on(t: &Theme, fill: u32) -> u32 {
-    let (dark, light) = (0x000000, t.keys.white.rgb);
+    let (dark, light) = (PURE_BLACK, t.keys.white.rgb);
     if contrast(dark, fill) >= contrast(light, fill) {
         dark
     } else {
@@ -119,9 +123,9 @@ pub fn region_name_ink(t: &Theme, fill: u32, alpha: f32, under: u32) -> u32 {
     if contrast(ink, drawn) >= 4.5 {
         return ink;
     }
-    if contrast(0x000000, drawn) >= contrast(0xffffff, drawn) {
-        0x000000
+    if contrast(PURE_BLACK, drawn) >= contrast(PURE_WHITE, drawn) {
+        PURE_BLACK
     } else {
-        0xffffff
+        PURE_WHITE
     }
 }

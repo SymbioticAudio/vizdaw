@@ -2043,7 +2043,8 @@ impl Render for DocumentWindow {
                             &m.snapshot().strips,
                             bars,
                         ),
-                        None => track_headers::lane_bars(d.lanes(), &[], &[], bars),
+                        // No mixer: no strip colours (Swift `laneColour`).
+                        None => vec![None; d.lanes().len()],
                     }
                 })
                 .unwrap_or_default(),

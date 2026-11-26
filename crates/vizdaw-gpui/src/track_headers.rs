@@ -60,6 +60,25 @@ const SELECTED_ALPHA: f32 = 0.22;
 /// height less this.
 const BAR: (f32, f32, f32, f32) = (1., 2., 4., 4.);
 
+/// The monitor button's face and ink, drawn as M/S/R (Swift
+/// `LaneHeaderView.swift:209-211`, `toggle`): lit (input in the warning
+/// colour, auto in the play colour) with the key ink that reads on it;
+/// off, the raised face with the secondary text.
+pub fn monitor_colours(m: MonitorModeRow) -> (u32, u32) {
+    let t = tokens();
+    match m {
+        MonitorModeRow::Off => (colors::button(), colors::dim()),
+        MonitorModeRow::Input => (
+            t.state_warning,
+            crate::appearance::legend_on(crate::appearance::current(), t.state_warning),
+        ),
+        _ => (
+            t.state_play,
+            crate::appearance::legend_on(crate::appearance::current(), t.state_play),
+        ),
+    }
+}
+
 /// Each track's colour bar (Swift `LaneHeaderView.colourBar` over
 /// `StripPalette.lane`): the colour of the strip it plays through, an
 /// external MIDI track's the instrument cap, none for a track that plays
@@ -494,12 +513,8 @@ impl TrackHeaders {
                 .rounded_sm()
                 .text_xs()
                 .cursor_pointer()
-                .bg(if lane.monitor == MonitorModeRow::Off {
-                    rgb(colors::button())
-                } else {
-                    tokens().monitor(lane.monitor)
-                })
-                .text_color(rgb(colors::text()))
+                .bg(rgb(monitor_colours(lane.monitor).0))
+                .text_color(rgb(monitor_colours(lane.monitor).1))
                 .child(LaneInputs::monitor_label(lane.monitor))
                 .child(rs.control_with("button", help, true, Some(help), false))
                 .on_click(cx.listener(move |this, _, _, cx| {
