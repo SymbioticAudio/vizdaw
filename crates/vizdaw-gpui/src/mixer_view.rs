@@ -3240,9 +3240,9 @@ impl MenuRowLook for gpui::Stateful<gpui::Div> {
     fn when_enabled(self, enabled: bool) -> Self {
         if enabled {
             self.cursor_pointer()
-                .hover(|s| s.bg(rgb(crate::transport_bar::colors::BUTTON)))
+                .hover(|s| s.bg(rgb(crate::transport_bar::colors::button())))
         } else {
-            self.text_color(rgb(crate::transport_bar::colors::DISABLED))
+            self.text_color(rgb(crate::transport_bar::colors::disabled()))
         }
     }
 }

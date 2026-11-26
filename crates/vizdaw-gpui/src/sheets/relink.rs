@@ -36,9 +36,6 @@ const WIDTH: f32 = 540.;
 const LIST_MIN_HEIGHT: f32 = 160.;
 /// How tall the list may grow before it scrolls.
 const LIST_MAX_HEIGHT: f32 = 320.;
-/// The warning glyph's colour (the theme's offline text).
-const OFFLINE_TEXT: u32 = 0xd8a040;
-
 /// The Relink sheet of document `doc`.
 pub struct RelinkSheet {
     doc: DocId,
@@ -149,7 +146,7 @@ fn item_row(
         .child(
             div()
                 .flex_none()
-                .text_color(rgb(OFFLINE_TEXT))
+                .text_color(rgb(colors::warning()))
                 .child("\u{26A0}"),
         )
         .child(
@@ -168,7 +165,7 @@ fn item_row(
                     div()
                         .relative()
                         .text_xs()
-                        .text_color(rgb(colors::DIM))
+                        .text_color(rgb(colors::dim()))
                         .child(line.clone())
                         .child(scope.control("text", &line, true)),
                 ),
@@ -195,7 +192,7 @@ impl Sheet for RelinkSheet {
             .child(scope.control("text", TITLE, true));
         let message = div()
             .relative()
-            .text_color(rgb(colors::DIM))
+            .text_color(rgb(colors::dim()))
             .child(MESSAGE)
             .child(scope.control("text", MESSAGE, true));
         let mut list_scope = scope.container();
@@ -219,7 +216,7 @@ impl Sheet for RelinkSheet {
                     .max_h(px(LIST_MAX_HEIGHT))
                     .overflow_y_scroll()
                     .border_1()
-                    .border_color(rgb(colors::BORDER))
+                    .border_color(rgb(colors::border()))
                     .rounded_md()
                     .px_2()
                     .child(div().flex().flex_col().children(items))

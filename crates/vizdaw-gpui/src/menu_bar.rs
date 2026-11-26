@@ -16,9 +16,6 @@ use crate::registry::RegistryScope;
 use crate::shell::DocumentWindow;
 use crate::transport_bar::colors;
 
-const LIST: u32 = 0x2e2e38;
-const BORDER: u32 = 0x4a4a58;
-
 pub struct MenuBar {
     model: MenuModel,
     /// The index of the menu whose list is open.
@@ -81,9 +78,9 @@ impl MenuBar {
             .flex_row()
             .items_center()
             .px_1()
-            .bg(rgb(colors::BAR))
+            .bg(rgb(colors::bar()))
             .border_b_1()
-            .border_color(rgb(BORDER));
+            .border_color(rgb(colors::border()));
         for (index, spec) in self.model.menus.iter().enumerate() {
             bar = bar.child(self.title(index, spec, scope, cx));
         }
@@ -128,7 +125,7 @@ impl MenuBar {
             .py_1()
             .rounded_sm()
             .cursor_pointer()
-            .when(open, |d| d.bg(rgb(colors::BUTTON)))
+            .when(open, |d| d.bg(rgb(colors::button())))
             .child(spec.title.clone())
             .child(scope.control("menu", &spec.title, true))
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -169,14 +166,18 @@ impl MenuBar {
             .flex_col()
             .min_w(px(220.))
             .py_1()
-            .bg(rgb(LIST))
+            .bg(rgb(colors::list()))
             .border_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(colors::border()))
             .rounded_md()
             .shadow_md();
         for (row, item) in items.iter().enumerate() {
             list = list.child(match item {
-                ItemSpec::Separator => div().h(px(1.)).my_1().bg(rgb(BORDER)).into_any_element(),
+                ItemSpec::Separator => div()
+                    .h(px(1.))
+                    .my_1()
+                    .bg(rgb(colors::border()))
+                    .into_any_element(),
                 ItemSpec::Heading(title) => {
                     Self::row(row, title, None, false, None, scope).into_any_element()
                 }
@@ -279,17 +280,17 @@ impl MenuBar {
             .px_3()
             .py_1()
             .text_color(rgb(if enabled {
-                colors::TEXT
+                colors::text()
             } else {
-                colors::DISABLED
+                colors::disabled()
             }))
             .child(format!("{mark}{title}"))
             .child(
                 div()
                     .text_color(rgb(if enabled {
-                        colors::DIM
+                        colors::dim()
                     } else {
-                        colors::DISABLED
+                        colors::disabled()
                     }))
                     .child(keys.unwrap_or_default()),
             )
@@ -301,7 +302,7 @@ impl MenuBar {
                 false,
             ))
             .when(enabled, |d| {
-                d.cursor_pointer().hover(|s| s.bg(rgb(colors::BUTTON)))
+                d.cursor_pointer().hover(|s| s.bg(rgb(colors::button())))
             })
     }
 }

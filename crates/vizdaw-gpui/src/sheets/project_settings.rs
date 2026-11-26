@@ -115,7 +115,7 @@ fn heading(text: &str, scope: &mut RegistryScope) -> AnyElement {
         .relative()
         .pt_1()
         .font_weight(gpui::FontWeight::BOLD)
-        .text_color(rgb(colors::DIM))
+        .text_color(rgb(colors::dim()))
         .child(text.to_owned())
         .child(scope.control("text", text, true))
         .into_any_element()
@@ -132,7 +132,7 @@ fn row(label: &str, control: impl IntoElement) -> gpui::Div {
             div()
                 .w(px(LABEL_WIDTH))
                 .flex_none()
-                .text_color(rgb(colors::TEXT))
+                .text_color(rgb(colors::text()))
                 .child(label.to_owned()),
         )
         .child(control)
@@ -203,7 +203,7 @@ impl Sheet for ProjectSettingsSheet {
                         div()
                             .relative()
                             .text_xs()
-                            .text_color(rgb(colors::DIM))
+                            .text_color(rgb(colors::dim()))
                             .child(note.clone())
                             .child(format_scope.control("text", &note, true)),
                     ),

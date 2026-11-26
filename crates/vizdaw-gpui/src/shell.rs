@@ -1072,9 +1072,9 @@ impl DocumentWindow {
             .gap_3()
             .px_3()
             .py_1()
-            .bg(rgb(colors::BAR))
+            .bg(rgb(colors::bar()))
             .text_xs()
-            .text_color(rgb(colors::DIM))
+            .text_color(rgb(colors::dim()))
             .child(
                 div()
                     .flex_1()
@@ -1084,7 +1084,7 @@ impl DocumentWindow {
                     .child(status),
             )
             .child(
-                transport_bar::button("dismiss-status", "Dismiss", true, colors::BAR, scope)
+                transport_bar::button("dismiss-status", "Dismiss", true, colors::bar(), scope)
                     .h(px(20.))
                     .min_w(px(0.))
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -1835,8 +1835,8 @@ impl DocumentWindow {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(0x1c1c22))
-            .text_color(rgb(colors::TEXT))
+            .bg(rgb(colors::window()))
+            .text_color(rgb(colors::text()))
             .text_sm()
     }
 
@@ -1972,7 +1972,7 @@ impl DocumentWindow {
             .root(cx)
             .children(menu_bar)
             .children(bar)
-            .child(div().h(px(1.)).flex_none().bg(rgb(colors::BORDER)))
+            .child(div().h(px(1.)).flex_none().bg(rgb(colors::border())))
             .child(
                 div()
                     .flex()

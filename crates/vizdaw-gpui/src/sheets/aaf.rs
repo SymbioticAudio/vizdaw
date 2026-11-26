@@ -104,15 +104,15 @@ fn picker(
         .gap_2()
         .rounded_md()
         .border_1()
-        .border_color(rgb(colors::BORDER))
-        .bg(rgb(colors::BUTTON))
+        .border_color(rgb(colors::border()))
+        .bg(rgb(colors::button()))
         .text_color(rgb(if enabled {
-            colors::TEXT
+            colors::text()
         } else {
-            colors::DISABLED
+            colors::disabled()
         }))
         .child(title)
-        .child(div().text_color(rgb(colors::DIM)).child("\u{25BE}"))
+        .child(div().text_color(rgb(colors::dim())).child("\u{25BE}"))
         .child(scope.control_with("menu", label, enabled, Some(title), false))
         .when(enabled, |d| {
             d.cursor_pointer().on_click(move |_, window, cx| {
@@ -130,7 +130,7 @@ fn picker(
                 .px_3()
                 .py_1()
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(colors::BUTTON)))
+                .hover(|s| s.bg(rgb(colors::button())))
                 .child(*t)
                 .child(scope.control_selected("menuitem", t, true, None, i == chosen))
                 .on_click(move |_, window, cx| {
@@ -151,9 +151,9 @@ fn picker(
                             .flex_col()
                             .min_w(px(200.))
                             .py_1()
-                            .bg(rgb(colors::LIST))
+                            .bg(rgb(colors::list()))
                             .border_1()
-                            .border_color(rgb(colors::BORDER))
+                            .border_color(rgb(colors::border()))
                             .rounded_md()
                             .children(rows),
                     ),
@@ -300,7 +300,7 @@ impl Sheet for AafExportSheet {
             .child(
                 text(EXPORT_SUBTITLE, scope)
                     .text_xs()
-                    .text_color(rgb(colors::DIM)),
+                    .text_color(rgb(colors::dim())),
             )
             .child(toggle(
                 ("aaf-embed", 0),
@@ -389,7 +389,7 @@ impl Sheet for AafExportSheet {
             body = body.child(
                 text(&writes_folder(&v.default_name), scope)
                     .text_xs()
-                    .text_color(rgb(colors::DIM)),
+                    .text_color(rgb(colors::dim())),
             );
         }
         body = body.child(text(WHAT_WONT_TRANSFER, scope));
@@ -580,7 +580,7 @@ fn import_into(doc: DocId, new_project: bool, scope: &mut RegistryScope) -> AnyE
             .items_center()
             .gap_2()
             .cursor_pointer()
-            .text_color(rgb(colors::TEXT))
+            .text_color(rgb(colors::text()))
             .child(if on { "\u{25C9}" } else { "\u{25CB}" })
             .child(title.to_owned())
             .child(scope.control_selected("radio", title, true, None, on))
@@ -670,7 +670,7 @@ impl Sheet for AafImportSheet {
                     .min_w_0()
                     .overflow_hidden()
                     .text_xs()
-                    .text_color(rgb(colors::DIM))
+                    .text_color(rgb(colors::dim()))
                     .child(text(&folder_text, scope))
                     .when_some(a.media_folder.clone(), with_help),
             )
@@ -706,7 +706,7 @@ impl Sheet for AafImportSheet {
             .child(
                 text(&describe(a.info(), a.path()), scope)
                     .text_xs()
-                    .text_color(rgb(colors::DIM)),
+                    .text_color(rgb(colors::dim())),
             )
             .child(import_into(doc, a.new_project, scope))
             .child(midi_row)

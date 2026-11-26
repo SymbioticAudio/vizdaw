@@ -542,19 +542,19 @@ pub(crate) fn menu_list(id: &'static str) -> gpui::Stateful<gpui::Div> {
         .flex_col()
         .min_w(px(160.))
         .py_1()
-        .bg(rgb(bar_colors::LIST))
+        .bg(rgb(bar_colors::list()))
         .border_1()
-        .border_color(rgb(bar_colors::BORDER))
+        .border_color(rgb(bar_colors::border()))
         .rounded_md()
         .shadow_md()
-        .text_color(rgb(bar_colors::TEXT))
+        .text_color(rgb(bar_colors::text()))
 }
 
 pub(crate) fn menu_separator() -> AnyElement {
     div()
         .h(px(1.))
         .my_1()
-        .bg(rgb(bar_colors::BORDER))
+        .bg(rgb(bar_colors::border()))
         .into_any_element()
 }
 
@@ -569,7 +569,7 @@ fn menu_item(
         .px_3()
         .py_1()
         .cursor_pointer()
-        .hover(|s| s.bg(rgb(bar_colors::BUTTON)))
+        .hover(|s| s.bg(rgb(bar_colors::button())))
         .child(title.to_owned())
         .child(scope.control("menuitem", title, true))
 }
@@ -598,11 +598,11 @@ pub(crate) fn bar_button(
         .cursor_pointer()
         .text_xs()
         .bg(rgb(if on {
-            bar_colors::ON
+            bar_colors::on()
         } else {
-            bar_colors::BUTTON
+            bar_colors::button()
         }))
-        .text_color(rgb(bar_colors::TEXT))
+        .text_color(rgb(bar_colors::text()))
         .child(text.to_owned())
         .child(scope.control_selected("button", label, true, value, on && value.is_none()))
 }
@@ -677,12 +677,12 @@ pub(crate) fn toolbar(
         "\u{2212}",
         ZOOM_OUT,
         true,
-        bar_colors::BUTTON,
+        bar_colors::button(),
         scope,
     )
     .on_click(cx.listener(|this, _, _, cx| this.zoom_by(ZOOM_STEP, cx)));
     let zoom_in =
-        transport_bar::cluster_button("zoom-in", "+", ZOOM_IN, true, bar_colors::BUTTON, scope)
+        transport_bar::cluster_button("zoom-in", "+", ZOOM_IN, true, bar_colors::button(), scope)
             .on_click(cx.listener(|this, _, _, cx| this.zoom_by(1. / ZOOM_STEP, cx)));
     div()
         .flex()
@@ -693,7 +693,7 @@ pub(crate) fn toolbar(
         .gap(px(4.))
         .px(px(8.))
         .h(px(TOOLBAR_HEIGHT))
-        .bg(rgb(bar_colors::BAR))
+        .bg(rgb(bar_colors::bar()))
         .child(picker)
         .child(toggle)
         .child(division)
@@ -737,7 +737,7 @@ fn division_menu(
                 .px_3()
                 .py_1()
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(bar_colors::BUTTON)))
+                .hover(|s| s.bg(rgb(bar_colors::button())))
                 .child(format!(
                     "{}{}",
                     if current { "\u{2713} " } else { "" },
@@ -762,7 +762,7 @@ fn division_menu(
                 .px_3()
                 .py_1()
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(bar_colors::BUTTON)))
+                .hover(|s| s.bg(rgb(bar_colors::button())))
                 .child(format!("{}{title}", if on { "\u{2713} " } else { "    " }))
                 .child(scope.control_with(
                     "menuitem",

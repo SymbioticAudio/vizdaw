@@ -1123,6 +1123,12 @@ fn placeholder_body(tab: SettingsTab, scope: &mut RegistryScope) -> AnyElement {
         .into_any_element()
 }
 
+/// The Settings window's background: `surface.window`, as Swift's
+/// themed windows (`Theming.swift:26`).
+pub fn background() -> u32 {
+    crate::appearance::current().surface.window.rgb
+}
+
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = tokens();
@@ -1165,7 +1171,7 @@ impl Render for SettingsWindow {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(t.surface_raised))
+            .bg(rgb(background()))
             .text_color(rgb(t.text_primary))
             .text_size(px(13.))
             .child(tabs)

@@ -462,11 +462,11 @@ impl TrackHeaders {
                 .text_xs()
                 .cursor_pointer()
                 .bg(if lane.monitor == MonitorModeRow::Off {
-                    rgb(colors::BUTTON)
+                    rgb(colors::button())
                 } else {
                     tokens().monitor(lane.monitor)
                 })
-                .text_color(rgb(colors::TEXT))
+                .text_color(rgb(colors::text()))
                 .child(LaneInputs::monitor_label(lane.monitor))
                 .child(rs.control_with("button", help, true, Some(help), false))
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -483,7 +483,7 @@ impl TrackHeaders {
             .items_center()
             .cursor_pointer()
             .text_xs()
-            .text_color(rgb(colors::DIM))
+            .text_color(rgb(colors::dim()))
             .child(
                 div()
                     .min_w_0()
@@ -544,7 +544,7 @@ impl TrackHeaders {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_color(rgb(colors::DIM))
+                    .text_color(rgb(colors::dim()))
                     .child(kind_glyph(lane.kind)),
             )
             .child(name)
@@ -621,8 +621,8 @@ impl TrackHeaders {
             .flex_none()
             .px(px(6.))
             .cursor_pointer()
-            .text_color(rgb(colors::DIM))
-            .hover(|s| s.text_color(rgb(colors::TEXT)))
+            .text_color(rgb(colors::dim()))
+            .hover(|s| s.text_color(rgb(colors::text())))
             .child("+ Add Track")
             .child(scope.control("button", "Add Track", true))
             .on_click(cx.listener(|this, _, _, cx| {
@@ -687,8 +687,8 @@ fn toggle(
         .rounded_sm()
         .text_xs()
         .cursor_pointer()
-        .bg(rgb(if on { on_color } else { colors::BUTTON }))
-        .text_color(rgb(colors::TEXT))
+        .bg(rgb(if on { on_color } else { colors::button() }))
+        .text_color(rgb(colors::text()))
         .child(text)
         .on_click(cx.listener(move |this, _, _, cx| {
             // The toggles never change the selection.
@@ -753,7 +753,7 @@ fn add_menu(scope: &mut RegistryScope, cx: &mut Context<DocumentWindow>) -> AnyE
         .border_color(rgb(BORDER))
         .rounded_md()
         .shadow_md()
-        .text_color(rgb(colors::TEXT));
+        .text_color(rgb(colors::text()));
     for (row, (title, id)) in ADD_TRACK_ITEMS.into_iter().enumerate() {
         list = list.child(
             div()
@@ -762,7 +762,7 @@ fn add_menu(scope: &mut RegistryScope, cx: &mut Context<DocumentWindow>) -> AnyE
                 .px_3()
                 .py_1()
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(colors::BUTTON)))
+                .hover(|s| s.bg(rgb(colors::button())))
                 .child(title)
                 .child(scope.control("menuitem", title, true))
                 .on_click(cx.listener(move |this, _, window, cx| {

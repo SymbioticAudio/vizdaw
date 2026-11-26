@@ -455,8 +455,8 @@ fn bar_button(
         .rounded_md()
         .cursor_pointer()
         .text_xs()
-        .bg(rgb(colors::BUTTON))
-        .text_color(rgb(colors::TEXT))
+        .bg(rgb(colors::button()))
+        .text_color(rgb(colors::text()))
         .overflow_hidden()
         .whitespace_nowrap()
         .child(text.to_owned())
@@ -574,7 +574,7 @@ fn bar(
         .gap(px(8.))
         .px(px(8.))
         .py(px(4.))
-        .bg(rgb(colors::BAR))
+        .bg(rgb(colors::bar()))
         .child(
             div()
                 .flex()
@@ -591,7 +591,7 @@ fn bar(
             div()
                 .relative()
                 .text_xs()
-                .text_color(rgb(colors::DIM))
+                .text_color(rgb(colors::dim()))
                 .child(count.clone())
                 .child(scope.control("text", &count, true)),
         )
@@ -692,14 +692,14 @@ pub(crate) fn bar_menu(
     let mut list = crate::arrangement::menu_list(id);
     for (n, e) in entries.into_iter().enumerate() {
         list = match e {
-            Entry::Separator => list.child(div().h(px(1.)).my_1().bg(rgb(colors::BORDER))),
+            Entry::Separator => list.child(div().h(px(1.)).my_1().bg(rgb(colors::border()))),
             Entry::Label(title) => list.child(
                 div()
                     .relative()
                     .px_3()
                     .py_1()
                     .text_xs()
-                    .text_color(rgb(colors::DIM))
+                    .text_color(rgb(colors::dim()))
                     .child(title)
                     .child(scope.control("text", title, true)),
             ),
@@ -723,10 +723,10 @@ pub(crate) fn bar_menu(
                         .py_1()
                         .child(format!("{mark}{title}"))
                         .child(scope.control_selected("menuitem", &title, enabled, value, selected))
-                        .when(!enabled, |d| d.text_color(rgb(colors::DIM)))
+                        .when(!enabled, |d| d.text_color(rgb(colors::dim())))
                         .when(enabled, |d| {
                             d.cursor_pointer()
-                                .hover(|s| s.bg(rgb(colors::BUTTON)))
+                                .hover(|s| s.bg(rgb(colors::button())))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     close(this);
                                     act(this, cx);
@@ -759,9 +759,9 @@ fn table(
         .flex_row()
         .flex_none()
         .h(px(ROW_HEIGHT))
-        .bg(rgb(colors::BAR))
+        .bg(rgb(colors::bar()))
         .text_xs()
-        .text_color(rgb(colors::DIM));
+        .text_color(rgb(colors::dim()));
     for &c in &state.columns {
         header = header.child(
             div()
@@ -829,7 +829,7 @@ fn table(
         .flex_1()
         .min_h_0()
         .text_xs()
-        .text_color(rgb(colors::TEXT))
+        .text_color(rgb(colors::text()))
         .on_action(cx.listener(|this, _: &EditRow, window, cx| this.list_return(window, cx)))
         .on_action(cx.listener(|this, _: &DeleteRows, _, cx| this.list_delete_rows(cx)))
         .on_scroll(cx.listener(|this, e: &ScrollEvent, _, cx| this.list_wheel(e, cx)))
@@ -857,7 +857,7 @@ fn row(
         .h(px(ROW_HEIGHT))
         .w_full()
         .when(index % 2 == 1, |d| d.bg(hsla(0., 0., 1., 0.04)))
-        .when(r.selected, |d| d.bg(rgb(colors::ON)));
+        .when(r.selected, |d| d.bg(rgb(colors::on())));
     for (&column, (text, editable)) in state.columns.iter().zip(&r.cells) {
         let edited = editor
             .editing
@@ -885,7 +885,7 @@ fn row(
                 let id = r.id.clone();
                 cell.px_1()
                     .when(!editable, |c| {
-                        c.when(!r.selected, |c| c.text_color(rgb(colors::DIM)))
+                        c.when(!r.selected, |c| c.text_color(rgb(colors::dim())))
                     })
                     .child(text.clone())
                     .child(scope.control_with(

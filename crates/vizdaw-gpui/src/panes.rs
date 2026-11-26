@@ -642,7 +642,7 @@ pub(crate) fn frame(
         .flex()
         .flex_col()
         .when(!shown, |d| d.invisible())
-        .bg(rgb(colors::READOUT))
+        .bg(rgb(colors::readout()))
         .child(picker)
         .child(crate::detail_pane::divider())
         .child(
@@ -683,8 +683,8 @@ fn picker(
         .rounded_md()
         .cursor_pointer()
         .text_xs()
-        .bg(rgb(colors::BUTTON))
-        .text_color(rgb(colors::TEXT))
+        .bg(rgb(colors::button()))
+        .text_color(rgb(colors::text()))
         .whitespace_nowrap()
         .child(format!("{title} \u{25be}"))
         .child(scope.control_with("button", label, true, Some(title), false))
@@ -706,7 +706,7 @@ fn picker(
         .items_center()
         .px(px(8.))
         .py(px(4.))
-        .bg(rgb(colors::BAR))
+        .bg(rgb(colors::bar()))
         .child(button)
         .child(div().flex_1())
         .into_any_element()
@@ -747,7 +747,7 @@ fn choice_menu(
                 .px_3()
                 .py_1()
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(colors::BUTTON)))
+                .hover(|s| s.bg(rgb(colors::button())))
                 .child(format!(
                     "{}{}",
                     if on { "\u{2713} " } else { "" },
@@ -830,8 +830,8 @@ fn markers(
                 .h(px(22.))
                 .cursor_pointer()
                 .text_xs()
-                .text_color(rgb(colors::TEXT))
-                .hover(|s| s.bg(rgb(colors::BUTTON)))
+                .text_color(rgb(colors::text()))
+                .hover(|s| s.bg(rgb(colors::button())))
                 .child(
                     div()
                         .flex_1()
@@ -844,7 +844,7 @@ fn markers(
                 .child(
                     div()
                         .flex_none()
-                        .text_color(rgb(colors::DIM))
+                        .text_color(rgb(colors::dim()))
                         .child(row.position.clone()),
                 )
                 .child(scope.control_with("button", &row.name, true, Some(&row.position), false))
@@ -868,7 +868,7 @@ pub(crate) fn note_view(text: &str, scope: &mut RegistryScope) -> AnyElement {
             div()
                 .relative()
                 .text_xs()
-                .text_color(rgb(colors::DIM))
+                .text_color(rgb(colors::dim()))
                 .child(text.to_owned())
                 .child(scope.control("text", text, true)),
         )
@@ -887,7 +887,7 @@ pub(crate) fn mixer(content: AnyElement, scope: &RegistryScope) -> AnyElement {
         .min_h_0()
         .size_full()
         .overflow_hidden()
-        .bg(rgb(colors::READOUT))
+        .bg(rgb(colors::readout()))
         .child(content)
         .child(scope.this("group", MIXER, true))
         .into_any_element()
@@ -926,9 +926,9 @@ pub(crate) fn dividers(
         let label = format!("{} Size", side_title(side));
         let value = format!("{} points", state.setup.pane(side).size as i64);
         let color = if dragging.is_some() {
-            colors::ON
+            colors::on()
         } else {
-            colors::BORDER
+            colors::border()
         };
         let mut grip = place(hit)
             .id(("pane-divider", side as usize))

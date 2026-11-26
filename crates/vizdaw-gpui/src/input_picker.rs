@@ -113,7 +113,7 @@ fn list(
                 .px_3()
                 .pt_1()
                 .text_xs()
-                .text_color(rgb(colors::DIM))
+                .text_color(rgb(colors::dim()))
                 .child(title)
                 .child(scope.control("menuitem", title, false))
                 .into_any_element(),
@@ -132,7 +132,7 @@ fn list(
                     .text_xs()
                     .whitespace_nowrap()
                     .cursor_pointer()
-                    .hover(|s| s.bg(rgb(colors::BUTTON)))
+                    .hover(|s| s.bg(rgb(colors::button())))
                     .child(
                         div()
                             .w(px(10.))

@@ -184,15 +184,15 @@ fn picker(
         .gap_2()
         .rounded_md()
         .border_1()
-        .border_color(rgb(colors::BORDER))
-        .bg(rgb(colors::BUTTON))
+        .border_color(rgb(colors::border()))
+        .bg(rgb(colors::button()))
         .text_color(rgb(if enabled {
-            colors::TEXT
+            colors::text()
         } else {
-            colors::DISABLED
+            colors::disabled()
         }))
         .child(chosen)
-        .child(div().text_color(rgb(colors::DIM)).child("\u{25BE}"))
+        .child(div().text_color(rgb(colors::dim())).child("\u{25BE}"))
         .child(scope.control_with("menu", REGION_GAIN, enabled, Some(chosen), false))
         .when(enabled, |d| {
             d.cursor_pointer().on_click(move |_, window, cx| {
@@ -210,7 +210,7 @@ fn picker(
                 .px_3()
                 .py_1()
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(colors::BUTTON)))
+                .hover(|s| s.bg(rgb(colors::button())))
                 .child(*title)
                 .child(scope.control_selected("menuitem", title, true, None, g == gain))
                 .on_click(move |_, window, cx| {
@@ -231,9 +231,9 @@ fn picker(
                             .flex_col()
                             .min_w(px(160.))
                             .py_1()
-                            .bg(rgb(colors::LIST))
+                            .bg(rgb(colors::list()))
                             .border_1()
-                            .border_color(rgb(colors::BORDER))
+                            .border_color(rgb(colors::border()))
                             .rounded_md()
                             .children(rows),
                     ),
@@ -269,7 +269,11 @@ impl Sheet for DawprojectSheet {
             .flex_col()
             .gap_2()
             .child(text(TITLE, scope).font_weight(gpui::FontWeight::BOLD))
-            .child(text(SUBTITLE, scope).text_xs().text_color(rgb(colors::DIM)))
+            .child(
+                text(SUBTITLE, scope)
+                    .text_xs()
+                    .text_color(rgb(colors::dim())),
+            )
             .child(row(
                 REGION_GAIN,
                 picker(doc, v.region_gain, open, &self.open, scope, cx),

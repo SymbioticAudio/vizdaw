@@ -648,7 +648,7 @@ fn bar(
         ));
     }
     let button = |id: &'static str, glyph: &str, label: &str, scope: &mut RegistryScope| {
-        transport_bar::cluster_button(id, glyph, label, true, bar_colors::BUTTON, scope)
+        transport_bar::cluster_button(id, glyph, label, true, bar_colors::button(), scope)
     };
     let shorter = button("roll-shorter", "\u{25be}", SHORTER_ROWS, scope)
         .on_click(cx.listener(|this, _, _, cx| this.set_roll_rows(-ROW_STEP, cx)));
@@ -666,7 +666,7 @@ fn bar(
         .gap(px(8.))
         .px(px(8.))
         .py(px(4.))
-        .bg(rgb(bar_colors::BAR))
+        .bg(rgb(bar_colors::bar()))
         .child(picker)
         .child(keyboard)
         .child(tracks)

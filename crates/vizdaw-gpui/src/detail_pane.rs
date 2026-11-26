@@ -64,7 +64,7 @@ pub(crate) fn render(
 
 /// The 1-point line between two parts.
 pub(crate) fn divider() -> impl IntoElement {
-    div().flex_none().h(px(DIVIDER)).bg(rgb(colors::BORDER))
+    div().flex_none().h(px(DIVIDER)).bg(rgb(colors::border()))
 }
 
 /// The open detail (Swift `DetailPane`): its title and close button, a
@@ -92,7 +92,7 @@ fn detail(
                 .min_w_0()
                 .overflow_hidden()
                 .whitespace_nowrap()
-                .text_color(rgb(colors::TEXT))
+                .text_color(rgb(colors::text()))
                 .child(title.to_owned())
                 .child(scope.control("text", title, true)),
         )
@@ -103,7 +103,7 @@ fn detail(
                 "\u{2715}",
                 CLOSE,
                 true,
-                colors::BAR,
+                colors::bar(),
                 scope,
             )
             .h(px(22.))
@@ -163,7 +163,7 @@ fn empty_state(scope: &mut RegistryScope) -> AnyElement {
         .child(
             div()
                 .relative()
-                .text_color(rgb(colors::TEXT))
+                .text_color(rgb(colors::text()))
                 .child(EMPTY_TITLE)
                 .child(scope.control("text", EMPTY_TITLE, true)),
         )
@@ -171,7 +171,7 @@ fn empty_state(scope: &mut RegistryScope) -> AnyElement {
             div()
                 .relative()
                 .text_xs()
-                .text_color(rgb(colors::DIM))
+                .text_color(rgb(colors::dim()))
                 .child(EMPTY_HELP)
                 .child(scope.control("text", EMPTY_HELP, true)),
         )

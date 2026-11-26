@@ -43,9 +43,6 @@ const WIDTH: f32 = 520.;
 /// maxHeight: 360`).
 const GROUPS_MIN_HEIGHT: f32 = 120.;
 const GROUPS_MAX_HEIGHT: f32 = 360.;
-/// The Conflicts heading's colour (the theme's warning).
-const WARNING_TEXT: u32 = 0xd8a040;
-
 /// Which disclosure rows are open: groups by title, lines by group and
 /// index. Swift's start closed.
 #[derive(Default)]
@@ -112,7 +109,7 @@ fn disclosure(
             div()
                 .flex_none()
                 .w(px(12.))
-                .text_color(rgb(colors::DIM))
+                .text_color(rgb(colors::dim()))
                 .child(if open { "\u{25BE}" } else { "\u{25B8}" }),
         )
         .child(face)
@@ -156,7 +153,7 @@ fn item_row(
     if open {
         let mut places = div().flex().flex_col().pl_4();
         for d in &details {
-            places = places.child(text(d, scope).text_xs().text_color(rgb(colors::DIM)));
+            places = places.child(text(d, scope).text_xs().text_color(rgb(colors::dim())));
         }
         col = col.child(places);
     }
@@ -175,7 +172,7 @@ fn groups_list(r: &ReportRow, state: &Rc<RefCell<Open>>, scope: &mut RegistrySco
         let open = state.borrow().groups.contains(title);
         let face = div()
             .font_weight(gpui::FontWeight::SEMIBOLD)
-            .when(conflicts, |d| d.text_color(rgb(WARNING_TEXT)))
+            .when(conflicts, |d| d.text_color(rgb(colors::warning())))
             .child(if conflicts {
                 format!("\u{26A0} {heading}")
             } else {
@@ -245,7 +242,7 @@ impl Sheet for ReportSheet {
             .child(text(title, scope).font_weight(gpui::FontWeight::BOLD))
             .child(text(&report.summary, scope));
         if report_text::groups(&report).is_empty() {
-            col = col.child(text(EVERYTHING_TRANSFERRED, scope).text_color(rgb(colors::DIM)));
+            col = col.child(text(EVERYTHING_TRANSFERRED, scope).text_color(rgb(colors::dim())));
         } else {
             col = col.child(groups_list(&report, &self.open, scope));
         }

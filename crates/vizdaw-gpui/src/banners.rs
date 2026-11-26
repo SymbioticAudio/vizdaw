@@ -28,10 +28,6 @@ pub const PROGRESS_WIDTH: f32 = 120.;
 /// The problems bar shows at most this many lines (Swift `.lineLimit(3)`).
 pub const PROBLEM_LINES: usize = 3;
 
-const BAR_BACKGROUND: u32 = 0x2a2a33;
-const TRACK: u32 = 0x15151a;
-const FILL: u32 = 0x3f5f8f;
-
 /// One bar: what it shows, whether its button is enabled, its help.
 pub(crate) struct Bar {
     banner: ProjectBanner,
@@ -102,7 +98,7 @@ fn row(
         &title,
         bar.enabled,
         bar.help,
-        colors::BUTTON,
+        colors::button(),
         scope,
     )
     .when(bar.enabled, |d| {
@@ -117,9 +113,9 @@ fn row(
         .gap_2()
         .px_3()
         .py_1()
-        .bg(rgb(BAR_BACKGROUND))
+        .bg(rgb(colors::bar()))
         .border_b_1()
-        .border_color(rgb(colors::BORDER))
+        .border_color(rgb(colors::border()))
         .child(lead)
         .child(label)
         .child(button)
@@ -146,8 +142,14 @@ fn progress_bar(progress: f32, label: &str, scope: &mut RegistryScope) -> gpui::
         .w(px(PROGRESS_WIDTH))
         .h(px(6.))
         .rounded_sm()
-        .bg(rgb(TRACK))
-        .child(div().h_full().w(relative(p)).rounded_sm().bg(rgb(FILL)))
+        .bg(rgb(colors::field()))
+        .child(
+            div()
+                .h_full()
+                .w(relative(p))
+                .rounded_sm()
+                .bg(rgb(colors::accent())),
+        )
         .child(scope.control_with("progress", label, true, Some(&value), false))
         .into_any_element()
 }
@@ -160,7 +162,7 @@ fn glyph(b: &ProjectBanner) -> impl IntoElement {
         ProjectBanner::DiskTooSlow => "\u{23F1}",
         _ => "\u{26A0}",
     };
-    div().flex_none().text_color(rgb(colors::DIM)).child(g)
+    div().flex_none().text_color(rgb(colors::dim())).child(g)
 }
 
 #[cfg(test)]

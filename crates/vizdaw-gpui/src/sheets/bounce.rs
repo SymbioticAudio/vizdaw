@@ -50,11 +50,6 @@ const WIDTH: f32 = 440.;
 const STEMS_HEIGHT: f32 = 120.;
 /// The accessibility label of the sheet's progress bar.
 pub const PROGRESS_LABEL: &str = "Bounce progress";
-/// The warning glyph's colour.
-const WARNING_TEXT: u32 = 0xd8a040;
-/// The error's colour.
-const ERROR_TEXT: u32 = 0xe06060;
-
 /// What the sheet shows of the document, read once per frame.
 struct View {
     choices: BounceChoices,
@@ -221,11 +216,11 @@ fn segments(doc: DocId, source: Source, enabled: bool, scope: &mut RegistryScope
             .px_3()
             .flex()
             .items_center()
-            .bg(rgb(if on { colors::ON } else { colors::BUTTON }))
+            .bg(rgb(if on { colors::on() } else { colors::button() }))
             .text_color(rgb(if enabled {
-                colors::TEXT
+                colors::text()
             } else {
-                colors::DISABLED
+                colors::disabled()
             }))
             .child(title.to_owned())
             .child(scope.control_selected("button", title, enabled, None, on))
@@ -242,7 +237,7 @@ fn segments(doc: DocId, source: Source, enabled: bool, scope: &mut RegistryScope
         .rounded_md()
         .overflow_hidden()
         .border_1()
-        .border_color(rgb(colors::BORDER))
+        .border_color(rgb(colors::border()))
         .child(seg(0, Source::Mix, MIX, scope))
         .child(seg(1, Source::Stems, STEMS, scope))
         .into_any_element()
@@ -321,7 +316,7 @@ impl Sheet for BounceSheet {
                     .h(px(STEMS_HEIGHT))
                     .overflow_y_scroll()
                     .border_1()
-                    .border_color(rgb(colors::BORDER))
+                    .border_color(rgb(colors::border()))
                     .rounded_md()
                     .px_2()
                     .py_1()
@@ -329,12 +324,16 @@ impl Sheet for BounceSheet {
                     .child(clip),
             );
         }
-        body = body.child(text(CAPTION, scope).text_xs().text_color(rgb(colors::DIM)));
+        body = body.child(
+            text(CAPTION, scope)
+                .text_xs()
+                .text_color(rgb(colors::dim())),
+        );
         if c.source == Source::Stems {
             body = body.child(
                 text(STEMS_CAPTION, scope)
                     .text_xs()
-                    .text_color(rgb(colors::DIM)),
+                    .text_color(rgb(colors::dim())),
             );
         }
         body = body.child(toggle(
@@ -383,7 +382,7 @@ impl Sheet for BounceSheet {
                     .child(
                         div()
                             .flex_none()
-                            .text_color(rgb(WARNING_TEXT))
+                            .text_color(rgb(colors::warning()))
                             .child("\u{26A0}"),
                     )
                     .child(text(w, scope).flex_1()),
@@ -391,7 +390,11 @@ impl Sheet for BounceSheet {
         }
         if !v.length.is_empty() {
             let length = format!("Length {}", v.length);
-            body = body.child(text(&length, scope).text_xs().text_color(rgb(colors::DIM)));
+            body = body.child(
+                text(&length, scope)
+                    .text_xs()
+                    .text_color(rgb(colors::dim())),
+            );
         }
         if let Some(e) = &v.error {
             body = body.child(
@@ -399,7 +402,7 @@ impl Sheet for BounceSheet {
                     .flex()
                     .flex_row()
                     .gap_2()
-                    .text_color(rgb(ERROR_TEXT))
+                    .text_color(rgb(colors::error()))
                     .child(div().flex_none().child("\u{2716}"))
                     .child(text(e, scope).flex_1()),
             );

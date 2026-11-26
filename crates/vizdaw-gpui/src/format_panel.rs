@@ -121,11 +121,11 @@ pub(crate) fn popup(
         .gap_2()
         .rounded_md()
         .border_1()
-        .border_color(rgb(colors::BORDER))
-        .bg(rgb(colors::BUTTON))
+        .border_color(rgb(colors::border()))
+        .bg(rgb(colors::button()))
         .cursor_pointer()
         .child(chosen.clone())
-        .child(div().text_color(rgb(colors::DIM)).child("\u{25BE}"))
+        .child(div().text_color(rgb(colors::dim())).child("\u{25BE}"))
         .child(scope.control_with("menu", label, true, Some(&chosen), false))
         .on_click(move |_, window, cx| {
             toggle.update(cx, |s, _| {
@@ -143,7 +143,7 @@ pub(crate) fn popup(
                 .px_3()
                 .py_1()
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(colors::BUTTON)))
+                .hover(|s| s.bg(rgb(colors::button())))
                 .child(title.clone())
                 .child(scope.control_selected("menuitem", title, true, None, *title == chosen))
                 .on_click(move |_, window, cx| {
@@ -169,9 +169,9 @@ pub(crate) fn popup(
                             .flex_col()
                             .min_w(px(110.))
                             .py_1()
-                            .bg(rgb(0x2e2e38))
+                            .bg(rgb(colors::list()))
                             .border_1()
-                            .border_color(rgb(colors::BORDER))
+                            .border_color(rgb(colors::border()))
                             .rounded_md()
                             .children(rows),
                     ),
@@ -200,7 +200,7 @@ impl Sheet for FormatSheet {
             .flex_col()
             .gap_2()
             .child(text(NEW_PROJECT_TITLE, scope).font_weight(gpui::FontWeight::BOLD))
-            .child(text(NEW_PROJECT_MESSAGE, scope).text_color(rgb(colors::DIM)))
+            .child(text(NEW_PROJECT_MESSAGE, scope).text_color(rgb(colors::dim())))
             .child(
                 div()
                     .flex()
