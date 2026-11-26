@@ -25,6 +25,7 @@ pub mod growing_take;
 pub mod interchange;
 pub mod interchange_commands;
 pub mod jobs;
+pub mod key_prefs;
 pub mod lane_inputs;
 pub mod list;
 pub mod marker_list;
