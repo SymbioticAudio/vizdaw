@@ -635,7 +635,7 @@ impl Claims {
         if self.inputs.contains(&key) {
             return true;
         }
-        if self.learning && learnable(bytes) {
+        if self.learning && learnable_message(bytes) {
             return true;
         }
         if self
@@ -663,7 +663,7 @@ impl Claims {
 /// One whole channel message a learn takes: a CC, a pitch bend or a note
 /// on (Ruling 17). Not a note-off: the learner ignores it, and taking it
 /// would hang a note played thru (final review T8 m8).
-fn learnable(bytes: &[u8]) -> bool {
+fn learnable_message(bytes: &[u8]) -> bool {
     match *bytes {
         [s, d1, d2] if d1 < 0x80 && d2 < 0x80 => match s & 0xF0 {
             0x90 => d2 > 0,
@@ -1863,6 +1863,12 @@ pub(crate) fn bindable(id: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Whether Settings › Keys can learn MIDI for command `id`: the Keys tab's
+/// test of a row (`BindingRow.learnable`), for the app's Learn MIDI.
+pub fn learnable(id: &str) -> bool {
+    bindable(id).is_ok()
 }
 
 /// A learned command's checks, on load and in `learn_command` alike (Task

@@ -36,6 +36,10 @@ use vizdaw_ffi::snapshot::{
     TransportState,
 };
 use vizdaw_ffi::step::{StepInputRow, StepKindRow, StepRecordRow, StepResultRow, StepStateRow};
+use vizdaw_ffi::surfaces::{
+    CommandMapRow, LearnMapRow, LearnModeRow, LearnSourceRow, LearnStateRow, SurfaceEventRow,
+    SurfaceKindRow, SurfacePortsRow, SurfaceRow, SurfaceStateRow,
+};
 use vizdaw_ffi::tracks::TrackKindRow;
 use vizdaw_ffi::{
     AafExportRequestRow, AafImportRequestRow, AafInfoRow, BitDepthRow, BounceCheckRow,
@@ -139,6 +143,32 @@ struct State {
     rec: Rec,
     /// Plug-in windows and the Built-in Synth's sounds (host H2).
     windows: Windows,
+    /// Control surfaces and MIDI learn (slice 9d).
+    surfaces: Surfaces,
+}
+
+/// The fake's surface side (slice 9d): scripted events, state and learn
+/// maps, and every call.
+#[derive(Default)]
+struct Surfaces {
+    /// Every `focus_surfaces`, refused or not.
+    focus_calls: usize,
+    /// Every `set_surface_count_in(on)`, refused or not (Swift's
+    /// `surfaceCountIns`).
+    count_ins: Vec<bool>,
+    /// Every `inject_surface(surface, bytes)` taken.
+    injections: Vec<(u32, Vec<u8>)>,
+    /// What `surface_state` answers.
+    state: SurfaceStateRow,
+    /// What the next `take_surface_events` drains.
+    events: Vec<SurfaceEventRow>,
+    /// The project's learn maps.
+    maps: Vec<LearnMapRow>,
+    learn_targets: Vec<AutomationTargetRow>,
+    unlearn_targets: Vec<AutomationTargetRow>,
+    learn_modes: Vec<(LearnSourceRow, LearnModeRow)>,
+    learn_pickups: Vec<(LearnSourceRow, bool)>,
+    removed_learns: Vec<LearnSourceRow>,
 }
 
 /// The fake's plug-in window side (host H2): parameters, editors, saved
@@ -568,6 +598,7 @@ impl FakeSession {
             },
             rec: Rec::default(),
             windows: Windows::default(),
+            surfaces: Surfaces::default(),
         }))
     }
 
@@ -1266,6 +1297,82 @@ impl FakeSession {
     }
 }
 
+/// Control surfaces and MIDI learn (slice 9d): scripted events, state
+/// and maps, and the calls. Errors are scripted by call name
+/// ([`FakeSession::set_call_error`], [`FakeSession::fail_next`]).
+impl FakeSession {
+    /// Events the next `take_surface_events` drains (appended).
+    pub fn push_surface_events(&self, events: Vec<SurfaceEventRow>) {
+        self.st().surfaces.events.extend(events);
+    }
+
+    /// The project's learn maps, as `learn_maps` answers.
+    pub fn set_learn_maps(&self, maps: Vec<LearnMapRow>) {
+        self.st().surfaces.maps = maps;
+    }
+
+    /// What `surface_state` answers from now on.
+    pub fn set_surface_state(&self, row: SurfaceStateRow) {
+        self.st().surfaces.state = row;
+    }
+
+    /// How many times `focus_surfaces` was called, refused or not.
+    pub fn focus_calls(&self) -> usize {
+        self.st().surfaces.focus_calls
+    }
+
+    /// Every `set_surface_count_in(on)`, refused or not.
+    pub fn surface_count_ins(&self) -> Vec<bool> {
+        self.st().surfaces.count_ins.clone()
+    }
+
+    /// Every `inject_surface(surface, bytes)` taken.
+    pub fn surface_injections(&self) -> Vec<(u32, Vec<u8>)> {
+        self.st().surfaces.injections.clone()
+    }
+
+    /// Every `learn_target(target)` taken.
+    pub fn learn_targets(&self) -> Vec<AutomationTargetRow> {
+        self.st().surfaces.learn_targets.clone()
+    }
+
+    /// Every `unlearn_target(target)` taken.
+    pub fn unlearn_targets(&self) -> Vec<AutomationTargetRow> {
+        self.st().surfaces.unlearn_targets.clone()
+    }
+
+    /// Every `set_learn_mode(source, mode)` taken.
+    pub fn learn_modes(&self) -> Vec<(LearnSourceRow, LearnModeRow)> {
+        self.st().surfaces.learn_modes.clone()
+    }
+
+    /// Every `set_learn_pickup(source, on)` taken.
+    pub fn learn_pickups(&self) -> Vec<(LearnSourceRow, bool)> {
+        self.st().surfaces.learn_pickups.clone()
+    }
+
+    /// Every `remove_learn(source)` taken.
+    pub fn removed_learns(&self) -> Vec<LearnSourceRow> {
+        self.st().surfaces.removed_learns.clone()
+    }
+
+    /// A learn-map change: refused as scripted, else `change` runs on the
+    /// state and the document is answered.
+    fn learn_edit(
+        &self,
+        call: &str,
+        change: impl FnOnce(&mut Surfaces),
+    ) -> Result<DocSnapshot, VizError> {
+        {
+            let mut s = self.st();
+            Self::scripted(&mut s, call)?;
+            s.calls.push(call.to_owned());
+            change(&mut s.surfaces);
+        }
+        Ok(self.snap())
+    }
+}
+
 /// Files and jobs (slice 7a): scripted jobs and the file reads.
 impl FakeSession {
     /// The next job started runs `script` (queued: several start in turn;
@@ -1901,6 +2008,75 @@ impl DocSession for FakeSession {
         s.windows.sounds.push((dest, sound));
         Self::command_result(&mut s);
         Ok(())
+    }
+    fn focus_surfaces(&self) -> Result<(), VizError> {
+        let mut s = self.st();
+        s.surfaces.focus_calls += 1;
+        Self::scripted(&mut s, "focus_surfaces")
+    }
+    fn set_surface_count_in(&self, on: bool) -> Result<(), VizError> {
+        let mut s = self.st();
+        s.surfaces.count_ins.push(on);
+        Self::scripted(&mut s, "set_surface_count_in")
+    }
+    fn inject_surface(&self, surface: u32, bytes: Vec<u8>) -> Result<(), VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "inject_surface")?;
+        s.surfaces.injections.push((surface, bytes));
+        Ok(())
+    }
+    fn surface_state(&self) -> Result<SurfaceStateRow, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "surface_state")?;
+        Ok(s.surfaces.state.clone())
+    }
+    fn take_surface_events(&self) -> Result<Vec<SurfaceEventRow>, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "take_surface_events")?;
+        Ok(std::mem::take(&mut s.surfaces.events))
+    }
+    fn learn_target(&self, target: AutomationTargetRow) -> Result<(), VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "learn_target")?;
+        s.surfaces.learn_targets.push(target);
+        Ok(())
+    }
+    fn learn_maps(&self) -> Result<Vec<LearnMapRow>, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "learn_maps")?;
+        Ok(s.surfaces.maps.clone())
+    }
+    fn set_learn_mode(
+        &self,
+        source: LearnSourceRow,
+        mode: LearnModeRow,
+    ) -> Result<DocSnapshot, VizError> {
+        self.learn_edit("set_learn_mode", |f| {
+            for m in f.maps.iter_mut().filter(|m| m.source == source) {
+                m.mode = mode;
+            }
+            f.learn_modes.push((source, mode));
+        })
+    }
+    fn set_learn_pickup(&self, source: LearnSourceRow, on: bool) -> Result<DocSnapshot, VizError> {
+        self.learn_edit("set_learn_pickup", |f| {
+            for m in f.maps.iter_mut().filter(|m| m.source == source) {
+                m.pickup = on;
+            }
+            f.learn_pickups.push((source, on));
+        })
+    }
+    fn remove_learn(&self, source: LearnSourceRow) -> Result<DocSnapshot, VizError> {
+        self.learn_edit("remove_learn", |f| {
+            f.maps.retain(|m| m.source != source);
+            f.removed_learns.push(source);
+        })
+    }
+    fn unlearn_target(&self, target: AutomationTargetRow) -> Result<DocSnapshot, VizError> {
+        self.learn_edit("unlearn_target", |f| {
+            f.maps.retain(|m| m.target != target);
+            f.unlearn_targets.push(target);
+        })
     }
     fn path(&self) -> Result<Option<String>, VizError> {
         Ok(self.st().saved_path.clone())
@@ -3787,6 +3963,50 @@ struct CoreState {
     holds: HashMap<String, VecDeque<Arc<ReadHold>>>,
     /// The thread each source read ran on, by call name, in order.
     read_threads: HashMap<String, Vec<std::thread::ThreadId>>,
+    /// The process-wide surfaces (slice 9d).
+    surfaces: CoreSurfaces,
+}
+
+/// The fake core's surfaces, as Swift's `FakeSurfaceCore`: no CoreMIDI
+/// client, no `surfaces.json`.
+struct CoreSurfaces {
+    rows: Vec<SurfaceRow>,
+    /// What `surface_ports` answers (default `In A` / `Out A`).
+    ports: SurfacePortsRow,
+    /// What `kontrol_ports` answers (default none).
+    kontrol: SurfacePortsRow,
+    state: SurfaceStateRow,
+    maps: Vec<CommandMapRow>,
+    learn: LearnStateRow,
+    /// Every `surface_add` the core took: kind, input, output, position.
+    added: Vec<(SurfaceKindRow, String, String, Option<u8>)>,
+    removed: Vec<u32>,
+    port_reads: usize,
+    learned: Vec<String>,
+    cancels: usize,
+    removed_maps: Vec<String>,
+}
+
+impl Default for CoreSurfaces {
+    fn default() -> Self {
+        CoreSurfaces {
+            rows: vec![],
+            ports: SurfacePortsRow {
+                sources: vec!["In A".into()],
+                destinations: vec!["Out A".into()],
+            },
+            kontrol: SurfacePortsRow::default(),
+            state: SurfaceStateRow::default(),
+            maps: vec![],
+            learn: LearnStateRow::default(),
+            added: vec![],
+            removed: vec![],
+            port_reads: 0,
+            learned: vec![],
+            cancels: 0,
+            removed_maps: vec![],
+        }
+    }
 }
 
 /// A hold on one source read of the fake core ([`FakeCore::hold`]): the
@@ -4068,6 +4288,95 @@ impl FakeCore {
     }
 }
 
+/// The process-wide surfaces and the command learn (slice 9d).
+impl FakeCore {
+    /// What `surface_list` answers from now on.
+    pub fn set_surface_rows(&self, rows: Vec<SurfaceRow>) {
+        self.st().surfaces.rows = rows;
+    }
+
+    /// What `surface_ports` answers from now on.
+    pub fn set_surface_ports(&self, ports: SurfacePortsRow) {
+        self.st().surfaces.ports = ports;
+    }
+
+    /// What `kontrol_ports` answers from now on.
+    pub fn set_kontrol_ports(&self, ports: SurfacePortsRow) {
+        self.st().surfaces.kontrol = ports;
+    }
+
+    /// What `surfaces_state` answers from now on.
+    pub fn set_surfaces_state(&self, row: SurfaceStateRow) {
+        self.st().surfaces.state = row;
+    }
+
+    /// What `command_maps` answers from now on.
+    pub fn set_command_maps(&self, maps: Vec<CommandMapRow>) {
+        self.st().surfaces.maps = maps;
+    }
+
+    /// What `learn_state` answers from now on.
+    pub fn set_learn_state(&self, row: LearnStateRow) {
+        self.st().surfaces.learn = row;
+    }
+
+    /// The next `surface_add` is refused with `e` (queued).
+    pub fn fail_surface_add(&self, e: VizError) {
+        self.fail_next("surface_add", e);
+    }
+
+    /// The next `remove_command_map` is refused with `e` (queued).
+    pub fn fail_remove_command_map(&self, e: VizError) {
+        self.fail_next("remove_command_map", e);
+    }
+
+    /// The next `learn_command` is refused with `e` (queued).
+    pub fn fail_learn_command(&self, e: VizError) {
+        self.fail_next("learn_command", e);
+    }
+
+    /// Holds the next `surface_list` read, the first of a
+    /// [`SurfaceRead`](crate::surface_settings::SurfaceRead), until `hold`
+    /// is released (queued, one read per hold).
+    pub fn hold_surface_reads(&self, hold: Arc<ReadHold>) {
+        self.st()
+            .holds
+            .entry("surface_list".to_owned())
+            .or_default()
+            .push_back(hold);
+    }
+
+    /// Every `surface_add` the core took: kind, input, output, position.
+    pub fn surfaces_added(&self) -> Vec<(SurfaceKindRow, String, String, Option<u8>)> {
+        self.st().surfaces.added.clone()
+    }
+
+    /// Every `surface_remove` the core took.
+    pub fn surfaces_removed(&self) -> Vec<u32> {
+        self.st().surfaces.removed.clone()
+    }
+
+    /// How many times `surface_ports` was read.
+    pub fn port_reads(&self) -> usize {
+        self.st().surfaces.port_reads
+    }
+
+    /// Every `learn_command` the core took.
+    pub fn learned_commands(&self) -> Vec<String> {
+        self.st().surfaces.learned.clone()
+    }
+
+    /// How many times `cancel_learn` was called.
+    pub fn learn_cancels(&self) -> usize {
+        self.st().surfaces.cancels
+    }
+
+    /// Every `remove_command_map` the core took.
+    pub fn removed_command_maps(&self) -> Vec<String> {
+        self.st().surfaces.removed_maps.clone()
+    }
+}
+
 fn as_doc(f: Arc<FakeSession>) -> Arc<dyn DocSession> {
     f
 }
@@ -4247,6 +4556,93 @@ impl CoreCalls for FakeCore {
     }
     fn eq_choices(&self) -> Vec<vizdaw_ffi::bundled::DefaultEqRow> {
         self.source("eq_choices", |s| s.eq_choices.clone())
+    }
+    fn surfaces_load(&self) -> Result<(), VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "surfaces_load")?;
+        s.calls.push("surfaces_load".into());
+        Ok(())
+    }
+    fn surface_list(&self) -> Vec<SurfaceRow> {
+        self.source("surface_list", |s| s.surfaces.rows.clone())
+    }
+    fn surface_ports(&self) -> SurfacePortsRow {
+        self.st().surfaces.port_reads += 1;
+        self.source("surface_ports", |s| s.surfaces.ports.clone())
+    }
+    fn kontrol_ports(&self) -> SurfacePortsRow {
+        self.source("kontrol_ports", |s| s.surfaces.kontrol.clone())
+    }
+    /// The lowest free ID; the row is connected, not answering, at
+    /// position 0 when none is given.
+    fn surface_add(
+        &self,
+        kind: SurfaceKindRow,
+        input: &str,
+        output: &str,
+        position: Option<u8>,
+    ) -> Result<u32, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "surface_add")?;
+        s.calls.push(format!(
+            "surface_add({kind:?},{input},{output},{position:?})"
+        ));
+        let id = (0u32..)
+            .find(|i| !s.surfaces.rows.iter().any(|r| r.id == *i))
+            .unwrap_or_default();
+        let row = SurfaceRow {
+            id,
+            kind,
+            input: input.to_owned(),
+            output: output.to_owned(),
+            position: position.unwrap_or(0),
+            connected: true,
+            online: false,
+            ignored: 0,
+        };
+        let at = s.surfaces.rows.partition_point(|r| r.id < id);
+        s.surfaces.rows.insert(at, row);
+        s.surfaces
+            .added
+            .push((kind, input.to_owned(), output.to_owned(), position));
+        Ok(id)
+    }
+    fn surface_remove(&self, id: u32) -> Result<(), VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "surface_remove")?;
+        s.calls.push(format!("surface_remove({id})"));
+        s.surfaces.rows.retain(|r| r.id != id);
+        s.surfaces.removed.push(id);
+        Ok(())
+    }
+    fn surfaces_state(&self) -> SurfaceStateRow {
+        self.source("surfaces_state", |s| s.surfaces.state.clone())
+    }
+    fn command_maps(&self) -> Vec<CommandMapRow> {
+        self.source("command_maps", |s| s.surfaces.maps.clone())
+    }
+    fn remove_command_map(&self, command: &str) -> Result<(), VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "remove_command_map")?;
+        s.calls.push(format!("remove_command_map({command})"));
+        s.surfaces.maps.retain(|m| m.command != command);
+        s.surfaces.removed_maps.push(command.to_owned());
+        Ok(())
+    }
+    fn learn_command(&self, id: &str) -> Result<(), VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "learn_command")?;
+        s.calls.push(format!("learn_command({id})"));
+        s.surfaces.learned.push(id.to_owned());
+        Ok(())
+    }
+    fn cancel_learn(&self) {
+        let mut s = self.st();
+        s.calls.push("cancel_learn".into());
+        s.surfaces.cancels += 1;
+    }
+    fn learn_state(&self) -> LearnStateRow {
+        self.source("learn_state", |s| s.surfaces.learn.clone())
     }
     fn disable_plugins(&self, plugins: &[PluginRefRow]) -> Result<(), VizError> {
         let mut s = self.st();

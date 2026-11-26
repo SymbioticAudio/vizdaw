@@ -21,6 +21,10 @@ use vizdaw_ffi::session::Session;
 use vizdaw_ffi::snapshot::ParamRow;
 use vizdaw_ffi::snapshot::{DocSnapshot, LaneRow, PluginRefRow, TransportState};
 use vizdaw_ffi::step::{StepInputRow, StepResultRow, StepStateRow};
+use vizdaw_ffi::surfaces::{
+    CommandMapRow, LearnMapRow, LearnModeRow, LearnSourceRow, LearnStateRow, SurfaceEventRow,
+    SurfaceKindRow, SurfacePortsRow, SurfaceRow, SurfaceStateRow,
+};
 use vizdaw_ffi::tracks::TrackKindRow;
 use vizdaw_ffi::{
     AafExportRequestRow, AafImportRequestRow, AafInfoRow, AudioSettingsRow, BounceCheckRow,
@@ -408,6 +412,39 @@ pub trait DocSession: Send + Sync {
     /// Sets Built-in Synth `dest`'s sound, one undo step "Set Built-in
     /// Synth Sound".
     fn set_builtin_sound(&self, dest: u64, sound: BuiltinSound) -> Result<(), VizError>;
+
+    // Control surfaces and MIDI learn (slice 9d).
+
+    /// Makes this session the one the surfaces drive (the app's command
+    /// target; called when the front document changes).
+    fn focus_surfaces(&self) -> Result<(), VizError>;
+    /// The document's record count-in is on: a keyboard lights its
+    /// Count-in button by it.
+    fn set_surface_count_in(&self, on: bool) -> Result<(), VizError>;
+    /// Feeds `bytes` to surface `surface` as if from its input, focuses
+    /// this session and services it at once (`surface.inject`).
+    fn inject_surface(&self, surface: u32, bytes: Vec<u8>) -> Result<(), VizError>;
+    /// `state.get surfaces` for this window, with what feedback sent.
+    fn surface_state(&self) -> Result<SurfaceStateRow, VizError>;
+    /// The surfaces' commands, selects, arms and jogs since the last call,
+    /// oldest first.
+    fn take_surface_events(&self) -> Result<Vec<SurfaceEventRow>, VizError>;
+    /// Learns the next control for `target` into this project.
+    fn learn_target(&self, target: AutomationTargetRow) -> Result<(), VizError>;
+    /// The project's learn maps.
+    fn learn_maps(&self) -> Result<Vec<LearnMapRow>, VizError>;
+    /// Sets the mode of the map from `source` (undo step "MIDI Learn").
+    fn set_learn_mode(
+        &self,
+        source: LearnSourceRow,
+        mode: LearnModeRow,
+    ) -> Result<DocSnapshot, VizError>;
+    /// Turns pick-up of the map from `source` on or off ("MIDI Learn").
+    fn set_learn_pickup(&self, source: LearnSourceRow, on: bool) -> Result<DocSnapshot, VizError>;
+    /// Removes the map from `source` ("Remove MIDI Learn").
+    fn remove_learn(&self, source: LearnSourceRow) -> Result<DocSnapshot, VizError>;
+    /// Removes every map to `target`, as one step.
+    fn unlearn_target(&self, target: AutomationTargetRow) -> Result<DocSnapshot, VizError>;
 }
 
 impl DocSession for Session {
@@ -885,6 +922,43 @@ impl DocSession for Session {
     fn set_builtin_sound(&self, dest: u64, sound: BuiltinSound) -> Result<(), VizError> {
         Session::set_builtin_sound(self, dest, sound)
     }
+    fn focus_surfaces(&self) -> Result<(), VizError> {
+        Session::focus_surfaces(self)
+    }
+    fn set_surface_count_in(&self, on: bool) -> Result<(), VizError> {
+        Session::set_surface_count_in(self, on)
+    }
+    fn inject_surface(&self, surface: u32, bytes: Vec<u8>) -> Result<(), VizError> {
+        Session::inject_surface(self, surface, bytes)
+    }
+    fn surface_state(&self) -> Result<SurfaceStateRow, VizError> {
+        Session::surface_state(self)
+    }
+    fn take_surface_events(&self) -> Result<Vec<SurfaceEventRow>, VizError> {
+        Session::take_surface_events(self)
+    }
+    fn learn_target(&self, target: AutomationTargetRow) -> Result<(), VizError> {
+        Session::learn_target(self, target)
+    }
+    fn learn_maps(&self) -> Result<Vec<LearnMapRow>, VizError> {
+        Session::learn_maps(self)
+    }
+    fn set_learn_mode(
+        &self,
+        source: LearnSourceRow,
+        mode: LearnModeRow,
+    ) -> Result<DocSnapshot, VizError> {
+        Session::set_learn_mode(self, source, mode)
+    }
+    fn set_learn_pickup(&self, source: LearnSourceRow, on: bool) -> Result<DocSnapshot, VizError> {
+        Session::set_learn_pickup(self, source, on)
+    }
+    fn remove_learn(&self, source: LearnSourceRow) -> Result<DocSnapshot, VizError> {
+        Session::remove_learn(self, source)
+    }
+    fn unlearn_target(&self, target: AutomationTargetRow) -> Result<DocSnapshot, VizError> {
+        Session::unlearn_target(self, target)
+    }
 }
 
 /// The core's constructors and free functions the app uses (open, new,
@@ -1019,6 +1093,65 @@ pub trait CoreCalls: Send + Sync {
     /// Turns `plugins` off in the app's plug-in settings (the Plugin
     /// Manager's catalog, saved), the crash question's "Disable <names>".
     /// Without a catalog: refused.
+    /// Reads `surfaces.json` (at launch, on the UI thread, as Swift); a
+    /// damaged file is kept aside and VizDAW starts with no surfaces.
+    fn surfaces_load(&self) -> Result<(), VizError> {
+        vizdaw_ffi::surfaces::surfaces_load()
+    }
+    /// The configured surfaces, by ID.
+    fn surface_list(&self) -> Vec<SurfaceRow> {
+        vizdaw_ffi::surfaces::surface_list()
+    }
+    /// The MIDI ports the surfaces' transport sees (a CoreMIDI listing on
+    /// a live Mac: call it off the UI thread).
+    fn surface_ports(&self) -> SurfacePortsRow {
+        vizdaw_ffi::surfaces::surface_ports()
+    }
+    /// The ports a host-integration keyboard's DAW port answers on.
+    fn kontrol_ports(&self) -> SurfacePortsRow {
+        vizdaw_ffi::surfaces::kontrol_ports()
+    }
+    /// Adds a surface and saves; `position` `None`: the next free one.
+    /// The new surface's ID.
+    fn surface_add(
+        &self,
+        kind: SurfaceKindRow,
+        input: &str,
+        output: &str,
+        position: Option<u8>,
+    ) -> Result<u32, VizError> {
+        vizdaw_ffi::surfaces::surface_add(kind, input.to_owned(), output.to_owned(), position)
+    }
+    /// Removes surface `id` and saves.
+    fn surface_remove(&self, id: u32) -> Result<(), VizError> {
+        vizdaw_ffi::surfaces::surface_remove(id)
+    }
+    /// `state.get surfaces` without a document (no feedback rows).
+    fn surfaces_state(&self) -> SurfaceStateRow {
+        vizdaw_ffi::surfaces::surfaces_state()
+    }
+    /// The learned commands, in the order they were learnt.
+    fn command_maps(&self) -> Vec<CommandMapRow> {
+        vizdaw_ffi::surfaces::command_maps()
+    }
+    /// Removes every MIDI control learned to `command` and saves; `Model`
+    /// when there is none.
+    fn remove_command_map(&self, command: &str) -> Result<(), VizError> {
+        vizdaw_ffi::surfaces::remove_command_map(command.to_owned())
+    }
+    /// Learns the next control for command `id` (needs a focused session;
+    /// only key-bindable IDs).
+    fn learn_command(&self, id: &str) -> Result<(), VizError> {
+        vizdaw_ffi::surfaces::learn_command(id.to_owned())
+    }
+    /// Cancels a waiting learn.
+    fn cancel_learn(&self) {
+        vizdaw_ffi::surfaces::cancel_learn()
+    }
+    /// What a learn waits for and what the last one learnt.
+    fn learn_state(&self) -> LearnStateRow {
+        vizdaw_ffi::surfaces::learn_state()
+    }
     fn disable_plugins(&self, plugins: &[PluginRefRow]) -> Result<(), VizError> {
         let _ = plugins;
         Err(VizError::Model {
