@@ -41,8 +41,8 @@ being ported from it in stages ("slices").
   - AAF.
 - **An agent control channel** (`vizctl`) that drives the app for tests and
   automation.
-- **Settings has begun:** the Settings window, with its Audio, Recording
-  and Automation tabs being built now.
+- **Settings:** the Settings window, with its Audio, Recording and
+  Automation tabs. The other tabs come in later slices.
 
 ## Not yet in the new app
 
@@ -71,7 +71,7 @@ Windows may come later.
 
 ## Building from source
 
-You need Rust 1.86 or newer.
+You need Rust 1.88 or newer.
 
 **macOS** (with the Xcode Command Line Tools), from the project folder:
 

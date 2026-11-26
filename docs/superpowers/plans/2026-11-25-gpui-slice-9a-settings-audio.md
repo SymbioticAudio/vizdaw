@@ -302,3 +302,26 @@
   - The `arms_meters_counts_in_and_draws_the_take` row, whose `audio.set` note goes.
 - **Backlog:** "GPUI slice 9a: review leftovers"; and that Linux live device choice waits for H3.
 - [ ] Commit `docs: slice 9a checks, checklist and backlog`.
+
+## Outcome (2026-11-25)
+
+All seven tasks done (commits on `next` from 80064666 to the Outcome commit). The GPUI app has its Settings window (VizDAW › Settings…, ⌘,/Ctrl-,; Swift's nine tabs, six of them "… comes in a later version."). The Audio, Recording and Automation tabs work as in Swift. Saved audio and automation settings reach the core at launch, every change goes to the core before it is saved, and documents start from the record defaults. `audio.set` works over the control channel, and `gpui_arms_meters_counts_in_and_draws_the_take` runs its `audio.set` steps again. Evidence: vizdaw-app and vizdaw-gpui suites green on the Mac at each task, including `audio_prefs` 19, `automation_prefs` 5 and `settings_window` 24; the e2e green on the Mac; the controller opened the window on screen and checked each built tab's layout. Final whole-branch review: ready to merge, no Critical or Important findings. It found the README's Rust floor wrong (let-chains need 1.88), which is now fixed in README and `Cargo.toml`.
+
+### Rulings
+
+- Pre-flight: commit on `next` directly, as earlier slices did. Cost: none.
+- Task 1 (implementer, accepted): `apply_all` makes Swift's seven core calls (automation is Task 2); `apply_at_launch` stores the refusal; setters clear the problem on success; an unknown default monitor is a no-op (Swift's guard).
+- Task 2 (implementer, accepted, Swift parity): the return time clamps to 2000; an unknown or Write after-write and an unknown thinning are no-ops; a saved "write" or a value over 2000 decodes to that field's default.
+- Task 3 (implementer, accepted, Swift parity): opened documents get the record defaults too; wrong-typed `audio.set` values are ignored, and the call is `invalid_params` only if no known value remains; it saves after each step (Swift saved once at the end), with the same result.
+- Task 4: a menu-local `app.settings` id with no registry id (Swift's item was the system's own); the Settings window is kept outside `windows` and is not in `state.get windows`. Cost if wrong: the channel cannot see or click the window, so a later slice adds it.
+- Task 5 (implementer, accepted): reads run on a plain thread, and a 20 ms timer takes the answer while a read is out. GPUI's test scheduler would block on a held fake read on the background executor. Also added: `DocumentStore::refresh_input_monitoring`/`sessions` and `controls/stepper.rs`.
+- Task 6 (implementer, accepted): `cache_text` shows "N GB" only for multiples of 1024. Swift's `mb / 1024` showed 1536 MB as "1 GB".
+
+### Carried
+
+- The Linux cells (Settings tabs, `audio.set`, the arms-meters e2e) are ticked once Linux CI passes on this slice.
+- On screen, still open in `controller-checks.md`: the red problem line while recording (check that it is not clipped), the round trip once an input opens, and the steppers at their ends.
+
+### Deferred minors
+
+Everything else is in the backlog row "GPUI slice 9a: review leftovers".
