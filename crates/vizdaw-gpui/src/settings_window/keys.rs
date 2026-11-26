@@ -105,7 +105,7 @@ fn edit(cx: &mut App, f: impl FnOnce(&mut KeyBindings, &mut Prefs)) {
 }
 
 /// A push button: `button` in the tree; off, it takes no clicks.
-fn button(
+pub(super) fn button(
     label: &str,
     enabled: bool,
     scope: &mut RegistryScope,

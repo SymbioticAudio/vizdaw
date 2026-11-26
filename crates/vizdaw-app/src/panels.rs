@@ -39,6 +39,8 @@ pub enum FileType {
     Audio,
     /// Plain text (`UTType.plainText`).
     PlainText,
+    /// An application (`UTType.application`; macOS only).
+    Application,
     /// The type of the extension the caller gives (Swift
     /// `UTType(filenameExtension: ext)`: Bounce and MIDI exports).
     GivenExtension,
@@ -56,7 +58,7 @@ impl FileType {
                 "wav", "wave", "aif", "aiff", "aifc", "caf", "mp3", "m4a", "aac", "flac",
             ],
             FileType::PlainText => &["txt"],
-            FileType::Folder | FileType::GivenExtension => &[],
+            FileType::Folder | FileType::GivenExtension | FileType::Application => &[],
         }
     }
 
@@ -71,6 +73,7 @@ impl FileType {
             FileType::Aaf => &["org.vizdaw.aaf"],
             FileType::Audio => &["public.audio"],
             FileType::PlainText => &["public.plain-text"],
+            FileType::Application => &["com.apple.application"],
             FileType::GivenExtension => &[],
         }
     }
@@ -86,6 +89,7 @@ impl FileType {
             FileType::Aaf => "AAF file",
             FileType::Audio => "audio file",
             FileType::PlainText => "text file",
+            FileType::Application => "application",
             FileType::GivenExtension => "file",
         }
     }

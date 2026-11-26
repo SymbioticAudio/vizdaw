@@ -92,6 +92,7 @@ pub struct AppState {
     pub appearance: vizdaw_app::appearance_prefs::AppearancePrefs,
     /// Settings › Automation.
     pub automation: vizdaw_app::automation_prefs::AutomationPrefs,
+    pub editing: vizdaw_app::editing_prefs::EditingPrefs,
     /// The keyboard layout id the windows use instead of the platform's
     /// (tests; `None`: `cx.keyboard_layout().id()`).
     pub keyboard_layout_override: Option<String>,
@@ -131,6 +132,7 @@ impl AppState {
             audio: Default::default(),
             appearance: Default::default(),
             automation: Default::default(),
+            editing: Default::default(),
             keyboard_layout_override: None,
             transports: HashMap::new(),
             windows: Vec::new(),
@@ -209,6 +211,7 @@ impl AppState {
         self.audio.apply_at_launch(core.as_ref());
         self.automation = vizdaw_app::automation_prefs::AutomationPrefs::load(&prefs);
         self.automation.apply_at_launch(core.as_ref());
+        self.editing = vizdaw_app::editing_prefs::EditingPrefs::load(&prefs);
         self.store.set_record_defaults(self.audio.record_defaults());
         self.appearance = vizdaw_app::appearance_prefs::AppearancePrefs::load(&prefs);
         crate::appearance::set_current(&self.appearance.theme);

@@ -5,6 +5,7 @@
 //! Space in it does not play. A tab whose slice has not come shows
 //! "`<Tab>` comes in a later version.".
 
+mod editing;
 mod keys;
 
 use std::rc::Rc;
@@ -53,6 +54,8 @@ pub const AUTOMATION_HEIGHT: f32 = 300.;
 pub const APPEARANCE_HEIGHT: f32 = 300.;
 /// The Keys tab's content width and height (Swift's frame, 720×520).
 pub use keys::{KEYS_HEIGHT, KEYS_WIDTH};
+/// The Editing tab's content height: three sections, eleven rows.
+pub const EDITING_HEIGHT: f32 = 600.;
 /// The tab strip's room: two rows, for where the labels wrap (the body
 /// takes what one row leaves over).
 const STRIP_HEIGHT: f32 = 72.;
@@ -108,6 +111,7 @@ impl SettingsTab {
     pub fn width(self) -> f32 {
         match self {
             SettingsTab::Keys => KEYS_WIDTH,
+            SettingsTab::Editing => editing::EDITING_WIDTH,
             _ => WIDTH,
         }
     }
@@ -121,6 +125,7 @@ impl SettingsTab {
             SettingsTab::Recording => RECORDING_HEIGHT,
             SettingsTab::Automation => AUTOMATION_HEIGHT,
             SettingsTab::Keys => KEYS_HEIGHT,
+            SettingsTab::Editing => EDITING_HEIGHT,
             _ => DEFAULT_HEIGHT,
         }
     }
@@ -142,6 +147,11 @@ enum AudioMenu {
     Monitor,
     AfterWrite,
     Thinning,
+    TimeStep,
+    NoteValue,
+    PitchStep,
+    Root,
+    Scale,
 }
 
 /// What choosing an entry does.
@@ -461,10 +471,6 @@ impl SettingsWindow {
         body.into_any_element()
     }
 
-    fn editing_tab(&mut self, scope: &mut RegistryScope) -> AnyElement {
-        placeholder_body(SettingsTab::Editing, scope)
-    }
-
     fn audio_tab(
         &mut self,
         scope: &mut RegistryScope,
@@ -718,9 +724,25 @@ impl SettingsWindow {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.picker_enabled(name, face, which, items, true, scope, window, cx)
+    }
+
+    /// A picker that may be off: it takes no clicks and shows no list.
+    #[allow(clippy::too_many_arguments)]
+    fn picker_enabled(
+        &mut self,
+        name: &'static str,
+        face: &str,
+        which: AudioMenu,
+        items: Vec<Choice>,
+        enabled: bool,
+        scope: &mut RegistryScope,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let me = cx.entity().downgrade();
         let toggler = me.clone();
-        let face_el = controls::menu_face(name, face, None, true, scope, move |_, cx| {
+        let face_el = controls::menu_face(name, face, None, enabled, scope, move |_, cx| {
             toggler.update(cx, |t, cx| t.toggle_menu(which, cx)).ok();
         });
         let mut holder = div()
@@ -728,7 +750,7 @@ impl SettingsWindow {
             .w(px(240.))
             .h(px(controls::menu_face::HEIGHT as f32))
             .child(face_el);
-        if self.menu == Some(which) {
+        if enabled && self.menu == Some(which) {
             let k = tokens();
             let size = window.viewport_size();
             let closing = me.clone();
@@ -1101,7 +1123,7 @@ impl SettingsWindow {
     ) -> AnyElement {
         match self.tab {
             SettingsTab::Appearance => self.appearance_tab(scope, cx),
-            SettingsTab::Editing => self.editing_tab(scope),
+            SettingsTab::Editing => self.editing_tab(scope, window, cx),
             SettingsTab::Keys => self.keys_tab(scope, cx),
             SettingsTab::Audio => self.audio_tab(scope, window, cx),
             SettingsTab::Recording => self.recording_tab(scope, window, cx),
