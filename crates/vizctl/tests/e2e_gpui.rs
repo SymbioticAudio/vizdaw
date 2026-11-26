@@ -27,6 +27,20 @@ struct App {
     client: Client,
 }
 
+/// Whether `app` (a `.app`, or a binary in `X.app/Contents/MacOS/`) bundles
+/// Multi-Q in `Contents/PlugIns`.
+fn multiq_in_app(app: &std::path::Path) -> bool {
+    let contents = if app.extension().is_some_and(|e| e == "app") {
+        app.join("Contents")
+    } else {
+        match app.parent().and_then(|p| p.parent()) {
+            Some(c) if c.file_name().is_some_and(|n| n == "Contents") => c.to_path_buf(),
+            _ => return false,
+        }
+    };
+    contents.join("PlugIns/Multi-Q.component").exists()
+}
+
 fn app_path() -> PathBuf {
     let app =
         std::env::var("VIZDAW_E2E_APP").expect("set VIZDAW_E2E_APP to the GPUI .app or its binary");
@@ -2024,22 +2038,27 @@ fn gpui_new_bus_and_sends_over_the_channel() {
 /// Ported from `multiq_install_and_switch_over_the_channel`: the switch
 /// answers both ways, Multi-Q installs into the throwaway home's Components
 /// folder, a second install asks to Replace and `replace` answers it. Needs
-/// `target/multiq/out` (macOS, `scripts/build-multiq.sh`), named to the app
-/// by `VIZDAW_BUNDLED_PLUGINS`; without it the install is `unavailable`.
+/// Multi-Q in the app (`scripts/make-gpui-app.sh`) or `target/multiq/out` (macOS,
+/// `scripts/build-multiq.sh`), named to the app by `VIZDAW_BUNDLED_PLUGINS`;
+/// without either the install is `unavailable`.
 #[test]
 #[ignore = "needs a window server and VIZDAW_E2E_APP"]
 fn gpui_multiq_install_and_switch_over_the_channel() {
     use core_control::ErrorCode;
     let home = temp_home();
     let bundled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/multiq/out");
-    let have = cfg!(target_os = "macos")
+    // Available when the app under test carries Multi-Q itself (a .app from
+    // scripts/make-gpui-app.sh, or a binary inside one), else through the
+    // built bundles on macOS, else not at all.
+    let in_app = multiq_in_app(&app_path());
+    let env_route = cfg!(target_os = "macos")
         && bundled.join("Multi-Q.component").is_dir()
         && bundled.join("Multi-Q.clap").is_dir();
-    if !have {
+    if !in_app && !env_route {
         // No Multi-Q to install (Linux, or scripts/build-multiq.sh has not
         // run): the build says so.
         eprintln!(
-            "no Multi-Q at {} (macOS only, built by scripts/build-multiq.sh): checking that the install is unavailable",
+            "no Multi-Q in the app or at {} (macOS only, built by scripts/build-multiq.sh): checking that the install is unavailable",
             bundled.display()
         );
         let mut app = App::start(home.path(), false);
@@ -2055,12 +2074,16 @@ fn gpui_multiq_install_and_switch_over_the_channel() {
         app.quit();
         return;
     }
-    let bundled = bundled.canonicalize().unwrap();
-    let mut app = App::start_with(
-        home.path(),
-        false,
-        &[("VIZDAW_BUNDLED_PLUGINS", bundled.to_str().unwrap())],
-    );
+    let mut app = if in_app {
+        App::start(home.path(), false)
+    } else {
+        let bundled = bundled.canonicalize().unwrap();
+        App::start_with(
+            home.path(),
+            false,
+            &[("VIZDAW_BUNDLED_PLUGINS", bundled.to_str().unwrap())],
+        )
+    };
 
     // The switch answers its status both ways.
     for (on, status) in [(false, "new-channel EQ off"), (true, "new-channel EQ on")] {
