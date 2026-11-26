@@ -4897,9 +4897,7 @@ fn gpui_themes_and_the_strip_over_the_channel() {
     wait_for_state(&mut app, &window, "mixer", |m| {
         (strip_named(m, &synth)["gain_db"].as_f64().unwrap() + 4.2).abs() < 1e-6
     });
-    let undo =
-        app.call("state.get", json!({"target": "document", "window": window}))["undo"].clone();
-    assert!(undo.as_str().is_some_and(|u| !u.is_empty()), "{undo}");
+    wait_for_undo(&mut app, &window, "Set Fader");
     let version = |app: &mut App| {
         app.call("state.get", json!({"target": "document", "window": window}))["version"].clone()
     };
