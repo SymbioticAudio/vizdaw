@@ -41,15 +41,19 @@ being ported from it in stages ("slices").
   - AAF.
 - **An agent control channel** (`vizctl`) that drives the app for tests and
   automation.
-- **Settings:** the Settings window, with its Audio, Recording and
-  Automation tabs. The other tabs come in later slices.
+- **Settings:** the Settings window, with its Appearance (six themes:
+  Classic Light, Studio Dark, Flat, Console, Symbiotic and EG13), Editing,
+  Keys, Audio, Recording, Automation and Plug-ins tabs. Surfaces and
+  Co-Producer come in later slices.
+- **Customize Transport Bar** (View menu): drag items onto, along and off the
+  bar, size them, and add command buttons.
 
 ## Not yet in the new app
 
 These worked in the retired Swift app and are still to be ported:
 
-- Themes and the rest of Settings. Six themes are planned: Classic Light,
-  Studio Dark, Flat, Console, Symbiotic and EG13.
+- Settings › Surfaces and Co-Producer, user themes, and Learn MIDI in
+  Settings › Keys.
 - Adding, moving and bypassing inserts, and the Plugin Manager.
 - The Strip Chart, drum grid and audio editors, and editors in windows of
   their own.

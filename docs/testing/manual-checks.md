@@ -17,8 +17,8 @@ Status: **open**, **pass**, **fail** (with the bug's number).
 - **Linux:** in `~/vizdaw-next` on the test box, `git pull`, then
   `cargo run -p vizdaw-gpui --release`.
 
-Not in the app yet, so not on this list: the rest of Settings (user themes, Keys,
-the Customize Transport Bar sheet), Co-Producer, the Strip Chart, Drum
+Not in the app yet, so not on this list: Settings › Surfaces and Co-Producer,
+user themes, Learn MIDI, the Strip Chart, Drum
 Grid and Audio editors, torn-off editor windows, the Plugin Manager and
 Media Pool. Their checks come with their slices.
 
@@ -46,6 +46,8 @@ Media Pool. Their checks come with their slices.
 | M18 | Export For Another DAW and Export DAWproject, then open the results in another DAW | The tracks, stems and positions arrive as "What won't transfer" said | open |
 | M19 | Settings › Audio with your interface plugged in, then unplugged | Its name is in the Input device list; after unplugging, "<name> (not connected)" stays chosen | open |
 | M20 | Change I/O Buffer Size while playing | The new size is heard without a glitch or a stop | open |
+| M21 | Settings › Keys: record ⌘W for Go to Locator 2, then ⌘Q for another command | Each key is recorded on its row (no window closes, the app does not quit); the menus show the new keys; Reset All puts them back | open |
+| M22 | Settings › Plug-ins › Install Multi-Q for other apps, then install again | It lands in ~/Library/Audio/Plug-Ins/Components and another app sees it; the second time asks to replace | open |
 
 ## Linux (your desktop)
 
@@ -78,3 +80,5 @@ Media Pool. Their checks come with their slices.
 | L25 | (After host track H3) a real audio interface and MIDI keyboard | As M8–M16 | waits for H3 |
 | L26 | VizDAW › Settings… (Ctrl-,) in the in-window menu bar | The Settings window opens; the Audio, Recording and Automation tabs draw with the system font, nothing clipped | open |
 | L27 | Settings › Appearance: try each of the six themes, then turn colour bars off | Every window changes at once; text stays readable with the system font; the colour bars go | open |
+| L28 | Settings › Keys: record a new key for a command, then Save… and Load… a keys file | The in-window menu shows the new key and it runs the command; the save and open panels appear; a loaded file's keys take effect | open |
+| L29 | View › Customize Transport Bar…: drag an item onto the bar, one along it, one off, then Done | The bar changes as dragged; Cancel instead leaves it as it was | open |
