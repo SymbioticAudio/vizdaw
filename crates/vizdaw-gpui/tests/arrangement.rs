@@ -1098,7 +1098,7 @@ fn g_toggles_snap_and_the_menu_shows_it(cx: &mut TestAppContext) {
     let snap_item = |s: &mut Setup| {
         let doc = s.doc();
         let m = s.app.read_with(&s.cx, |a, _| {
-            menus::menu_model(a.store.document(doc), &a.keymap)
+            menus::menu_model(a.store.document(doc), a.keys.keymap())
         });
         let editors = m
             .menus

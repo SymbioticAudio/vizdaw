@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use core_control::bindings::Keymap;
 use gpui::{AnyWindowHandle, App, AppContext, Entity, Global, WindowHandle};
 use vizdaw_app::alerts::AlertItem;
 use vizdaw_app::transport::{PollResult, TransportModel, TransportReadout};
@@ -80,8 +79,8 @@ impl WindowEntry {
 
 pub struct AppState {
     pub store: DocumentStore,
-    /// The keys of every command (the registry's defaults for now).
-    pub keymap: Keymap,
+    /// The keys of every command, kept in the preferences.
+    pub keys: vizdaw_app::key_prefs::KeyBindings,
     /// The app's preferences: every document window draws its transport
     /// bar from them, so a change redraws them all. In memory until
     /// [`crate::run`] opens the launch home's.
@@ -127,7 +126,7 @@ impl AppState {
         crate::appearance::set_colour_bars(true);
         AppState {
             store,
-            keymap: Keymap::default(),
+            keys: vizdaw_app::key_prefs::KeyBindings::load(&Prefs::in_memory()),
             prefs: Prefs::in_memory(),
             audio: Default::default(),
             appearance: Default::default(),
@@ -214,6 +213,7 @@ impl AppState {
         self.appearance = vizdaw_app::appearance_prefs::AppearancePrefs::load(&prefs);
         crate::appearance::set_current(&self.appearance.theme);
         crate::appearance::set_colour_bars(self.appearance.colour_bars);
+        self.keys = vizdaw_app::key_prefs::KeyBindings::load(&prefs);
         self.prefs = prefs;
     }
 

@@ -1133,6 +1133,24 @@ pub fn blocked_model(model: &MenuModel) -> MenuModel {
     }
 }
 
+/// Binds the app's keys again from its bindings and shows the front
+/// document's menus with them (after a load, a reset or a change on the
+/// Keys page). The windows' own menu bars follow on their next draw.
+pub fn rebind(cx: &mut App) {
+    let app = crate::AppState::global(cx);
+    let (keymap, model) = {
+        let s = app.read(cx);
+        let keymap = s.keys.keymap().clone();
+        let front = s.store.front().and_then(|d| s.store.document(d));
+        let model = menu_model(front, &keymap);
+        (keymap, model)
+    };
+    cx.clear_key_bindings();
+    cx.bind_keys(bindings(&keymap));
+    show(model, cx);
+    cx.refresh_windows();
+}
+
 /// Binds the keys and sets the menus (no document yet).
 pub fn install(keymap: &Keymap, cx: &mut App) {
     cx.bind_keys(bindings(keymap));

@@ -3868,11 +3868,12 @@ fn gpui_arpeggiates_an_injected_chord_while_recording() {
 }
 
 /// Ported from `keys_drive_step_entry_locators_and_bindings` (README
-/// steps 99–104), the step entry and locator half (the bindings file
-/// waits for Keys settings; G is `gpui_g_toggles_snap`): T on, 4 an
+/// steps 99–104), the step entry and locator half (G is
+/// `gpui_g_toggles_snap`): T on, 4 an
 /// eighth, a typed chord, 0 a rest, Delete takes steps back; P gives the
 /// Position field the keyboard and a typed bar moves there, ⌥2 sets a
-/// locator there, Return goes to the start and 2 jumps to the locator.
+/// locator there, Return goes to the start and 2 jumps to the locator; a
+/// bindings file moves Go to Locator 2 to X, and Reset puts it back.
 #[test]
 #[ignore = "needs a window server and VIZDAW_E2E_APP"]
 fn gpui_keys_drive_step_entry_and_locators() {
@@ -3950,6 +3951,33 @@ fn gpui_keys_drive_step_entry_and_locators() {
     wait_for_editor(&mut app, &window, "locator 2", |e| {
         e["transport"]["locators"][2] == 8 * Q
     });
+    key(&mut app, "return", json!([]));
+    wait_for_tick(&mut app, &window, 0);
+    key(&mut app, "2", json!([]));
+    wait_for_tick(&mut app, &window, 8 * Q);
+
+    // A bindings file moves Go to Locator 2 to X.
+    let keys = app.launched.home.join("mine.vizkeys");
+    std::fs::write(
+        &keys,
+        r#"{"vizdaw_keys": 1, "bindings": {"locator.go_2": ["X"]}}"#,
+    )
+    .unwrap();
+    app.call(
+        "command.run",
+        json!({"id": "keys.load", "params": {"path": keys}}),
+    );
+    key(&mut app, "return", json!([]));
+    wait_for_tick(&mut app, &window, 0);
+    key(&mut app, "2", json!([]));
+    let t = app.call(
+        "state.get",
+        json!({"target": "transport", "window": window}),
+    );
+    assert_eq!(t["tick"], 0, "2 no longer goes to the locator");
+    key(&mut app, "x", json!([]));
+    wait_for_tick(&mut app, &window, 8 * Q);
+    app.call("command.run", json!({"id": "keys.reset"}));
     key(&mut app, "return", json!([]));
     wait_for_tick(&mut app, &window, 0);
     key(&mut app, "2", json!([]));

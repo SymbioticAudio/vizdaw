@@ -1806,7 +1806,7 @@ impl DocumentWindow {
             .document(self.doc)
             .is_some_and(DocumentModel::step_entry_on);
         let us = menus::us_layout(&s.keyboard_layout_id(cx));
-        menus::window_context(step, s.prefs.reserve_number_row(), us)
+        menus::window_context(step, s.keys.reserve_number_row(&s.prefs), us)
     }
 
     /// The window's root: its key context, focus, key handlers and
@@ -1911,7 +1911,7 @@ impl DocumentWindow {
             (
                 d.map(crate::app_state::mixer_title).unwrap_or_default(),
                 d.and_then(|d| bar_state(s, doc, d, false)),
-                menus::menu_model(d, &s.keymap),
+                menus::menu_model(d, s.keys.keymap()),
                 s.store.front().is_none_or(|f| f == doc),
                 s.transport_layout(),
             )
@@ -2030,7 +2030,7 @@ impl Render for DocumentWindow {
                 s.title(doc).unwrap_or_default(),
                 s.is_dirty(doc),
                 d.and_then(|d| bar_state(s, doc, d, true)),
-                menus::menu_model(s.store.document(doc), &s.keymap),
+                menus::menu_model(s.store.document(doc), s.keys.keymap()),
                 s.store.front().is_none_or(|f| f == doc),
                 d.map(|d| d.lanes().to_vec()).unwrap_or_default(),
                 d.map(HeaderInput::all).unwrap_or_default(),

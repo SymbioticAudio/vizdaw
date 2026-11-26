@@ -429,14 +429,12 @@ fn a_job_busy_until_the_deadline_answers_the_expiry_once(cx: &mut TestAppContext
 
 #[gpui::test]
 fn a_key_run_file_command_starts_no_job(cx: &mut TestAppContext) {
-    use core_control::bindings::Chord;
     let s = setup(cx);
     // F6 bound to Convert Media (a user's own binding).
     cx.update(|cx| {
         AppState::global(cx).update(cx, |a, _| {
-            a.keymap
-                .bind("media.convert", &[Chord::new(97, 0).unwrap()], true)
-                .unwrap();
+            a.keys.record("media.convert", "F6", &mut a.prefs);
+            assert!(a.keys.pending().is_none(), "{:?}", a.keys.message());
         });
     });
     s.fake.script_job(JobScript::done().steps(&[0.5]));
