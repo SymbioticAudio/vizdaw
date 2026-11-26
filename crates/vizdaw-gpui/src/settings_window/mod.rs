@@ -7,6 +7,7 @@
 
 mod editing;
 mod keys;
+mod plugins;
 
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -153,6 +154,7 @@ enum AudioMenu {
     PitchStep,
     Root,
     Scale,
+    Eq,
 }
 
 /// What choosing an entry does.
@@ -234,6 +236,11 @@ pub struct SettingsWindow {
     /// window loses the keyboard.
     capture: Option<gpui::Subscription>,
     activation: Option<gpui::Subscription>,
+    /// The Plug-ins tab: the newest read of the installed effects, whether
+    /// one has landed, and whether an install is running.
+    eq_gen: u64,
+    eqs_read: bool,
+    installing: bool,
 }
 
 impl SettingsWindow {
@@ -263,6 +270,9 @@ impl SettingsWindow {
             recording: None,
             capture: None,
             activation: None,
+            eq_gen: 0,
+            eqs_read: false,
+            installing: false,
         };
         this.watch_keys(window, cx);
         this.shown(cx);
@@ -293,6 +303,9 @@ impl SettingsWindow {
     fn shown(&mut self, cx: &mut Context<Self>) {
         self.poll = None;
         self.round_gen += 1;
+        if self.tab == SettingsTab::Plugins {
+            self.read_eqs(cx);
+        }
         if self.tab != SettingsTab::Audio {
             return;
         }
@@ -1108,10 +1121,6 @@ impl SettingsWindow {
         placeholder_body(SettingsTab::Surfaces, scope)
     }
 
-    fn plugins_tab(&mut self, scope: &mut RegistryScope) -> AnyElement {
-        placeholder_body(SettingsTab::Plugins, scope)
-    }
-
     fn co_producer_tab(&mut self, scope: &mut RegistryScope) -> AnyElement {
         placeholder_body(SettingsTab::CoProducer, scope)
     }
@@ -1130,7 +1139,7 @@ impl SettingsWindow {
             SettingsTab::Recording => self.recording_tab(scope, window, cx),
             SettingsTab::Automation => self.automation_tab(scope, window, cx),
             SettingsTab::Surfaces => self.surfaces_tab(scope),
-            SettingsTab::Plugins => self.plugins_tab(scope),
+            SettingsTab::Plugins => self.plugins_tab(scope, window, cx),
             SettingsTab::CoProducer => self.co_producer_tab(scope),
         }
     }

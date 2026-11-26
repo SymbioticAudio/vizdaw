@@ -445,6 +445,11 @@ pub fn handle(command: &Command, cx: &mut App) -> Handled {
                 Err(e) => Handled::Reply(Err(e)),
             }
         }
+        Command::CommandRun { id, args, .. }
+            if vizdaw_app::plugin_prefs::PLUGIN_COMMANDS.contains(&id.as_str()) =>
+        {
+            files::run_plugins(id, args, cx)
+        }
         other => Handled::Reply(answer(other, cx)),
     }
 }

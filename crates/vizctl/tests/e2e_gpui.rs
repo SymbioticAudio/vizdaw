@@ -1857,15 +1857,24 @@ fn gpui_groups_and_vcas_over_the_channel() {
 /// that takes the bus and its send together (undo and redo), a bus alone
 /// is "Add Bus", the master is refused; `mixer.set_send {index: 1}` edits
 /// the first send (1-based on the channel, 0-based in the FFI), and Add,
-/// Set and Remove Send are each one named step. Not ported: the default
-/// EQ (`plugins.default_eq` and the EQ install need the plug-in
-/// catalogue, a later Plug-in Manager slice).
+/// Set and Remove Send are each one named step; the default-EQ command
+/// answers and refuses first.
 #[test]
 #[ignore = "needs a window server and VIZDAW_E2E_APP"]
 fn gpui_new_bus_and_sends_over_the_channel() {
     use core_control::ErrorCode;
     let home = temp_home();
     let mut app = App::start(home.path(), false);
+
+    // The picker's command: Multi-Q answers, an unknown plug-in is refused.
+    let r = app.command("plugins.default_eq", json!({"plugin": "multi-q"}));
+    assert_eq!(r["status"], "default EQ Multi-Q", "{r}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "plugins.default_eq", "params": {"plugin": "clap:vizdaw.e2e.none"}}),
+    );
+    assert_eq!(e.code, ErrorCode::UnknownId, "{e:?}");
+
     let w = app.command("file.new", json!({}))["window"].clone();
     wait_for_node(&mut app, &w, "Track Headers");
     app.call("command.run", json!({"id": "track.new_audio", "window": w}));
@@ -2009,6 +2018,77 @@ fn gpui_new_bus_and_sends_over_the_channel() {
     app.call("command.run", json!({"id": "edit.undo", "window": w}));
     let m = mixer_state(&mut app, &w);
     assert_eq!(sends(&m), s, "the send is back where it was: {m}");
+    app.quit();
+}
+
+/// Ported from `multiq_install_and_switch_over_the_channel`: the switch
+/// answers both ways, Multi-Q installs into the throwaway home's Components
+/// folder, a second install asks to Replace and `replace` answers it. Needs
+/// `target/multiq/out` (macOS, `scripts/build-multiq.sh`), named to the app
+/// by `VIZDAW_BUNDLED_PLUGINS`; without it the install is `unavailable`.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_multiq_install_and_switch_over_the_channel() {
+    use core_control::ErrorCode;
+    let home = temp_home();
+    let bundled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/multiq/out");
+    let have = cfg!(target_os = "macos")
+        && bundled.join("Multi-Q.component").is_dir()
+        && bundled.join("Multi-Q.clap").is_dir();
+    if !have {
+        // No Multi-Q to install (Linux, or scripts/build-multiq.sh has not
+        // run): the build says so.
+        eprintln!(
+            "no Multi-Q at {} (macOS only, built by scripts/build-multiq.sh): checking that the install is unavailable",
+            bundled.display()
+        );
+        let mut app = App::start(home.path(), false);
+        let e = app.call_err(
+            "command.run",
+            json!({"id": "plugins.install_multiq", "params": {}}),
+        );
+        assert_eq!(e.code, ErrorCode::Unavailable, "{e:?}");
+        assert_eq!(
+            e.message, "Multi-Q is not in this build of VizDAW.",
+            "{e:?}"
+        );
+        app.quit();
+        return;
+    }
+    let bundled = bundled.canonicalize().unwrap();
+    let mut app = App::start_with(
+        home.path(),
+        false,
+        &[("VIZDAW_BUNDLED_PLUGINS", bundled.to_str().unwrap())],
+    );
+
+    // The switch answers its status both ways.
+    for (on, status) in [(false, "new-channel EQ off"), (true, "new-channel EQ on")] {
+        let r = app.command("plugins.new_channel_eq", json!({"on": on}));
+        assert_eq!(r["status"], status, "{r}");
+    }
+
+    // Install into the throwaway home.
+    let components = home.path().join("Library/Audio/Plug-Ins/Components");
+    let target = components.join("Multi-Q.component");
+    let r = app.command("plugins.install_multiq", json!({}));
+    assert_eq!(r["status"], target.display().to_string(), "{r}");
+    assert!(
+        components.is_dir(),
+        "the folder exists in the throwaway home"
+    );
+    assert!(target.exists(), "{}", target.display());
+
+    // A second install asks; replace answers it.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "plugins.install_multiq", "params": {}}),
+    );
+    assert_eq!(e.code, ErrorCode::DialogRequired, "{e:?}");
+    assert!(e.message.contains("Replace"), "{e:?}");
+    let r = app.command("plugins.install_multiq", json!({"replace": true}));
+    assert_eq!(r["status"], target.display().to_string(), "{r}");
+    assert!(target.exists());
     app.quit();
 }
 

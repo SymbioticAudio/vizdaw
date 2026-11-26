@@ -40,6 +40,14 @@ pub const PLUGIN_COMMANDS: &[&str] = &[
     "plugins.default_eq",
 ];
 
+/// What [`PluginPrefs::read`] found: the installed effects and the
+/// core's note.
+#[derive(Debug, Clone, Default)]
+pub struct EqRead {
+    pub choices: Vec<DefaultEqRow>,
+    pub note: Option<String>,
+}
+
 /// What the Install button's call came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallOutcome {
@@ -256,20 +264,43 @@ impl PluginPrefs {
     }
 
     /// Reads the installed effects and the core's note again (the tab
-    /// appearing, a command about to match against them).
+    /// appearing, a command about to match against them). It reads the
+    /// catalogue: a UI thread calls [`PluginPrefs::read`] elsewhere and
+    /// [`PluginPrefs::apply_read`] itself.
     pub fn refresh(&mut self, core: &dyn CoreCalls) {
-        self.eq_choices = core.eq_choices();
-        self.note = core.default_eq_note();
+        self.apply_read(Self::read(core));
     }
 
-    /// The Install button (and the Replace answer): something in the way
-    /// is `AskReplace`; any other failure lands in `status`.
-    pub fn install(&mut self, replace: bool, core: &dyn CoreCalls) -> InstallOutcome {
-        if self.bundled_eq_name.is_none() {
-            self.status = Some(NO_BUNDLED_EQ.into());
-            return InstallOutcome::Failed(NO_BUNDLED_EQ.into());
+    /// The read half of [`PluginPrefs::refresh`]; it may block.
+    pub fn read(core: &dyn CoreCalls) -> EqRead {
+        EqRead {
+            choices: core.eq_choices(),
+            note: core.default_eq_note(),
         }
-        match self.install_quietly(replace, core) {
+    }
+
+    /// The other half: takes what [`PluginPrefs::read`] found.
+    pub fn apply_read(&mut self, read: EqRead) {
+        self.eq_choices = read.choices;
+        self.note = read.note;
+    }
+
+    /// Where installs go (`None`: the user's Components folder).
+    pub fn install_destination(&self) -> Option<&str> {
+        self.install_destination.as_deref()
+    }
+
+    /// Whether the Install button can do anything: the build has the
+    /// bundled EQ and its AU.
+    pub fn can_install(&self) -> bool {
+        self.bundled_eq_name.is_some() && self.bundled_au_present
+    }
+
+    /// The end of an install the core call of which ran elsewhere (it
+    /// copies a bundle, so it may block): sets `status` as
+    /// [`PluginPrefs::install`] does.
+    pub fn finish_install(&mut self, result: Result<String, VizError>) -> InstallOutcome {
+        match self.record_install(result) {
             Ok(path) => InstallOutcome::Installed(path),
             Err(VizError::Exists { .. }) => {
                 self.status = None;
@@ -283,6 +314,27 @@ impl PluginPrefs {
         }
     }
 
+    fn record_install(&mut self, result: Result<String, VizError>) -> Result<String, VizError> {
+        let path = result?;
+        let folder = Path::new(&path)
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        self.status = Some(format!("Installed in {folder}."));
+        Ok(path)
+    }
+
+    /// The Install button (and the Replace answer): something in the way
+    /// is `AskReplace`; any other failure lands in `status`.
+    pub fn install(&mut self, replace: bool, core: &dyn CoreCalls) -> InstallOutcome {
+        if self.bundled_eq_name.is_none() {
+            self.status = Some(NO_BUNDLED_EQ.into());
+            return InstallOutcome::Failed(NO_BUNDLED_EQ.into());
+        }
+        let result = core.install_multiq(self.install_destination.clone(), replace);
+        self.finish_install(result)
+    }
+
     /// Installs into the destination and sets `status`; a failure is
     /// returned and asks nothing. Ok: the installed bundle's path.
     pub fn install_quietly(
@@ -290,13 +342,8 @@ impl PluginPrefs {
         replace: bool,
         core: &dyn CoreCalls,
     ) -> Result<String, VizError> {
-        let path = core.install_multiq(self.install_destination.clone(), replace)?;
-        let folder = Path::new(&path)
-            .parent()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
-        self.status = Some(format!("Installed in {folder}."));
-        Ok(path)
+        let result = core.install_multiq(self.install_destination.clone(), replace);
+        self.record_install(result)
     }
 }
 
@@ -312,6 +359,44 @@ pub fn run_plugins(
     model: &mut PluginPrefs,
     prefs: &mut Prefs,
     core: &dyn CoreCalls,
+) -> Result<Ran, ControlError> {
+    run_plugins_with(id, args, model, prefs, core, Step::Whole)
+}
+
+/// How much of a command's slow work has been done elsewhere.
+pub enum Step {
+    /// None: `run_plugins_with` does it all.
+    Whole,
+    /// `plugins.default_eq`'s catalogue read, done.
+    Read(EqRead),
+    /// `plugins.install_multiq`'s copy, done.
+    Installed(Result<String, VizError>),
+}
+
+/// The `replace` flag of `plugins.install_multiq`, and the refusal when the
+/// build cannot install: what a caller checks before it starts the copy.
+pub fn install_request(
+    args: &[(String, ArgValue)],
+    model: &PluginPrefs,
+) -> Result<bool, ControlError> {
+    if !model.can_install() {
+        return Err(ControlError::new(ErrorCode::Unavailable, NOT_IN_THIS_BUILD));
+    }
+    Ok(args
+        .iter()
+        .any(|(n, v)| n == "replace" && matches!(v, ArgValue::Flag(true))))
+}
+
+/// [`run_plugins`] with its slow work (the catalogue read of
+/// `plugins.default_eq`, the copy of `plugins.install_multiq`) done
+/// already, so a caller can run it off its UI thread.
+pub fn run_plugins_with(
+    id: &str,
+    args: &[(String, ArgValue)],
+    model: &mut PluginPrefs,
+    prefs: &mut Prefs,
+    core: &dyn CoreCalls,
+    step: Step,
 ) -> Result<Ran, ControlError> {
     let find = |name: &str| args.iter().find(|(n, _)| n == name).map(|(_, v)| v);
     let flag = |name: &str| match find(name) {
@@ -335,10 +420,12 @@ pub fn run_plugins(
             )))
         }
         "plugins.install_multiq" => {
-            if model.bundled_eq_name().is_none() || !model.bundled_au_present() {
-                return Err(ControlError::new(ErrorCode::Unavailable, NOT_IN_THIS_BUILD));
-            }
-            match model.install_quietly(flag("replace").unwrap_or(false), core) {
+            let replace = install_request(args, model)?;
+            let result = match step {
+                Step::Installed(r) => r,
+                _ => core.install_multiq(model.install_destination.clone(), replace),
+            };
+            match model.record_install(result) {
                 Ok(path) => Ok(ran(path)),
                 Err(VizError::Exists { .. }) => Err(ControlError::dialog("Replace", &["replace"])),
                 Err(VizError::Model { message }) if message == NOT_IN_THIS_BUILD => {
@@ -364,7 +451,10 @@ pub fn run_plugins(
             if plugin_id.is_empty() || plugin.contains('\0') {
                 return Err(bad());
             }
-            model.refresh(core);
+            match step {
+                Step::Read(r) => model.apply_read(r),
+                _ => model.refresh(core),
+            }
             let row = model
                 .eq_choices()
                 .iter()

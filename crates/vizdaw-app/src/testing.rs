@@ -4235,6 +4235,10 @@ impl CoreCalls for FakeCore {
     fn install_multiq(&self, dest: Option<String>, replace: bool) -> Result<String, VizError> {
         let mut s = self.st();
         s.calls.push(format!("install_multiq({dest:?},{replace})"));
+        s.read_threads
+            .entry("install_multiq".to_owned())
+            .or_default()
+            .push(std::thread::current().id());
         Self::scripted(&mut s, "install_multiq")?;
         Ok(format!(
             "{}/Multi-Q.component",
