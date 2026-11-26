@@ -325,7 +325,7 @@ item (false: keys, the Keys settings and the control channel only).
 
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
-| audio.set | Audio | Audio Settings |  | false | S9a | |
+| audio.set | Audio | Audio Settings |  | false | S9a | S9a |
 
 ### Destination
 
@@ -395,9 +395,9 @@ editors). The record popover is a popover, not a window.
 | Settings: Appearance | Settings tab | | |
 | Settings: Editing | Settings tab | | |
 | Settings: Keys | Settings tab | | |
-| Settings: Audio | Settings tab | S9a | |
-| Settings: Recording | Settings tab | S9a | |
-| Settings: Automation | Settings tab | S9a | |
+| Settings: Audio | Settings tab | S9a | S9a (CI; on screen: L26) |
+| Settings: Recording | Settings tab | S9a | S9a (CI; on screen: L26) |
+| Settings: Automation | Settings tab | S9a | S9a (CI; on screen: L26) |
 | Settings: Surfaces | Settings tab | | |
 | Settings: Plug-ins | Settings tab | | |
 | Settings: Co-Producer | Settings tab | | |
@@ -548,7 +548,7 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 | regions_normalize_relink_and_trash | | |
 | records_audio_loop_takes_and_midi | S8a (`gpui_records_audio_loop_takes_and_midi`; `record.recover`: `gpui_record_recover_trash_over_the_channel`) | S8a (offline device, fake input; Trash: gap H4) |
 | tracks_the_fake_synth | | |
-| arms_meters_counts_in_and_draws_the_take | S8c, S9a (`gpui_arms_meters_counts_in_and_draws_the_take`, with the `audio.set` steps) | S8c (offline device, fake input; the `audio.set` steps wait for Settings) |
+| arms_meters_counts_in_and_draws_the_take | S8c, S9a (`gpui_arms_meters_counts_in_and_draws_the_take`, with the `audio.set` steps) | S8c, S9a (offline device, fake input, with the `audio.set` steps; CI run 45743593726) |
 | touch_writes_a_fader_over_the_channel | S6a (mixer parts) | S6a (mixer parts) |
 | drives_a_fader_and_a_button_from_an_mcu | | |
 | drives_the_mixer_from_a_kontrol_mk3 | | |
