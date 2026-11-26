@@ -2906,3 +2906,46 @@ fn channel_delete_is_delete_last_step_over_the_roll(cx: &mut TestAppContext) {
     ok(call(&s, cx, "ui.key", json!({"key": "forward_delete"})));
     assert_eq!(s.fake.edits().len(), 1, "{:?}", s.fake.edits());
 }
+
+#[gpui::test]
+fn audio_set_runs_without_a_document(cx: &mut TestAppContext) {
+    let s = setup(cx, demo_fake());
+    assert_eq!(documents(cx), 0);
+    let r = ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "audio.set", "params": {"latency_trim": -12}}),
+    ));
+    assert_eq!(r["command"], "audio.set");
+    let e = call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "audio.set", "params": {"buffer_frames": 100}}),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::InvalidParams);
+    assert!(e.message.starts_with("audio.set: give "), "{}", e.message);
+}
+
+#[gpui::test]
+fn audio_set_saves_the_buffer_size(cx: &mut TestAppContext) {
+    let s = setup(cx, demo_fake());
+    ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "audio.set", "params": {"buffer_frames": 256}}),
+    ));
+    let saved = cx.update(|cx| {
+        AppState::global(cx)
+            .read(cx)
+            .prefs
+            .raw("audio")
+            .and_then(|v| v.get("bufferFrames").cloned())
+    });
+    assert_eq!(saved, Some(json!(256)));
+    let shown = cx.update(|cx| AppState::global(cx).read(cx).audio.settings().buffer_frames);
+    assert_eq!(shown, 256);
+}

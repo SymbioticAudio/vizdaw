@@ -3661,8 +3661,31 @@ fn gpui_arms_meters_counts_in_and_draws_the_take() {
         node_like(nodes, "Audio track, Mic, ", "input In 1, monitoring off")
     });
 
-    // Swift's `audio.set` steps (the buffer size asked for, and refused
-    // while recording) come with the Settings slice.
+    // The buffer size: one of six, as asked (the offline device keeps its
+    // 512-frame blocks).
+    app.call(
+        "command.run",
+        json!({"id": "audio.set", "params": {"buffer_frames": 256}, "window": w}),
+    );
+    let input = app.call("state.get", json!({"target": "input", "window": w}));
+    assert_eq!(
+        (
+            input["buffer_frames"].clone(),
+            input["device_buffer_frames"].clone()
+        ),
+        (json!(256), json!(512)),
+        "{input}"
+    );
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "audio.set", "params": {"buffer_frames": 100}, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::InvalidParams, "{e}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "audio.set", "params": {"junk": 1}, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::InvalidParams, "{e}");
 
     // One bar of count-in: the timeline stands still, nothing records.
     app.call(
@@ -3691,6 +3714,14 @@ fn gpui_arms_meters_counts_in_and_draws_the_take() {
         "{r}"
     );
     assert_eq!(r["pass_start_tick"], json!(0), "{r}");
+    // The buffer size stays while recording: busy, and nothing changes.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "audio.set", "params": {"buffer_frames": 512}, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::Busy, "{e}");
+    let input = app.call("state.get", json!({"target": "input", "window": w}));
+    assert_eq!(input["buffer_frames"], json!(256), "{input}");
     // The take draws on Mic while it records.
     wait_in_tree(&mut app, &w, "the recording take on Mic", |nodes| {
         let take = find_node(nodes, "Recording take")?;

@@ -86,6 +86,11 @@ pub struct AppState {
     /// bar from them, so a change redraws them all. In memory until
     /// [`crate::run`] opens the launch home's.
     pub prefs: Prefs,
+    /// Settings › Audio and Recording, over `prefs` (handed to the core
+    /// at launch, changed core first).
+    pub audio: vizdaw_app::audio_prefs::AudioPrefs,
+    /// Settings › Automation.
+    pub automation: vizdaw_app::automation_prefs::AutomationPrefs,
     /// The keyboard layout id the windows use instead of the platform's
     /// (tests; `None`: `cx.keyboard_layout().id()`).
     pub keyboard_layout_override: Option<String>,
@@ -117,6 +122,8 @@ impl AppState {
             store,
             keymap: Keymap::default(),
             prefs: Prefs::in_memory(),
+            audio: Default::default(),
+            automation: Default::default(),
             keyboard_layout_override: None,
             transports: HashMap::new(),
             windows: Vec::new(),
@@ -143,9 +150,18 @@ impl AppState {
     }
 
     /// Takes `prefs` as the app's preferences; new projects are made in
-    /// their default format.
+    /// their default format. The saved audio and automation settings go to
+    /// the core now (call it before any document opens, so the first
+    /// engine opens with them), and new documents start from the record
+    /// defaults.
     pub fn set_prefs(&mut self, prefs: Prefs) {
         self.store.set_default_format(prefs.default_format());
+        let core = self.store.core();
+        self.audio = vizdaw_app::audio_prefs::AudioPrefs::load(&prefs);
+        self.audio.apply_at_launch(core.as_ref());
+        self.automation = vizdaw_app::automation_prefs::AutomationPrefs::load(&prefs);
+        self.automation.apply_at_launch(core.as_ref());
+        self.store.set_record_defaults(self.audio.record_defaults());
         self.prefs = prefs;
     }
 

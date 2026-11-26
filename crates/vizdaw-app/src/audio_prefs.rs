@@ -13,7 +13,11 @@ use vizdaw_ffi::edit::MonitorModeRow;
 use vizdaw_ffi::host::InputDeviceRow;
 use vizdaw_ffi::{InputInfoRow, VizError};
 
+use core_control::registry::ArgValue;
+use core_control::{ControlError, ErrorCode};
+
 use crate::alerts::error_message;
+use crate::commands::Ran;
 use crate::prefs::Prefs;
 use crate::record::RecordDefaults;
 use crate::session::CoreCalls;
@@ -249,11 +253,29 @@ impl AudioPrefs {
         prefs: &mut Prefs,
         core: &dyn CoreCalls,
     ) -> Result<(), String> {
+        self.buffer_frames_coded(frames, prefs, core)
+            .map_err(|(_, m)| m)
+    }
+
+    /// `set_buffer_frames`, with the control channel's code for a
+    /// failure: `Busy` for the core's busy, else `Failed`.
+    fn buffer_frames_coded(
+        &mut self,
+        frames: u32,
+        prefs: &mut Prefs,
+        core: &dyn CoreCalls,
+    ) -> Result<(), (ErrorCode, String)> {
         let mut s = self.settings.clone();
-        core.set_io_buffer_frames(frames)
-            .map_err(|e| self.refused(e))?;
+        core.set_io_buffer_frames(frames).map_err(|e| {
+            let code = if matches!(e, VizError::Busy { .. }) {
+                ErrorCode::Busy
+            } else {
+                ErrorCode::Failed
+            };
+            (code, self.refused(e))
+        })?;
         s.buffer_frames = frames;
-        self.keep(s, prefs)
+        self.keep(s, prefs).map_err(|m| (ErrorCode::Failed, m))
     }
 
     /// The device (`None`: "Same as output"); the core gets its UID, else
@@ -516,4 +538,115 @@ pub fn count_text(bars: u8) -> String {
         1 => "1 bar".into(),
         n => format!("{n} bars"),
     }
+}
+
+/// `audio.set`'s usage line (Swift `AudioCommands.runSet`).
+const SET_USAGE: &str = "audio.set: give software_monitoring, buffer_frames (32, 64, 128, 256, 512 or 1024), input_device or latency_trim (±192000)";
+
+/// The core's text limit: 255 characters, none a control character.
+fn fits_core(t: &str) -> bool {
+    t.chars().count() <= 255 && !t.chars().any(char::is_control)
+}
+
+/// `key` as the device it names in `list`: by UID, else by a name no
+/// other device has. A key no device has stays a name (a device not
+/// connected). `None`: two devices have that name.
+fn resolve(key: &str, list: &[InputDeviceRow]) -> Option<InputDeviceRow> {
+    if let Some(d) = list.iter().find(|d| !d.uid.is_empty() && d.uid == key) {
+        return Some(d.clone());
+    }
+    let named: Vec<_> = list.iter().filter(|d| d.name == key).collect();
+    if named.len() > 1 {
+        return None;
+    }
+    Some(InputDeviceRow {
+        name: key.to_owned(),
+        uid: named.first().map(|d| d.uid.clone()).unwrap_or_default(),
+    })
+}
+
+/// `audio.set`: applies `args` through `audio` (the app's preferences)
+/// in Swift's order: buffer size, Software Monitoring, input device,
+/// latency trim. Needs no document. A value of the wrong type or range,
+/// or no known parameter, is `invalid_params` and changes nothing; the
+/// core's `Busy` is `busy`, any other refusal `failed`.
+pub fn run_audio_set(
+    args: &[(String, ArgValue)],
+    audio: &mut AudioPrefs,
+    prefs: &mut Prefs,
+    core: &dyn CoreCalls,
+) -> Result<Ran, ControlError> {
+    let bad = || ControlError::params("audio.set", &SET_USAGE["audio.set: ".len()..]);
+    let find = |name: &str| args.iter().find(|(n, _)| n == name).map(|(_, v)| v);
+    let monitoring = match find("software_monitoring") {
+        Some(ArgValue::Flag(f)) => Some(*f),
+        _ => None,
+    };
+    let buffer = match find("buffer_frames") {
+        Some(ArgValue::Int(n)) => Some(
+            u32::try_from(*n)
+                .ok()
+                .filter(|f| BUFFER_SIZES.contains(f))
+                .ok_or_else(bad)?,
+        ),
+        _ => None,
+    };
+    let device = match find("input_device") {
+        Some(ArgValue::Text(t)) => {
+            let t = t.trim();
+            if !fits_core(t) {
+                return Err(bad());
+            }
+            Some(t.to_owned())
+        }
+        _ => None,
+    };
+    let trim = match find("latency_trim") {
+        Some(ArgValue::Int(n)) => Some(
+            i32::try_from(*n)
+                .ok()
+                .filter(|t| t.abs() <= MAX_TRIM)
+                .ok_or_else(bad)?,
+        ),
+        _ => None,
+    };
+    if monitoring.is_none() && buffer.is_none() && device.is_none() && trim.is_none() {
+        return Err(bad());
+    }
+    let device = match device {
+        None => None,
+        Some(key) if key.is_empty() => Some(None),
+        Some(key) => match resolve(&key, &core.audio_input_device_list()) {
+            Some(d) => Some(Some(d)),
+            None => {
+                return Err(ControlError::new(
+                    ErrorCode::Failed,
+                    format!(
+                        "Two input devices are named \u{201C}{key}\u{201D}: choose one in Settings › Audio, or give its uid."
+                    ),
+                ));
+            }
+        },
+    };
+    let write = |r: Result<(), String>| r.map_err(|m| ControlError::new(ErrorCode::Failed, m));
+    if let Some(b) = buffer {
+        audio
+            .buffer_frames_coded(b, prefs, core)
+            .map_err(|(code, m)| ControlError::new(code, m))?;
+    }
+    if let Some(on) = monitoring {
+        write(audio.set_software_monitoring(on, prefs, core))?;
+    }
+    if let Some(d) = device {
+        write(audio.set_input_device(d, prefs, core))?;
+    }
+    if let Some(t) = trim {
+        write(audio.set_latency_trim(t, prefs, core))?;
+    }
+    Ok(Ran {
+        undo: None,
+        status: None,
+        focus: None,
+        open_mixer_window: false,
+    })
 }

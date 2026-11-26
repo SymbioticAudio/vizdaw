@@ -376,3 +376,210 @@ fn a_refused_launch_size_is_the_problem_and_the_rest_still_go() {
             .contains(&"set_bounce_settings(10000)".to_string())
     );
 }
+
+// ---- audio.set (Swift AudioCommandsTests) ----
+
+use core_control::ErrorCode;
+use core_control::registry::ArgValue;
+use std::sync::Arc;
+use vizdaw_app::DocumentStore;
+use vizdaw_app::audio_prefs::run_audio_set;
+use vizdaw_app::record::RecordDefaults;
+
+fn set(
+    args: &[(&str, ArgValue)],
+    a: &mut AudioPrefs,
+    p: &mut Prefs,
+    core: &FakeCore,
+) -> Result<vizdaw_app::commands::Ran, core_control::ControlError> {
+    let args: Vec<(String, ArgValue)> = args
+        .iter()
+        .map(|(n, v)| ((*n).to_owned(), v.clone()))
+        .collect();
+    run_audio_set(&args, a, p, core)
+}
+
+const USAGE: &str = "audio.set: give software_monitoring, buffer_frames (32, 64, 128, 256, 512 or 1024), input_device or latency_trim (±192000)";
+
+#[test]
+fn audio_set_value_checks() {
+    let mut p = Prefs::in_memory();
+    let core = FakeCore::new();
+    let mut a = AudioPrefs::load(&p);
+    let r = set(
+        &[
+            ("software_monitoring", ArgValue::Flag(false)),
+            ("buffer_frames", ArgValue::Int(256)),
+            ("input_device", ArgValue::Text("Studio In".into())),
+            ("latency_trim", ArgValue::Int(-12)),
+        ],
+        &mut a,
+        &mut p,
+        &core,
+    )
+    .unwrap();
+    assert_eq!(r.status, None);
+    let s = a.settings();
+    assert_eq!(
+        (s.software_monitoring, s.buffer_frames, s.latency_trim),
+        (false, 256, -12)
+    );
+    assert_eq!(s.input_device.as_deref(), Some("Studio In"));
+    // Swift's order: buffer, monitoring, device, trim.
+    assert_eq!(
+        core.calls(),
+        [
+            "audio_input_device_list",
+            "set_io_buffer_frames(256)",
+            "set_software_monitoring(false)",
+            "set_audio_input_device(Some(\"Studio In\"))",
+            "set_record_latency_trim(-12)",
+        ]
+    );
+    // Blank is Same as output.
+    set(
+        &[("input_device", ArgValue::Text(" ".into()))],
+        &mut a,
+        &mut p,
+        &core,
+    )
+    .unwrap();
+    assert_eq!(a.settings().input_device, None);
+    let before = core.calls().len();
+    let long = "x".repeat(300);
+    let combining = "e\u{301}".repeat(200);
+    let bad: Vec<Vec<(&str, ArgValue)>> = vec![
+        vec![],
+        vec![("buffer_frames", ArgValue::Int(100))],
+        vec![("buffer_frames", ArgValue::Int(0))],
+        vec![("buffer_frames", ArgValue::Int(2048))],
+        vec![("buffer_frames", ArgValue::Int(-128))],
+        vec![("latency_trim", ArgValue::Int(192_001))],
+        vec![("latency_trim", ArgValue::Int(i64::MIN))],
+        vec![("input_device", ArgValue::Text(long))],
+        vec![("input_device", ArgValue::Text("a\nb".into()))],
+        vec![("input_device", ArgValue::Text("a\tb".into()))],
+        vec![("input_device", ArgValue::Text(combining))],
+        vec![("buffer_frames", ArgValue::Text("128".into()))],
+        vec![("software_monitoring", ArgValue::Int(1))],
+        vec![("junk", ArgValue::Int(1))],
+    ];
+    for args in &bad {
+        let e = set(args, &mut a, &mut p, &core).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidParams, "{args:?}");
+        assert_eq!(e.message, USAGE, "{args:?}");
+    }
+    assert_eq!(core.calls().len(), before, "nothing applied");
+    assert!(
+        set(
+            &[("buffer_frames", ArgValue::Int(256))],
+            &mut a,
+            &mut p,
+            &core
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn an_ambiguous_device_name_is_refused() {
+    let mut p = Prefs::in_memory();
+    let core = FakeCore::new();
+    core.set_input_devices(vec![dev("A", "u1"), dev("A", "u2"), dev("B", "u3")]);
+    let mut a = AudioPrefs::load(&p);
+    let e = set(
+        &[("input_device", ArgValue::Text("A".into()))],
+        &mut a,
+        &mut p,
+        &core,
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Failed);
+    assert_eq!(
+        e.message,
+        "Two input devices are named \u{201C}A\u{201D}: choose one in Settings › Audio, or give its uid."
+    );
+    assert_eq!(a.settings().input_device, None, "nothing applied");
+    set(
+        &[("input_device", ArgValue::Text("u2".into()))],
+        &mut a,
+        &mut p,
+        &core,
+    )
+    .unwrap();
+    assert_eq!(a.settings().input_device.as_deref(), Some("A"));
+    assert_eq!(a.settings().input_device_uid.as_deref(), Some("u2"));
+    set(
+        &[("input_device", ArgValue::Text("B".into()))],
+        &mut a,
+        &mut p,
+        &core,
+    )
+    .unwrap();
+    assert_eq!(a.settings().input_device_uid.as_deref(), Some("u3"));
+    set(
+        &[("input_device", ArgValue::Text("".into()))],
+        &mut a,
+        &mut p,
+        &core,
+    )
+    .unwrap();
+    assert_eq!(
+        (&a.settings().input_device, &a.settings().input_device_uid),
+        (&None, &None)
+    );
+}
+
+#[test]
+fn a_busy_core_answers_busy_and_keeps_the_value() {
+    let mut p = Prefs::in_memory();
+    let core = FakeCore::new();
+    let mut a = AudioPrefs::load(&p);
+    core.refuse_next(
+        "set_io_buffer_frames",
+        VizError::Busy {
+            message: "Stop recording to change the I/O buffer size.".into(),
+        },
+    );
+    let e = set(
+        &[("buffer_frames", ArgValue::Int(512))],
+        &mut a,
+        &mut p,
+        &core,
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Busy);
+    assert_eq!(e.message, "Stop recording to change the I/O buffer size.");
+    assert_eq!(a.settings().buffer_frames, 128);
+    assert!(p.raw("audio").is_none(), "nothing saved");
+    core.refuse_next(
+        "set_io_buffer_frames",
+        VizError::Model {
+            message: "no".into(),
+        },
+    );
+    let e = set(
+        &[("buffer_frames", ArgValue::Int(512))],
+        &mut a,
+        &mut p,
+        &core,
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Failed);
+}
+
+#[test]
+fn new_documents_start_from_the_record_defaults() {
+    let core = Arc::new(FakeCore::new());
+    let mut store = DocumentStore::with_core(core.clone());
+    store.set_record_defaults(RecordDefaults {
+        count_in_bars: 2,
+        pre_roll_bars: 1,
+        midi_passes_as_takes: true,
+    });
+    let id = store.new_empty().expect("a document");
+    let r = store.document(id).unwrap().record();
+    assert_eq!(r.count_in_bars(), 2);
+    assert_eq!(r.pre_roll_bars(), 1);
+    assert!(r.midi_passes_as_takes());
+}

@@ -106,6 +106,9 @@ pub struct DocumentStore {
     alerts: VecDeque<(Option<DocId>, AlertItem)>,
     last_failure: Option<String>,
     default_format: ProjectFormatRow,
+    /// Settings › Recording's defaults: every document made from now on
+    /// starts from them (Swift `RecordModel.defaults`; opened ones too).
+    record_defaults: crate::record::RecordDefaults,
     /// Projects made for a file that landed later, waiting for a window.
     pending: VecDeque<DocId>,
     /// Documents the store closed itself, whose windows should close.
@@ -151,6 +154,7 @@ impl DocumentStore {
             alerts: VecDeque::new(),
             last_failure: None,
             default_format: crate::formats::FALLBACK_FORMAT,
+            record_defaults: crate::record::RecordDefaults::default(),
             pending: VecDeque::new(),
             closed: vec![],
             made: HashSet::new(),
@@ -227,6 +231,11 @@ impl DocumentStore {
         self.documents.len()
     }
 
+    /// Settings › Recording's defaults for the documents made from now on.
+    pub fn set_record_defaults(&mut self, d: crate::record::RecordDefaults) {
+        self.record_defaults = d;
+    }
+
     pub fn new_empty(&mut self) -> Option<DocId> {
         self.add("New Document Failed", |s| s.core.new_empty())
     }
@@ -243,6 +252,7 @@ impl DocumentStore {
         let made = make(self).and_then(DocumentModel::new);
         match made {
             Ok(mut model) => {
+                model.apply_record_defaults(self.record_defaults);
                 model.inputs.attach(self.core.clone(), &self.input_sources);
                 let id = DocId(self.next_id);
                 self.next_id += 1;

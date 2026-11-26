@@ -72,6 +72,7 @@ use gpui::{
     MouseUpEvent, PlatformInput, WindowHandle,
 };
 use serde_json::{Value, json};
+use vizdaw_app::audio_prefs;
 use vizdaw_app::commands::{
     self, APP_COMMANDS, LANE_INPUT_COMMANDS, RECORD_COMMANDS, TRANSPORT_COMMANDS,
 };
@@ -822,7 +823,15 @@ fn app_wide(
     }
     let app = AppState::global(cx);
     let ran = app.update(cx, |s, cx| {
-        let ran = commands::run_app(id, args, &mut s.prefs);
+        let ran = if id == "audio.set" {
+            let core = s.store.core();
+            let ran = audio_prefs::run_audio_set(args, &mut s.audio, &mut s.prefs, core.as_ref());
+            // A setting that took changes the record defaults too.
+            s.store.set_record_defaults(s.audio.record_defaults());
+            ran
+        } else {
+            commands::run_app(id, args, &mut s.prefs)
+        };
         // Every window draws its bar from the preferences.
         cx.notify();
         ran
@@ -1536,7 +1545,7 @@ fn not_yet(what: &str) -> ControlError {
              file.save_as / file.project_settings / file.bounce / file.import_* / file.export_* / \
              file.interchange_report / media.import / media.convert / media.relink / \
              transport.* / locator.* / record.* / marker.* / midi.inject / step.* / ui.set_transport_bar / \
-             ui.reset_transport_bar / edit.undo / edit.redo / track.* / editors.snap / \
+             ui.reset_transport_bar / audio.set / edit.undo / edit.redo / track.* / editors.snap / \
              editors.list / editors.close_detail / editors.insert_event / ui.view_arrange / \
              ui.view_mix / ui.toggle_left / ui.toggle_bottom / ui.toggle_right / ui.pane / \
              automation.set_mode / automation.gesture / automation.release_all / \
