@@ -70,6 +70,14 @@ window height fits its tab. Still open:
 - [ ] The round-trip caption changes to "Round trip … ms" once a track's input opens.
 - [ ] Steppers at their ends (count-in 4, pre-roll 8, return time 2000 ms) and the disabled buttons.
 
-## After the Settings slice
+## Themes (9b)
 
-- [ ] Every look row above in each of the five themes (monitor tints, waveform colour, region fill, Markers colours, group tag and VCA strip).
+Checked 2026-11-26 on the Mac with the app's offscreen screenshots (screen
+locked): the document window (transport bar, track headers, arrangement,
+panes) in all six themes and the Mix view in Console and Flat take the
+theme, nothing unreadable seen. Still open, on an unlocked screen:
+
+- [ ] The Settings window's Appearance tab: the six rows and their swatches, the switch, the caption; height 300 fits (and with the red problem line).
+- [ ] A plug-in window header and the Mixer window in each theme.
+- [ ] Every look row above in each of the six themes (monitor tints, waveform colour, region fill, Markers colours, group tag and VCA strip).
+- [ ] Menus, popovers (record options, input picker, » overflow) and a sheet card in a dark and a light theme.

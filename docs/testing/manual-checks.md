@@ -17,7 +17,7 @@ Status: **open**, **pass**, **fail** (with the bug's number).
 - **Linux:** in `~/vizdaw-next` on the test box, `git pull`, then
   `cargo run -p vizdaw-gpui --release`.
 
-Not in the app yet, so not on this list: the rest of Settings (themes, Keys,
+Not in the app yet, so not on this list: the rest of Settings (user themes, Keys,
 the Customize Transport Bar sheet), Co-Producer, the Strip Chart, Drum
 Grid and Audio editors, torn-off editor windows, the Plugin Manager and
 Media Pool. Their checks come with their slices.
@@ -77,3 +77,4 @@ Media Pool. Their checks come with their slices.
 | L24 | The Markers pane with many markers | Rows and digits aligned; "Go to <name>" on hover; a click moves the playhead; it scrolls to the last | open |
 | L25 | (After host track H3) a real audio interface and MIDI keyboard | As M8–M16 | waits for H3 |
 | L26 | VizDAW › Settings… (Ctrl-,) in the in-window menu bar | The Settings window opens; the Audio, Recording and Automation tabs draw with the system font, nothing clipped | open |
+| L27 | Settings › Appearance: try each of the six themes, then turn colour bars off | Every window changes at once; text stays readable with the system font; the colour bars go | open |

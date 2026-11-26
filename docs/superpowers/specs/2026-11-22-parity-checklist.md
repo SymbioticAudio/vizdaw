@@ -60,7 +60,7 @@ item (false: keys, the Keys settings and the control channel only).
 | ui.toggle_bottom | View | Bottom Pane | ⌃⌘↓ | true | S4 | S4 |
 | ui.toggle_right | View | Right Pane | ⌃⌘→ | true | S6a | S6a |
 | ui.pane | View | Set Pane |  | false | S6a | S6a |
-| ui.theme | View | Theme |  | false | | |
+| ui.theme | View | Theme |  | false | S9b | |
 | ui.set_transport_bar | View | Set Transport Bar |  | false | S3 | S3 |
 | ui.reset_transport_bar | View | Reset Transport Bar |  | false | S3 | S3 |
 | ui.customize_transport | View | Customize Transport Bar… |  | true | | |
@@ -392,7 +392,7 @@ editors). The record popover is a popover, not a window.
 | Plugin Manager | `plugins` | | |
 | Song Notes | `window.song_notes` (opens the notes file in the system's editor, not a window of its own) | | |
 | Licences | `licences` | | |
-| Settings: Appearance | Settings tab | | |
+| Settings: Appearance | Settings tab | S9b (user themes: later) | |
 | Settings: Editing | Settings tab | | |
 | Settings: Keys | Settings tab | | |
 | Settings: Audio | Settings tab | S9a | S9a (CI; on screen: L26) |
