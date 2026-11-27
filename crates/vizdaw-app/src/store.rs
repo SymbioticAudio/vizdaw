@@ -390,6 +390,22 @@ impl DocumentStore {
             .collect()
     }
 
+    /// Every open document's idle tick, now: a plug-in just turned off
+    /// in the Plugin Manager unloads (its slots become placeholders) and
+    /// one turned on loads its waiting slots (owner rule: at once, not at
+    /// the next poll). True when something arrived in any of them.
+    pub fn idle_every_document(&mut self) -> bool {
+        let mut ids: Vec<DocId> = self.documents.keys().copied().collect();
+        ids.sort();
+        let mut arrived = false;
+        for id in ids {
+            if let Some(d) = self.documents.get_mut(&id) {
+                arrived |= d.idle();
+            }
+        }
+        arrived
+    }
+
     /// Every document reads Software Monitoring again (Swift
     /// `AudioSettingsView.swift:35`: the meters follow a change at once,
     /// not at the next poll).

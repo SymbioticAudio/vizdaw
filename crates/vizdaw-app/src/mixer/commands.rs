@@ -5,13 +5,16 @@
 //! `automation.release_all` frees the channel's touches, and
 //! `mixer.new_bus` adds a bus (with a send from `strip`, one undo step).
 //! The strip edits (`mixer.set_strip`, `set_output`, `add_send`,
-//! `set_send`, `remove_send`, `remove_bus`) are each one `run_mixer` call
+//! `set_send`, `remove_send`, `remove_bus`) and the plug-in edits
+//! (`mixer.add_insert`, `remove_insert`, `move_insert`, `set_bypass`,
+//! `set_eq`, `set_param`) are each one `run_mixer` call
 //! with the arguments as given (the core checks them, and counts sends
 //! from 1 as the channel does), and so is every group and VCA edit
-//! (registry `GROUP_IDS`); `mixer.set_colour` sets a strip's colour;
-//! `automation.mode.*` set the selected strips' mode; `automation.suspend`
-//! is the app-wide switch; `destination.set_midi_mix` sets a MIDI strip's
-//! mix.
+//! (registry `GROUP_IDS`); `track.new_plugin_instrument` is one too,
+//! with the selection's sequence and track filled in; `mixer.set_colour`
+//! sets a strip's colour; `automation.mode.*` set the selected strips'
+//! mode; `automation.suspend` is the app-wide switch;
+//! `destination.set_midi_mix` sets a MIDI strip's mix.
 //!
 //! Every argument is checked before the core is called and is
 //! `invalid_params` naming the parameter. The core's refusals are the
@@ -63,16 +66,27 @@ const MIDI_MIX_USAGE: &str = "destination.set_midi_mix: `dest` names an external
                               destination; `volume` and `pan` are 0 to 127 or null, `mute` is \
                               true or false; give at least one";
 
-/// The strip edits: one `run_mixer` call each, answered with the
-/// registry's title.
+/// The strip edits and the plug-in edits (Swift
+/// `MixerCommands.coProducerEdits`): one `run_mixer` call each, answered
+/// with the registry's title.
 pub const STRIP_EDITS: &[&str] = &[
     "mixer.set_strip",
     "mixer.set_output",
     "mixer.add_send",
     "mixer.set_send",
     "mixer.remove_send",
+    "mixer.add_insert",
+    "mixer.remove_insert",
+    "mixer.move_insert",
+    "mixer.set_bypass",
+    "mixer.set_eq",
+    "mixer.set_param",
     "mixer.remove_bus",
 ];
+
+/// A new instrument track with a plug-in (or the built-in synth) on its
+/// strip: one `run_mixer` call, answered with the new track's name.
+pub const NEW_PLUGIN_INSTRUMENT: &str = "track.new_plugin_instrument";
 
 /// The commands a key (or a menu item) runs with the selected strips as
 /// `strips`: the channel never acts on the selection.
@@ -205,6 +219,7 @@ pub(crate) fn run(
         "mixer.new_bus" => new_bus(args, doc),
         "mixer.set_colour" => set_colour(args, doc),
         SET_MIDI_MIX => set_midi_mix(args, doc),
+        NEW_PLUGIN_INSTRUMENT => new_plugin_instrument(args, doc),
         _ if STRIP_EDITS.contains(&id) || registry::GROUP_IDS.contains(&id) => {
             strip_edit(id, args, doc)
         }
@@ -376,6 +391,74 @@ fn strip_edit(
     let result = doc.session().run_mixer(id, control_args(args));
     doc.apply_result(result).map_err(|e| from_viz(&e))?;
     doc.set_status(registry::find(id).map(|c| c.title.to_owned()));
+    Ok(ran(doc))
+}
+
+/// `track.new_plugin_instrument {plugin, seq?, after?}` (Swift
+/// `MixerCommands.edit`, `M/MixerCommands.swift:107-138`): `seq` defaults
+/// to the shown sequence and `after` (in it) to the selection's first
+/// track, as New Track passes them; the core puts the track at the end
+/// without one. One `run_mixer` call; the status line is the new track's
+/// name (else the registry's title) and the new track is selected when
+/// its sequence is shown. A refusal is `failed` in the core's words, Busy
+/// `busy`; an open gesture `unavailable`.
+fn new_plugin_instrument(
+    args: &[(String, ArgValue)],
+    doc: &mut DocumentModel,
+) -> Result<Ran, ControlError> {
+    if doc.gesture_open() {
+        return Err(ControlError::new(ErrorCode::Unavailable, GESTURE_OPEN));
+    }
+    let mut args = args.to_vec();
+    let given = |args: &[(String, ArgValue)], name: &str| args.iter().any(|(n, _)| n == name);
+    let seq = if given(&args, "seq") {
+        match arg(&args, "seq") {
+            Some(ArgValue::Int(i)) => u64::try_from(*i).ok(),
+            _ => None,
+        }
+    } else {
+        let shown = doc.selected_seq();
+        if let Some(s) = shown.and_then(|s| i64::try_from(s).ok()) {
+            args.push(("seq".into(), ArgValue::Int(s)));
+        }
+        shown
+    };
+    if !given(&args, "after")
+        && seq.is_some()
+        && seq == doc.selected_seq()
+        && let Some(lane) = doc.selected_lane().and_then(|l| i64::try_from(l).ok())
+    {
+        args.push(("after".into(), ArgValue::Int(lane)));
+    }
+    let before: Vec<u64> = seq
+        .map(|s| {
+            doc.session()
+                .lanes(s)
+                .unwrap_or_default()
+                .iter()
+                .map(|l| l.id)
+                .collect()
+        })
+        .unwrap_or_default();
+    let result = doc
+        .session()
+        .run_mixer(NEW_PLUGIN_INSTRUMENT, control_args(&args));
+    doc.apply_result(result).map_err(|e| from_viz(&e))?;
+    doc.set_status(registry::find(NEW_PLUGIN_INSTRUMENT).map(|c| c.title.to_owned()));
+    let made = seq.and_then(|s| {
+        doc.session()
+            .lanes(s)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|l| !before.contains(&l.id))
+    });
+    if let (Some(s), Some(made)) = (seq, made) {
+        doc.set_status(Some(made.name.clone()));
+        // The new track is selected, as New Track selects it.
+        if Some(s) == doc.selected_seq() {
+            doc.select_track(made.id, false);
+        }
+    }
     Ok(ran(doc))
 }
 

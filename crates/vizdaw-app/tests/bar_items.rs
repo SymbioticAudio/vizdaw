@@ -264,6 +264,10 @@ fn command_availability_follows_the_menus() {
         command_enabled("file.new", None),
         "an app-wide command needs no document"
     );
+    // The Plugin Manager's button runs with a document or without.
+    assert!(command_enabled("window.plugin_manager", None));
+    assert!(command_enabled("window.plugin_manager", Some(&m)));
+    assert!(command_enabled("window.plugin_manager", Some(&empty)));
     // Undo follows its menu item.
     assert!(!command_enabled("edit.undo", Some(&m)));
     m.begin_text_editing("x");

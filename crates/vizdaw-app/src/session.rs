@@ -201,6 +201,27 @@ pub trait DocSession: Send + Sync {
 
     // Slots and MIDI strips (slice 6b).
 
+    /// Adds `plugin` to `strip`'s inserts at `index` (`None`: the end).
+    fn add_insert(
+        &self,
+        strip: u64,
+        index: Option<u32>,
+        plugin: PluginRefRow,
+    ) -> Result<DocSnapshot, VizError>;
+    /// Adds a plug-in instrument destination named `name` playing
+    /// `plugin`, with its instrument strip ("New Plugin Instrument…").
+    fn add_plugin_instrument(
+        &self,
+        name: String,
+        plugin: PluginRefRow,
+    ) -> Result<DocSnapshot, VizError>;
+    /// Makes destination `dest` play `plugin` (every track using it now
+    /// plays the plug-in; one undo step).
+    fn set_destination_plugin(
+        &self,
+        dest: u64,
+        plugin: PluginRefRow,
+    ) -> Result<DocSnapshot, VizError>;
     /// Removes insert `slot`.
     fn remove_insert(&self, slot: u64) -> Result<DocSnapshot, VizError>;
     /// Moves insert `slot` to position `index` of `strip`'s inserts.
@@ -663,6 +684,28 @@ impl DocSession for Session {
     }
     fn set_surface_selection(&self, strips: Vec<u64>) -> Result<(), VizError> {
         Session::set_surface_selection(self, strips)
+    }
+    fn add_insert(
+        &self,
+        strip: u64,
+        index: Option<u32>,
+        plugin: PluginRefRow,
+    ) -> Result<DocSnapshot, VizError> {
+        Session::add_insert(self, strip, index, plugin)
+    }
+    fn add_plugin_instrument(
+        &self,
+        name: String,
+        plugin: PluginRefRow,
+    ) -> Result<DocSnapshot, VizError> {
+        Session::add_plugin_instrument(self, name, plugin)
+    }
+    fn set_destination_plugin(
+        &self,
+        dest: u64,
+        plugin: PluginRefRow,
+    ) -> Result<DocSnapshot, VizError> {
+        Session::set_destination_plugin(self, dest, plugin)
     }
     fn remove_insert(&self, slot: u64) -> Result<DocSnapshot, VizError> {
         Session::remove_insert(self, slot)
@@ -1210,33 +1253,17 @@ impl CoreCalls for LiveCore {
     fn disable_plugins(&self, plugins: &[PluginRefRow]) -> Result<(), VizError> {
         let catalog = live_catalog()?;
         for p in plugins {
-            catalog.set_enabled(
-                vizdaw_ffi::PluginKey {
-                    format: p.format,
-                    id: p.id.clone(),
-                },
-                false,
-            )?;
+            catalog.set_enabled(crate::plugins::plugin_key(p), false)?;
         }
         Ok(())
     }
 }
 
-/// Opens the app's plug-in catalog at launch, before any project, as
-/// Swift did (`fix(app): ... open catalog before projects`): every
-/// session's host learns where the scanned plug-ins live, so a project's
-/// slots load. No scan runs (the Plugin Manager is a later slice). Answers
-/// why the catalog file was not read, if it was not.
-pub fn open_plugin_catalog() -> Option<String> {
-    match live_catalog() {
-        Ok(c) => c.take_problem().ok().flatten(),
-        Err(e) => Some(format!("plugin settings not read: {e}")),
-    }
-}
-
 /// The app's plug-in catalog (`plugins.json` in the support folder),
-/// opened at launch ([`open_plugin_catalog`]) or when first needed.
-fn live_catalog() -> Result<Arc<vizdaw_ffi::PluginCatalog>, VizError> {
+/// opened at launch, before any project, as Swift did (every session's
+/// host learns where the scanned plug-ins live, so a project's slots
+/// load; `crate::plugins::live_plugin_catalog`), or when first needed.
+pub(crate) fn live_catalog() -> Result<Arc<vizdaw_ffi::PluginCatalog>, VizError> {
     static CATALOG: std::sync::Mutex<Option<Arc<vizdaw_ffi::PluginCatalog>>> =
         std::sync::Mutex::new(None);
     let mut c = CATALOG.lock().unwrap_or_else(|e| e.into_inner());

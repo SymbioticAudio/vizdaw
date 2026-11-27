@@ -8,7 +8,7 @@ use core_control::registry::ArgValue;
 use core_control::{ControlError, ErrorCode};
 use vizdaw_ffi::control::{LayoutStateRow, PaneRow, ViewPanesRow};
 use vizdaw_ffi::mixer::{DestRow, StripKindRow, StripRow};
-use vizdaw_ffi::snapshot::LaneRow;
+use vizdaw_ffi::snapshot::{LaneRow, PluginRefRow};
 use vizdaw_ffi::tracks::TrackKindRow;
 
 use crate::commands::{Ran, check_names, on_flag, ran};
@@ -365,5 +365,54 @@ impl DocumentModel {
         if self.mixer().and_then(|m| m.renaming()).is_some() {
             self.with_mixer(|m, d| m.commit_rename(d));
         }
+    }
+}
+
+/// The right pane's pick with no strip to put it on
+/// (`M/PaneContent.swift:233`).
+pub const PANE_NO_STRIP: &str = "Select a track or one mixer strip first.";
+/// The right pane's pick when the mixer cannot be read
+/// (`S/PaneViews.swift:250`).
+pub const PANE_NO_MIXER: &str = "The mixer of this document could not be read.";
+
+/// The strip the right pane's Plug-ins view puts a pick on (Swift
+/// `PaneContent.insertPlugin`, `M/PaneContent.swift:237-253`): in the Mix
+/// view the one selected strip (not master), else the left pane's strip;
+/// in the Arrange view the left pane's strip first. The refusal is the
+/// status line's text: no mixer ([`PANE_NO_MIXER`]; the mixer is made
+/// first if need be), or no strip ([`PANE_NO_STRIP`]).
+pub fn pane_insert_target(doc: &mut DocumentModel) -> Result<u64, &'static str> {
+    if !doc.ensure_mixer() {
+        return Err(PANE_NO_MIXER);
+    }
+    let m = doc.mixer().ok_or(PANE_NO_MIXER)?;
+    let master = m.master().map(|s| s.id);
+    let picked = doc.selected_strips();
+    let selected = (picked.len() == 1)
+        .then(|| picked.first().copied())
+        .flatten()
+        .filter(|id| Some(*id) != master);
+    let from_lane = match doc.left_strip(&m.snapshot().strips, m.destinations()) {
+        StripFocus::Strip(id) => Some(id),
+        _ => None,
+    };
+    let strip = if doc.layout().views.main == MainView::Mix {
+        selected.or(from_lane)
+    } else {
+        from_lane.or(selected)
+    };
+    strip.ok_or(PANE_NO_STRIP)
+}
+
+/// `plugin`, picked in the right pane's Plug-ins view, goes on the end of
+/// the inserts of [`pane_insert_target`]'s strip (the core's refusal is
+/// the alert "Add Plugin Failed"); with no strip the status line says
+/// why. No window opens (Swift opened none).
+pub fn pane_insert_plugin(doc: &mut DocumentModel, plugin: &PluginRefRow) {
+    match pane_insert_target(doc) {
+        Ok(strip) => {
+            doc.with_mixer(|m, d| m.add_insert_at_end(d, strip, plugin));
+        }
+        Err(why) => doc.set_status(Some(why.into())),
     }
 }

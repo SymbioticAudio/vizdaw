@@ -52,6 +52,7 @@ use vizdaw_ffi::{
 };
 use vizdaw_ffi::{AudioSettingsRow, ClickRow, InputInfoRow, OverviewRows, OverviewStateRow};
 use vizdaw_ffi::{BuiltinSound, EditorResize, EditorSize};
+use vizdaw_ffi::{CatalogRowFfi, PluginKey, PluginKindTag, PluginStatusRow, ScanProgress};
 
 struct State {
     snap: DocSnapshot,
@@ -135,6 +136,12 @@ struct State {
     held: Vec<u64>,
     /// Every `load_plugins(slots)`.
     loaded: Vec<Vec<u64>>,
+    /// Every `add_insert(strip, index, plugin)`.
+    add_inserts: Vec<(u64, Option<u32>, PluginRefRow)>,
+    /// Every `add_plugin_instrument(name, plugin)`.
+    plugin_instruments: Vec<(String, PluginRefRow)>,
+    /// Every `set_destination_plugin(dest, plugin)`.
+    destination_plugins: Vec<(u64, PluginRefRow)>,
     /// Every `preview_midi_mix(dest, volume, pan)`.
     midi_previews: Vec<(u64, Option<u8>, Option<u8>)>,
     /// Every `set_midi_mix(dest, mix)`.
@@ -596,6 +603,9 @@ impl FakeSession {
             waves: Waves::default(),
             held: vec![],
             loaded: vec![],
+            add_inserts: vec![],
+            plugin_instruments: vec![],
+            destination_plugins: vec![],
             midi_previews: vec![],
             midi_mixes: vec![],
             files: Files {
@@ -665,6 +675,11 @@ impl FakeSession {
     /// Scripts the lanes `lanes(seq)` returns.
     pub fn set_lanes(&self, seq: u64, rows: Vec<LaneRow>) {
         self.st().lanes.insert(seq, rows);
+    }
+
+    /// Sequence `seq`'s lanes as the session holds them now.
+    pub fn lanes_of(&self, seq: u64) -> Vec<LaneRow> {
+        self.st().lanes.get(&seq).cloned().unwrap_or_default()
     }
 
     /// What `has_unsaved_changes` answers; `None` follows the snapshot.
@@ -1122,6 +1137,24 @@ impl FakeSession {
     /// Every `load_plugins(slots)`.
     pub fn loaded(&self) -> Vec<Vec<u64>> {
         self.st().loaded.clone()
+    }
+
+    /// Every `add_insert(strip, index, plugin)` that was not refused
+    /// (script a refusal with `set_call_error("add_insert", ..)`).
+    pub fn add_inserts(&self) -> Vec<(u64, Option<u32>, PluginRefRow)> {
+        self.st().add_inserts.clone()
+    }
+
+    /// Every `add_plugin_instrument(name, plugin)` that was not refused
+    /// (`set_call_error("add_plugin_instrument", ..)`).
+    pub fn plugin_instruments(&self) -> Vec<(String, PluginRefRow)> {
+        self.st().plugin_instruments.clone()
+    }
+
+    /// Every `set_destination_plugin(dest, plugin)` that was not refused
+    /// (`set_call_error("set_destination_plugin", ..)`).
+    pub fn destination_plugins(&self) -> Vec<(u64, PluginRefRow)> {
+        self.st().destination_plugins.clone()
     }
 
     /// Every `preview_midi_mix(dest, volume, pan)`.
@@ -2656,8 +2689,39 @@ impl DocSession for FakeSession {
             .collect())
     }
     fn run_mixer(&self, id: &str, args: Vec<ControlArg>) -> Result<DocSnapshot, VizError> {
-        self.st().run_mixers.push((id.to_owned(), args));
-        self.mixer_edit("run_mixer", format!("run_mixer({id})"), |_| Ok(()))
+        self.st().run_mixers.push((id.to_owned(), args.clone()));
+        if id != "track.new_plugin_instrument" {
+            return self.mixer_edit("run_mixer", format!("run_mixer({id})"), |_| Ok(()));
+        }
+        // As the core's: an instrument track "Inst N" in `seq`, below
+        // `after` (else at the end).
+        let int = |name: &str| {
+            args.iter().find_map(|a| match &a.value {
+                vizdaw_ffi::control::ControlValue::Int { value } if a.name == name => {
+                    u64::try_from(*value).ok()
+                }
+                _ => None,
+            })
+        };
+        let mut s = self.st();
+        Self::scripted(&mut s, "run_mixer")?;
+        s.calls.push(format!("run_mixer({id})"));
+        let Some(seq) = int("seq") else {
+            return Err(VizError::Model {
+                message: "track.new_plugin_instrument: `seq` is a sequence ID".into(),
+            });
+        };
+        let lane = s.lanes.values().flatten().map(|l| l.id).max().unwrap_or(0) + 1;
+        let rows = s.lanes.entry(seq).or_default();
+        let mut row = lane_row(lane, &format!("Inst {}", rows.len() + 1), false);
+        row.kind = TrackKindRow::Instrument;
+        let at = int("after")
+            .and_then(|a| rows.iter().position(|l| l.id == a))
+            .map_or(rows.len(), |i| i + 1);
+        rows.insert(at, row);
+        let snap = Self::command_result(&mut s);
+        s.mixer.version = snap.version;
+        Ok(snap)
     }
     fn add_bus(&self, name: &str) -> Result<DocSnapshot, VizError> {
         let name = name.to_owned();
@@ -2797,6 +2861,96 @@ impl DocSession for FakeSession {
         Self::scripted(&mut s, "set_surface_selection")?;
         s.surface_selections.push(strips);
         Ok(())
+    }
+    fn add_insert(
+        &self,
+        strip: u64,
+        index: Option<u32>,
+        plugin: PluginRefRow,
+    ) -> Result<DocSnapshot, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "add_insert")?;
+        s.calls
+            .push(format!("add_insert({strip},{index:?},{})", plugin.id));
+        s.add_inserts.push((strip, index, plugin.clone()));
+        // A new slot id past every one the mixer has.
+        let id = slots_mut(&mut s.mixer).map(|x| x.id).max().unwrap_or(0) + 1000;
+        if let Some(st) = s.mixer.strips.iter_mut().find(|x| x.id == strip) {
+            let at = index.map_or(st.inserts.len(), |i| (i as usize).min(st.inserts.len()));
+            st.inserts.insert(
+                at,
+                SlotRow {
+                    plugin,
+                    ..slot_row(id, "Insert")
+                },
+            );
+        }
+        let snap = Self::command_result(&mut s);
+        s.mixer.version = snap.version;
+        Ok(snap)
+    }
+    fn add_plugin_instrument(
+        &self,
+        name: String,
+        plugin: PluginRefRow,
+    ) -> Result<DocSnapshot, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "add_plugin_instrument")?;
+        s.calls
+            .push(format!("add_plugin_instrument({name},{})", plugin.id));
+        s.plugin_instruments.push((name, plugin));
+        let snap = Self::command_result(&mut s);
+        s.mixer.version = snap.version;
+        Ok(snap)
+    }
+    fn set_destination_plugin(
+        &self,
+        dest: u64,
+        plugin: PluginRefRow,
+    ) -> Result<DocSnapshot, VizError> {
+        let mut s = self.st();
+        Self::scripted(&mut s, "set_destination_plugin")?;
+        s.calls
+            .push(format!("set_destination_plugin({dest},{})", plugin.id));
+        s.destination_plugins.push((dest, plugin.clone()));
+        // Like the core (Swift `FakeSession.setDestinationPlugin`): the
+        // destination plays it, keeping a name the user gave it, and its
+        // strip (or the Built-in Synth's) and tracks show it at once; the
+        // new instrument's slot is 900 + `dest`.
+        if let Some(i) = s.dests.iter().position(|d| d.id == dest) {
+            let old = s.dests[i].clone();
+            let default_name = old.plugin.as_ref().map_or("Built-in Synth", |p| &p.name);
+            let follows = old.name == default_name;
+            s.dests[i].plugin = Some(plugin.clone());
+            if follows {
+                s.dests[i].name = plugin.name.clone();
+            }
+            let name = s.dests[i].name.clone();
+            let was_synth = old.plugin.is_none() && !old.external;
+            if let Some(st) = s.mixer.strips.iter_mut().find(|x| {
+                x.kind == StripKindRow::Instrument { dest }
+                    || (x.kind == StripKindRow::BuiltinSynth && was_synth)
+            }) {
+                if follows {
+                    st.name = name.clone();
+                }
+                st.kind = StripKindRow::Instrument { dest };
+                st.kind_label = name.clone();
+                st.instrument = Some(SlotRow {
+                    plugin,
+                    instrument: true,
+                    ..slot_row(900 + dest, &name)
+                });
+            }
+            for rows in s.lanes.values_mut() {
+                for l in rows.iter_mut().filter(|l| l.midi_dest == Some(dest)) {
+                    l.destination = Some(name.clone());
+                }
+            }
+        }
+        let snap = Self::command_result(&mut s);
+        s.mixer.version = snap.version;
+        Ok(snap)
     }
     fn remove_insert(&self, slot: u64) -> Result<DocSnapshot, VizError> {
         self.mixer_edit("remove_insert", format!("remove_insert({slot})"), |m| {
@@ -4680,5 +4834,207 @@ impl CoreCalls for FakeCore {
             s.disabled.push((p.format, p.id.clone()));
         }
         Ok(())
+    }
+}
+
+/// What a [`FakeCatalog`] answers and what it was asked (Swift
+/// `FakeCatalog.swift`). Script it through [`FakeCatalog::state`].
+#[derive(Debug, Default)]
+pub struct FakeCatalogState {
+    /// The catalog (`rows`; `browser` offers the usable ones of a kind).
+    pub rows: Vec<CatalogRowFfi>,
+    /// What `progress` answers: the front is taken while more follow,
+    /// the last stays (empty: no scan running). `scan` does not change it.
+    pub progress: VecDeque<ScanProgress>,
+    /// What `take_problem` answers, each once.
+    pub problems: VecDeque<String>,
+    /// Every `scan(all)`.
+    pub scans: Vec<bool>,
+    /// Every `rescan(keys)`.
+    pub rescans: Vec<Vec<PluginKey>>,
+    /// Every `clear_blocklist(keys)`.
+    pub cleared: Vec<Vec<PluginKey>>,
+    /// Every `set_enabled(key, enabled)`.
+    pub enabled_calls: Vec<(PluginKey, bool)>,
+    /// Every `reveal_path(key)`.
+    pub revealed: Vec<PluginKey>,
+    /// How many times `rows` answered.
+    pub rows_reads: usize,
+    /// Refusals, every time while set; a refused call records nothing.
+    pub fail_take_problem: Option<VizError>,
+    pub fail_rows: Option<VizError>,
+    pub fail_browser: Option<VizError>,
+    pub fail_set_enabled: Option<VizError>,
+    pub fail_clear_blocklist: Option<VizError>,
+    pub fail_rescan: Option<VizError>,
+    pub fail_scan: Option<VizError>,
+    pub fail_progress: Option<VizError>,
+    pub fail_reveal_path: Option<VizError>,
+}
+
+impl FakeCatalogState {
+    fn current_progress(&self) -> ScanProgress {
+        self.progress.front().cloned().unwrap_or(ScanProgress {
+            running: false,
+            done: 0,
+            total: 0,
+        })
+    }
+}
+
+fn refuse(e: &Option<VizError>) -> Result<(), VizError> {
+    e.clone().map_or(Ok(()), Err)
+}
+
+/// A scripted [`PluginCatalogCalls`](crate::plugins::PluginCatalogCalls)
+/// that records every call. No disk, no scanner.
+#[derive(Debug, Default)]
+pub struct FakeCatalog(Mutex<FakeCatalogState>);
+
+impl FakeCatalog {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A catalog of `rows`.
+    pub fn with_rows(rows: Vec<CatalogRowFfi>) -> Self {
+        let c = Self::new();
+        c.state().rows = rows;
+        c
+    }
+
+    /// The script and the record.
+    pub fn state(&self) -> std::sync::MutexGuard<'_, FakeCatalogState> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl crate::plugins::PluginCatalogCalls for FakeCatalog {
+    fn take_problem(&self) -> Result<Option<String>, VizError> {
+        let mut s = self.state();
+        refuse(&s.fail_take_problem)?;
+        Ok(s.problems.pop_front())
+    }
+    fn rows(&self) -> Result<Vec<CatalogRowFfi>, VizError> {
+        let mut s = self.state();
+        refuse(&s.fail_rows)?;
+        s.rows_reads += 1;
+        Ok(s.rows.clone())
+    }
+    fn browser(&self, kind: PluginKindTag) -> Result<Vec<CatalogRowFfi>, VizError> {
+        let s = self.state();
+        refuse(&s.fail_browser)?;
+        Ok(s.rows
+            .iter()
+            .filter(|r| r.kind == Some(kind) && r.status == PluginStatusRow::Ok)
+            .cloned()
+            .collect())
+    }
+    fn set_enabled(&self, key: PluginKey, enabled: bool) -> Result<(), VizError> {
+        let mut s = self.state();
+        refuse(&s.fail_set_enabled)?;
+        s.enabled_calls.push((key.clone(), enabled));
+        // The preference is separate; a blocklisted or missing status
+        // wins over it.
+        for r in s.rows.iter_mut().filter(|r| same(&r.plugin, &key)) {
+            r.enabled = enabled;
+            if matches!(r.status, PluginStatusRow::Ok | PluginStatusRow::Disabled) {
+                r.status = if enabled {
+                    PluginStatusRow::Ok
+                } else {
+                    PluginStatusRow::Disabled
+                };
+            }
+        }
+        Ok(())
+    }
+    fn clear_blocklist(&self, keys: Vec<PluginKey>) -> Result<(), VizError> {
+        let mut s = self.state();
+        refuse(&s.fail_clear_blocklist)?;
+        if s.current_progress().running {
+            return Err(VizError::Engine {
+                message: "a scan is already running".into(),
+            });
+        }
+        // Like the real catalog: the entries go.
+        for r in s
+            .rows
+            .iter_mut()
+            .filter(|r| keys.iter().any(|k| same(&r.plugin, k)))
+        {
+            if matches!(r.status, PluginStatusRow::Blocklisted { .. }) {
+                r.status = if r.enabled {
+                    PluginStatusRow::Ok
+                } else {
+                    PluginStatusRow::Disabled
+                };
+            }
+        }
+        s.cleared.push(keys);
+        Ok(())
+    }
+    fn rescan(&self, keys: Vec<PluginKey>) -> Result<(), VizError> {
+        let mut s = self.state();
+        refuse(&s.fail_rescan)?;
+        s.rescans.push(keys);
+        Ok(())
+    }
+    fn scan(&self, all: bool) -> Result<(), VizError> {
+        let mut s = self.state();
+        refuse(&s.fail_scan)?;
+        s.scans.push(all);
+        Ok(())
+    }
+    fn progress(&self) -> Result<ScanProgress, VizError> {
+        let mut s = self.state();
+        refuse(&s.fail_progress)?;
+        let p = s.current_progress();
+        if s.progress.len() > 1 {
+            s.progress.pop_front();
+        }
+        Ok(p)
+    }
+    fn reveal_path(&self, key: PluginKey) -> Result<Option<String>, VizError> {
+        let mut s = self.state();
+        refuse(&s.fail_reveal_path)?;
+        s.revealed.push(key.clone());
+        if key.format == PluginFormatTag::Au {
+            return Ok(None);
+        }
+        Ok(s.rows
+            .iter()
+            .find(|r| same(&r.plugin, &key))
+            .map(|r| r.path.clone()))
+    }
+}
+
+fn same(plugin: &PluginRefRow, key: &PluginKey) -> bool {
+    plugin.format == key.format && plugin.id == key.id
+}
+
+/// A catalog row for `name` by `vendor` (Swift `catalogRow`,
+/// `FakeCatalog.swift:66`): id `x.<name>` (the id [`slot_row`] gives a
+/// slot of that name), version "1.0", path `/p/x.<name>`, on unless
+/// `Disabled`.
+pub fn catalog_row(
+    name: &str,
+    vendor: &str,
+    format: PluginFormatTag,
+    kind: PluginKindTag,
+    status: PluginStatusRow,
+) -> CatalogRowFfi {
+    let id = format!("x.{name}");
+    CatalogRowFfi {
+        path: format!("/p/{id}"),
+        plugin: PluginRefRow {
+            format,
+            id,
+            name: name.into(),
+            vendor: vendor.into(),
+            version: "1.0".into(),
+        },
+        kind: Some(kind),
+        enabled: status != PluginStatusRow::Disabled,
+        status,
     }
 }

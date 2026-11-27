@@ -524,10 +524,18 @@ const fn opt_mixer_id(name: &'static str, help: &'static str) -> ParamSpec {
 }
 
 const MIXER_STRIP: ParamSpec = mixer_id("strip", "The strip (see state.get mixer).");
-const MIXER_SLOT: ParamSpec = mixer_id(
-    "slot",
-    "The plug-in slot: an insert, an EQ or an instrument (see state.get mixer).",
-);
+/// A song's first plug-in is slot 0 (`Counters::plugin` starts at 0), so
+/// a slot is 0 to [`MAX_EXACT_ID`] (slice 10a).
+const MIXER_SLOT: ParamSpec = ParamSpec {
+    kind: ParamKind::Int {
+        min: 0,
+        max: MAX_EXACT_ID,
+    },
+    ..mixer_id(
+        "slot",
+        "The plug-in slot: an insert, an EQ or an instrument (see state.get mixer).",
+    )
+};
 
 /// `mixer.set_strip` (plan 8d Ruling 1).
 const MIXER_SET_STRIP_PARAMS: &[ParamSpec] = &[

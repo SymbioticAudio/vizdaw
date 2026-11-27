@@ -21,10 +21,14 @@ pub mod list_editor;
 pub mod menu_bar;
 pub mod menus;
 mod midi_strip;
+pub mod mixer_bar_menus;
 pub mod mixer_view;
 pub mod panes;
 pub mod piano_roll;
+pub mod plugin_browser;
+pub mod plugin_manager_window;
 pub mod plugin_windows;
+pub mod plugins_pane;
 pub mod record_popover;
 pub mod region_drawing;
 pub mod registry;
@@ -50,8 +54,8 @@ use vizdaw_app::{DocId, DocumentStore};
 pub use app_state::{AppState, WindowKind};
 pub use appearance::current_theme;
 pub use menus::{
-    AppFileCommand, CloseWindow, FileCommand, NewDemo, NewDocument, OpenDocument, OpenSettings,
-    PlayStop, Quit, RunCommand, Save, SaveAs, StopAndReturn,
+    AppFileCommand, CloseWindow, FileCommand, NewDemo, NewDocument, OpenDocument,
+    OpenPluginManager, OpenSettings, PlayStop, Quit, RunCommand, Save, SaveAs, StopAndReturn,
 };
 pub use shell::DocumentWindow;
 
@@ -89,6 +93,9 @@ pub fn install(store: DocumentStore, cx: &mut App) -> gpui::Entity<AppState> {
     // On a later turn: never inside the key's or the menu's own dispatch.
     cx.on_action(|_: &OpenSettings, cx| {
         cx.defer(|cx| settings_window::open_settings(None, cx));
+    });
+    cx.on_action(|_: &OpenPluginManager, cx| {
+        cx.defer(plugin_manager_window::open_plugin_manager);
     });
     state
 }
@@ -314,6 +321,48 @@ pub fn pump_plugin_run_loop(cx: &mut App) {
     .detach();
 }
 
+/// How often the app polls the plug-in catalog while a scan runs or the
+/// Plugin Manager is open (Swift's every 15th 60 Hz tick,
+/// `S/VizDAWApp.swift:576-610`).
+pub const PLUGIN_POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Starts the app's plug-in catalog over `catalog` (scanning the new or
+/// changed plug-ins with `scan`; Swift `openCatalog` and `startScan`,
+/// `S/VizDAWApp.swift:515-542`) and its poll, every
+/// [`PLUGIN_POLL_EVERY`] on the main thread ([`plugins_tick`]).
+pub fn start_plugins(
+    catalog: std::sync::Arc<dyn vizdaw_app::plugins::PluginCatalogCalls>,
+    scan: bool,
+    cx: &mut App,
+) {
+    AppState::global(cx).update(cx, |s, _| {
+        s.app_plugins = vizdaw_app::plugins::AppPlugins::new(catalog);
+        s.app_plugins.start(scan);
+    });
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor().timer(PLUGIN_POLL_EVERY).await;
+            cx.update(plugins_tick);
+        }
+    })
+    .detach();
+}
+
+/// One pass of the plug-in poll: while a scan runs or the Plugin Manager
+/// is open, the catalog's progress is read (main thread: it applies the
+/// scan's results to the hosts); a change notifies the app state, which
+/// redraws the Plugin Manager. Then the catalog's alerts show.
+pub fn plugins_tick(cx: &mut App) {
+    let app = AppState::global(cx);
+    app.update(cx, |s, cx| {
+        let wanted = s.app_plugins.needs_poll() || s.plugin_manager_open;
+        if wanted && s.app_plugins.poll() {
+            cx.notify();
+        }
+    });
+    alerts::post_catalog_alerts(cx);
+}
+
 /// The platform the app runs on. On Linux with `DISPLAY` set it is X11
 /// (XWayland in a Wayland session; ruling D2), so every plug-in editor
 /// embeds; native-Wayland editor windows are a 27.x item.
@@ -344,10 +393,13 @@ pub fn run() {
         // keeps its own).
         let prefs = vizdaw_app::Prefs::open();
         launch(&state, prefs, options.demo, cx, |cx| {
-            // Before any document opens, so their plug-ins load.
-            if let Some(problem) = vizdaw_app::session::open_plugin_catalog() {
-                eprintln!("{problem}");
-            }
+            // Before any document opens, so their plug-ins load; the
+            // scan runs in the background.
+            start_plugins(
+                vizdaw_app::plugins::live_plugin_catalog(),
+                !options.no_scan,
+                cx,
+            );
             // Before any document opens.
             if let Some(path) = &options.control
                 && let Err(e) = control::start(path, cx)

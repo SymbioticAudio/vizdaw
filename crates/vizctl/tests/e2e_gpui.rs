@@ -6,7 +6,7 @@
 //! ```text
 //! scripts/make-gpui-app.sh   # macOS: target/VizDAW-GPUI.app
 //! VIZDAW_E2E_APP=target/VizDAW-GPUI.app cargo test -p vizctl --test e2e_gpui -- --ignored --nocapture
-//! # Linux: cargo build -p vizdaw-gpui --features screenshot, then
+//! # Linux: cargo build -p vizdaw-gpui -p vizdaw-scan --features vizdaw-gpui/screenshot, then
 //! # VIZDAW_E2E_APP=target/debug/vizdaw-gpui (under xvfb-run -a, WAYLAND_DISPLAY unset)
 //! ```
 //!
@@ -4648,6 +4648,342 @@ fn gpui_plugin_window_without_an_editor_lists_parameters() {
             .filter(|&c| x_mapped(&conn, c))
             .collect();
         assert!(mapped.is_empty(), "mapped over the list: {mapped:?}");
+    }
+    app.quit();
+}
+
+// Slice 10a: plug-ins in the GPUI app (browser, inserts, EQ, the Plugin
+// Manager and a real scan).
+
+/// The inserts of strip `name` in `state.get mixer` `m`.
+fn inserts_on(m: &Value, name: &str) -> Vec<Value> {
+    strip_named(m, name)["inserts"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Polls until slot `slot` of window `w`'s mixer satisfies `ok`; the
+/// insert.
+fn wait_for_insert(app: &mut App, w: &Value, slot: u64, ok: impl Fn(&Value) -> bool) -> Value {
+    let m = wait_for_state(app, w, "mixer", |m| {
+        insert_of(m, slot).is_some_and(|i| ok(&i))
+    });
+    insert_of(&m, slot).unwrap()
+}
+
+/// Runs `id` with `params` in `w` until the plug-in it names is running
+/// (the core answers "… is not running yet …" while it loads).
+fn run_when_running(app: &mut App, w: &Value, id: &str, params: Value) -> Value {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        match app.client.call(
+            "command.run",
+            json!({"id": id, "params": params, "window": w}),
+            Duration::from_millis(WAIT_MS),
+        ) {
+            Ok(r) => return r,
+            Err(CallError::Reply(e)) if e.message.contains("is not running yet") => {
+                assert!(Instant::now() < deadline, "{id}: {e:?}");
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(e) => panic!(
+                "{id} {params}: {e}\nlog:\n{}",
+                log_tail(&app.launched.log, 40)
+            ),
+        }
+    }
+}
+
+/// README "Plugins": the strip's "+" opens the plug-in browser and a pick
+/// adds the insert; then over the channel the insert verbs, the EQ, the
+/// core's refusal of an unknown plug-in and a new plug-in instrument
+/// track. The EQ is Multi-Q where it is built (macOS,
+/// `scripts/build-multiq.sh`), else the test plug-in.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_plugin_inserts_and_eq_over_the_channel() {
+    use core_control::ErrorCode;
+    let home = temp_home();
+    let multiq =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/multiq/out/Multi-Q.clap");
+    let with_multiq = cfg!(target_os = "macos") && multiq.is_dir();
+    let mut clap = vec![test_plugins::bundle()];
+    if with_multiq {
+        clap.push(multiq.canonicalize().unwrap());
+    }
+    let refs = seed_catalog(home.path(), &clap, &[]);
+    plugin_ref(&refs, "vizdaw.test.gain");
+    let (mut app, w) = start_demo(home.path());
+    let strip = "Built-in Synth";
+    let strip_id = strip_named(&mixer_state(&mut app, &w), strip)["id"].clone();
+    let before = inserts_on(&mixer_state(&mut app, &w), strip).len();
+
+    // The "+" opens the browser; its "Test Gain" row adds the insert.
+    app.call("command.run", json!({"id": "window.mixer", "window": w}));
+    let mixer = wait_for_mixer_window(&mut app);
+    let add = format!("Add an effect to {strip}");
+    let plus = wait_in_tree(&mut app, &mixer, &add, |n| find_role(n, "button", &add));
+    app.call("ui.click", json!({"window": mixer, "element": plus["id"]}));
+    let pick = wait_in_tree(&mut app, &mixer, "the browser's Test Gain row", |n| {
+        let rows = children_of(n, "Plugin Browser")?;
+        find_role(&rows, "button", "Test Gain")
+    });
+    app.call("ui.click", json!({"window": mixer, "element": pick["id"]}));
+    let m = wait_for_state(&mut app, &w, "mixer", |m| {
+        inserts_on(m, strip).len() == before + 1
+    });
+    let gain = inserts_on(&m, strip).last().unwrap().clone();
+    assert_eq!(gain["plugin"], "clap:vizdaw.test.gain", "{m}");
+    assert_eq!(gain["name"], "Test Gain", "{m}");
+    let gain_slot = gain["slot"].as_u64().unwrap();
+    wait_for_undo(&mut app, &w, "Add Plugin");
+
+    // Bypass, both ways.
+    for on in [true, false] {
+        let r = run_in(
+            &mut app,
+            &w,
+            "mixer.set_bypass",
+            json!({"slot": gain_slot, "bypass": on}),
+        );
+        assert_eq!(r["status"], "Bypass Insert", "{r}");
+        wait_for_insert(&mut app, &w, gain_slot, |i| i["bypass"] == on);
+    }
+
+    // A second insert, moved before the first.
+    let r = run_in(
+        &mut app,
+        &w,
+        "mixer.add_insert",
+        json!({"strip": strip_id, "plugin": "clap:vizdaw.test.bank"}),
+    );
+    assert_eq!(r["status"], "Add Insert", "{r}");
+    let m = mixer_state(&mut app, &w);
+    let bank = inserts_on(&m, strip).last().unwrap().clone();
+    assert_eq!(bank["plugin"], "clap:vizdaw.test.bank", "{m}");
+    let bank_slot = bank["slot"].as_u64().unwrap();
+    let r = run_in(
+        &mut app,
+        &w,
+        "mixer.move_insert",
+        json!({"slot": bank_slot, "index": before + 1}),
+    );
+    assert_eq!(r["status"], "Move Insert", "{r}");
+    let m = mixer_state(&mut app, &w);
+    let order: Vec<Value> = inserts_on(&m, strip)
+        .iter()
+        .skip(before)
+        .map(|i| i["slot"].clone())
+        .collect();
+    assert_eq!(order, vec![json!(bank_slot), json!(gain_slot)], "{m}");
+
+    // A parameter of the running plug-in: Gain (0 … 2) to 0.5.
+    wait_for_insert(&mut app, &w, gain_slot, |i| i["status"] == "live");
+    let r = run_when_running(
+        &mut app,
+        &w,
+        "mixer.set_param",
+        json!({"slot": gain_slot, "param": test_plugins::PARAM_GAIN, "value": "0.5"}),
+    );
+    assert_eq!(r["status"], "Set Plug-in Parameter", "{r}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "mixer.set_param", "window": w,
+            "params": {"slot": gain_slot, "param": test_plugins::PARAM_GAIN, "value": "9"}}),
+    );
+    assert_eq!(e.code, ErrorCode::Failed, "{e:?}");
+    assert_eq!(e.message, "Gain is 0 to 2.", "{e:?}");
+
+    // Remove the second insert.
+    let r = run_in(
+        &mut app,
+        &w,
+        "mixer.remove_insert",
+        json!({"slot": bank_slot}),
+    );
+    assert_eq!(r["status"], "Remove Insert", "{r}");
+    let m = mixer_state(&mut app, &w);
+    assert!(insert_of(&m, bank_slot).is_none(), "{m}");
+    assert!(insert_of(&m, gain_slot).is_some(), "{m}");
+
+    // The strip's EQ.
+    let (eq, eq_ref) = if with_multiq {
+        ("multi-q", "multi-q")
+    } else {
+        eprintln!(
+            "no Multi-Q CLAP at {} (macOS only, built by scripts/build-multiq.sh): mixer.set_eq uses the test plug-in",
+            multiq.display()
+        );
+        ("clap:vizdaw.test.gain", "clap:vizdaw.test.gain")
+    };
+    let r = run_in(
+        &mut app,
+        &w,
+        "mixer.set_eq",
+        json!({"strip": strip_id, "plugin": eq}),
+    );
+    assert_eq!(r["status"], "Set EQ", "{r}");
+    let m = mixer_state(&mut app, &w);
+    assert_eq!(strip_named(&m, strip)["eq"]["plugin"], eq_ref, "{m}");
+
+    // An unknown plug-in is the core's refusal, word for word.
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "mixer.add_insert", "window": w,
+            "params": {"strip": strip_id, "plugin": "clap:vizdaw.e2e.none"}}),
+    );
+    assert_eq!(e.code, ErrorCode::Failed, "{e:?}");
+    assert_eq!(
+        e.message, "No installed plug-in is clap:vizdaw.e2e.none.",
+        "{e:?}"
+    );
+
+    // A new Built-in Synth track: the status names it.
+    let tracks_before = track_list(&mut app, &w);
+    let r = run_in(
+        &mut app,
+        &w,
+        "track.new_plugin_instrument",
+        json!({"plugin": "built-in-synth"}),
+    );
+    let name = r["status"].as_str().unwrap_or_else(|| panic!("{r}"));
+    let tracks = track_list(&mut app, &w);
+    assert_eq!(tracks.len(), tracks_before.len() + 1, "{tracks:?}");
+    assert!(
+        tracks.iter().any(|(_, n)| n == name) && !tracks_before.iter().any(|(_, n)| n == name),
+        "{name:?} in {tracks:?}"
+    );
+    app.quit();
+}
+
+/// The status text of the Plugin Manager row named `name`, if listed.
+fn manager_status(nodes: &Value, name: &str) -> Option<String> {
+    let row = find_role(nodes, "row", name)?;
+    let path = path_of(&row)?;
+    let container = path.rsplit_once('.')?.0;
+    nodes.as_array()?.iter().find_map(|n| {
+        (n["role"] == "text" && under(n, container))
+            .then(|| n["label"].as_str().unwrap_or("").to_string())
+    })
+}
+
+/// The Plugin Manager window's number, once listed.
+fn wait_for_manager_window(app: &mut App) -> Value {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let rows = app.call("state.get", json!({"target": "windows"}));
+        if let Some(r) = rows["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["kind"] == "plugin_manager")
+        {
+            assert_eq!(r["doc"], Value::Null, "{r}");
+            return r["number"].clone();
+        }
+        assert!(Instant::now() < deadline, "no Plugin Manager: {rows}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// A real scan: the test bundle in the throwaway home's CLAP folder, the
+/// app launched without a scan, "Rescan All" in the Plugin Manager lists
+/// it as OK (through `vizdaw-scan` next to the app). Its "On" toggle
+/// turns a plug-in in use into the "Disabled in Plugin Manager"
+/// placeholder at once, and back on it loads again.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_plugin_manager_lists_toggles_and_rescans() {
+    let home = temp_home();
+    let clap = if cfg!(target_os = "macos") {
+        home.path().join("Library/Audio/Plug-Ins/CLAP")
+    } else {
+        home.path().join(".clap")
+    };
+    std::fs::create_dir_all(&clap).unwrap();
+    let bundle = test_plugins::bundle();
+    test_plugins::copy_bundle(&clap.join(bundle.file_name().unwrap()));
+    let (mut app, w) = start_demo(home.path());
+    // Launched with --no-scan: the catalog has no test plug-in yet.
+    let strip = strip_named(&mixer_state(&mut app, &w), "Built-in Synth")["id"].clone();
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "mixer.add_insert", "window": w,
+            "params": {"strip": strip, "plugin": "clap:vizdaw.test.gain"}}),
+    );
+    assert_eq!(
+        e.message, "No installed plug-in is clap:vizdaw.test.gain.",
+        "{e:?}"
+    );
+
+    let r = app.command("window.plugin_manager", json!({}));
+    assert_eq!(r["doc"], Value::Null, "{r}");
+    let pm = wait_for_manager_window(&mut app);
+    let rescan = wait_in_tree(&mut app, &pm, "Rescan All", |n| {
+        find_role(n, "button", "Rescan All").filter(|b| b["enabled"] == true)
+    });
+    app.call("ui.click", json!({"window": pm, "element": rescan["id"]}));
+    // The scan covers the machine's own plug-ins too: allow it longer.
+    let deadline = Instant::now() + Duration::from_secs(300);
+    loop {
+        let tree = app.call("ui.tree", json!({"window": pm}));
+        if manager_status(&tree["nodes"], "Test Gain").as_deref() == Some("OK") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Test Gain is not OK in the Plugin Manager: {:?}\nlog:\n{}",
+            manager_status(&tree["nodes"], "Test Gain"),
+            log_tail(&app.launched.log, 40)
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+
+    // The machine's own plug-ins may push the row out of view: search.
+    let search = wait_in_tree(&mut app, &pm, "the Search field", |n| {
+        find_role(n, "textfield", "Search")
+    });
+    app.call(
+        "ui.key",
+        json!({"window": pm, "element": search["id"], "text": "Test Gain"}),
+    );
+    wait_in_tree(&mut app, &pm, "the search", |n| {
+        find_role(n, "textfield", "Search").filter(|f| f["value"] == "Test Gain")
+    });
+
+    // In use on a strip.
+    run_in(
+        &mut app,
+        &w,
+        "mixer.add_insert",
+        json!({"strip": strip, "plugin": "clap:vizdaw.test.gain"}),
+    );
+    let m = mixer_state(&mut app, &w);
+    let slot = inserts_on(&m, "Built-in Synth").last().unwrap()["slot"]
+        .as_u64()
+        .unwrap();
+    wait_for_insert(&mut app, &w, slot, |i| i["status"] == "live");
+
+    // Off: the slot is the placeholder at the next read.
+    for on in [false, true] {
+        let toggle = wait_in_tree(&mut app, &pm, "Test Gain's On", |n| {
+            find_role(n, "checkbox", "Test Gain")
+        });
+        assert_eq!(toggle["value"], if on { "off" } else { "on" }, "{toggle}");
+        app.call("ui.click", json!({"window": pm, "element": toggle["id"]}));
+        if on {
+            wait_for_insert(&mut app, &w, slot, |i| i["status"] == "live");
+        } else {
+            let i = mixer_state(&mut app, &w);
+            let i = insert_of(&i, slot).unwrap();
+            assert_eq!(i["status"], "placeholder", "{i}");
+            assert_eq!(i["reason"], "Disabled in Plugin Manager", "{i}");
+        }
+        wait_in_tree(&mut app, &pm, "Test Gain's status", |n| {
+            let s = manager_status(n, "Test Gain")?;
+            (s == if on { "OK" } else { "Disabled" }).then_some(())
+        });
     }
     app.quit();
 }

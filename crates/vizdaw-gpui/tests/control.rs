@@ -748,6 +748,7 @@ fn launch_arguments_take_the_socket_and_ignore_the_rest() {
     ]
     .map(String::from);
     let o = control::LaunchOptions::parse(args, None);
+    assert!(o.no_scan);
     assert_eq!(
         o.control.as_deref(),
         Some(std::path::Path::new("/tmp/x/s.sock"))
@@ -3027,4 +3028,213 @@ fn audio_set_saves_the_buffer_size(cx: &mut TestAppContext) {
     assert_eq!(saved, Some(json!(256)));
     let shown = cx.update(|cx| AppState::global(cx).read(cx).audio.settings().buffer_frames);
     assert_eq!(shown, 256);
+}
+
+// The plug-in verbs and the Plugin Manager (slice 10a Task 7).
+
+/// `mixer.add_insert` and its kin run through the core's `run_mixer`
+/// over the channel; the reply's status is the registry's title, the
+/// core's refusal the `failed` reply verbatim; a new plug-in instrument
+/// track is named in the status.
+#[gpui::test]
+fn add_insert_over_the_channel_runs_the_core_mixer_edit(cx: &mut TestAppContext) {
+    let s = setup(cx, mixer_fake());
+    ok(call(&s, cx, "app.new_demo", json!({})));
+    let ran = ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "mixer.add_insert", "params": {"strip": 1, "plugin": "multi-q"}}),
+    ));
+    assert_eq!(ran["command"], "mixer.add_insert");
+    assert_eq!(ran["status"], "Add Insert");
+    assert_eq!(
+        s.fake
+            .run_mixers()
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        ["mixer.add_insert"]
+    );
+    for (id, params, title) in [
+        ("mixer.remove_insert", json!({"slot": 7}), "Remove Insert"),
+        (
+            "mixer.move_insert",
+            json!({"slot": 7, "index": 1}),
+            "Move Insert",
+        ),
+        (
+            "mixer.set_bypass",
+            json!({"slot": 7, "bypass": true}),
+            "Bypass Insert",
+        ),
+        (
+            "mixer.set_eq",
+            json!({"strip": 1, "plugin": "multi-q"}),
+            "Set EQ",
+        ),
+        (
+            "mixer.set_param",
+            json!({"slot": 7, "param": 0, "value": "0.5"}),
+            "Set Plug-in Parameter",
+        ),
+    ] {
+        let ran = ok(call(
+            &s,
+            cx,
+            "command.run",
+            json!({"id": id, "params": params}),
+        ));
+        assert_eq!(ran["status"], title, "{id}");
+    }
+    // The core's refusal, in its words.
+    const NONE: &str = "No installed plug-in is clap:vizdaw.e2e.none.";
+    s.fake.set_call_error(
+        "run_mixer",
+        Some(VizError::Model {
+            message: NONE.into(),
+        }),
+    );
+    let e = call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "mixer.add_insert",
+               "params": {"strip": 1, "plugin": "clap:vizdaw.e2e.none"}}),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Failed);
+    assert_eq!(e.message, NONE);
+    s.fake.set_call_error("run_mixer", None);
+    // A new plug-in instrument track: its name is the status.
+    let ran = ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "track.new_plugin_instrument", "params": {"plugin": "built-in-synth"}}),
+    ));
+    let name = ran["status"].as_str().expect("a status").to_owned();
+    assert!(name.starts_with("Inst "), "{ran}");
+    let doc = ok(call(&s, cx, "state.get", json!({"target": "document"})));
+    assert!(lane_names(&doc).contains(&name), "{doc}");
+}
+
+/// `ui.key` reaches the Plugin Manager by its number: typed into its
+/// search field (focused by `element`), the table filters (slice 10a e2e:
+/// a real scan lists more rows than the window shows).
+#[gpui::test]
+fn ui_key_types_into_the_plugin_managers_search(cx: &mut TestAppContext) {
+    let s = setup(cx, mixer_fake());
+    ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "window.plugin_manager"}),
+    ));
+    let handle = cx
+        .update(|cx| AppState::global(cx).read(cx).plugin_manager_window)
+        .expect("the window");
+    let number = control::number(handle);
+    let tree = ok(call(&s, cx, "ui.tree", json!({"window": number})));
+    // At its least width (760) the toolbar fits: the field is in view.
+    let field = node(&tree, "textfield", "Search");
+    let right = field["frame"]["x"].as_f64().unwrap() + field["frame"]["width"].as_f64().unwrap();
+    assert!(right <= 760., "the search field is cut off: {field}");
+    let search = field["id"].as_str().unwrap().to_owned();
+    let typed = ok(call(
+        &s,
+        cx,
+        "ui.key",
+        json!({"window": number, "element": search, "text": "gain"}),
+    ));
+    assert_eq!(typed["window"], number);
+    cx.run_until_parked();
+    let text = cx.update(|cx| handle.read(cx).unwrap().model().search.clone());
+    assert_eq!(text, "gain");
+    let tree = ok(call(&s, cx, "ui.tree", json!({"window": number})));
+    assert_eq!(node(&tree, "textfield", "Search")["value"], "gain");
+}
+
+/// `window.plugin_manager` needs no document; a second call fronts the
+/// one window; `state.get windows` lists it as `plugin_manager`; `ui.tree`
+/// and `ui.click` reach its controls; the transport bar's button opens it.
+#[gpui::test]
+fn window_plugin_manager_opens_one_window_listed_as_plugin_manager(cx: &mut TestAppContext) {
+    let s = setup(cx, mixer_fake());
+    let ran = ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "window.plugin_manager"}),
+    ));
+    assert_eq!(ran["command"], "window.plugin_manager");
+    assert_eq!(ran["doc"], Value::Null, "app-wide: no document");
+    assert_eq!(ran["window"], Value::Null);
+    ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "window.plugin_manager"}),
+    ));
+    let managers = |s: &Setup, cx: &mut TestAppContext| -> Vec<Value> {
+        let w = ok(call(s, cx, "state.get", json!({"target": "windows"})));
+        w["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|w| w["kind"] == "plugin_manager")
+            .cloned()
+            .collect()
+    };
+    let listed = managers(&s, cx);
+    assert_eq!(listed.len(), 1, "one Plugin Manager: {listed:?}");
+    assert_eq!(listed[0]["title"], "Plugin Manager");
+    assert_eq!(listed[0]["doc"], Value::Null);
+    assert!(listed[0]["frame"]["width"].as_f64().unwrap() >= 760.);
+    let number = listed[0]["number"].as_i64().unwrap();
+    let handle = cx
+        .update(|cx| AppState::global(cx).read(cx).plugin_manager_window)
+        .expect("the window");
+    assert_eq!(control::number(handle), number);
+
+    // Its controls, through the tree and a click.
+    let tree = ok(call(&s, cx, "ui.tree", json!({"window": number})));
+    assert_eq!(tree["window"], number);
+    node(&tree, "button", "Rescan All");
+    let clap = node(&tree, "radio", "CLAP")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let clicked = ok(call(
+        &s,
+        cx,
+        "ui.click",
+        json!({"window": number, "element": clap}),
+    ));
+    assert_eq!(clicked["window"], number);
+    let format = cx.update(|cx| handle.read(cx).unwrap().model().format);
+    assert_eq!(format, vizdaw_app::plugin_manager::FormatFilter::Clap);
+
+    // The transport bar's Plugin Manager button opens it too.
+    cx.update(|cx| handle.update(cx, |_, w, _| w.remove_window()).unwrap());
+    cx.run_until_parked();
+    assert!(managers(&s, cx).is_empty());
+    ok(call(&s, cx, "app.new_demo", json!({})));
+    let doc_window = cx.update(|cx| {
+        AppState::global(cx)
+            .read(cx)
+            .document_windows()
+            .next()
+            .and_then(|w| w.document_window())
+            .expect("a document window")
+    });
+    cx.update(|cx| {
+        doc_window
+            .update(cx, |v, window, cx| {
+                v.press_command("window.plugin_manager", window, cx)
+            })
+            .unwrap()
+    });
+    cx.run_until_parked();
+    assert_eq!(managers(&s, cx).len(), 1, "the bar's button opened it");
 }

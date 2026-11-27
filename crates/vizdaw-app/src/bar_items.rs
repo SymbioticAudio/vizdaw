@@ -224,6 +224,10 @@ pub fn command_enabled(id: &str, doc: Option<&DocumentModel>) -> bool {
     let Some(d) = doc else {
         return APP_WIDE.contains(&id);
     };
+    // Needs no document, so it can always run.
+    if id == "window.plugin_manager" {
+        return true;
+    }
     if commands::FILE_COMMANDS.contains(&id) {
         return commands::file_enabled(id, Some(d));
     }

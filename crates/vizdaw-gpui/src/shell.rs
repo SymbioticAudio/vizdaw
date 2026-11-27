@@ -104,6 +104,8 @@ pub struct DocumentWindow {
     pub(crate) transport_fields: TransportFields,
     /// The record popover's punch fields (this window's host).
     pub(crate) record_popover: RecordPopover,
+    /// The right pane's Plug-ins view's search.
+    pub(crate) plugins_pane: crate::plugins_pane::PluginsPane,
     /// Rewind and Fast Forward held, and their held keys.
     shuttle: Shuttle,
     /// Winds a held button every `Shuttle::TICK_EVERY` until it ends.
@@ -390,7 +392,7 @@ impl DocumentWindow {
                     let host = match kind {
                         WindowKind::Document => Some(PopoverHost::Document),
                         WindowKind::Mixer => Some(PopoverHost::MixerWindow),
-                        WindowKind::Plugin | WindowKind::Other => None,
+                        WindowKind::Plugin | WindowKind::Other | WindowKind::PluginManager => None,
                     };
                     if host.is_some_and(|h| d.record().shows_popover_in(h)) {
                         d.set_record_popover(false);
@@ -404,15 +406,17 @@ impl DocumentWindow {
                     WindowKind::Document => s.close_document(doc),
                     // Only the window goes; its placement released its
                     // own drags as it went.
-                    WindowKind::Mixer | WindowKind::Plugin | WindowKind::Other => {
-                        s.remove_window(token)
-                    }
+                    WindowKind::Mixer
+                    | WindowKind::Plugin
+                    | WindowKind::Other
+                    | WindowKind::PluginManager => s.remove_window(token),
                 }
                 cx.notify();
             });
         }));
         let list_editor = ListEditor::new(cx);
         let record_popover = RecordPopover::new(window, cx);
+        let plugins_pane = crate::plugins_pane::PluginsPane::new(window, cx);
         let views_seen = app.read(cx).store.document(doc).map(seen_views);
         let weak = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
@@ -446,6 +450,7 @@ impl DocumentWindow {
             _status_timer: None,
             transport_fields: TransportFields::new(cx),
             record_popover,
+            plugins_pane,
             shuttle: Shuttle::new(),
             _hold: None,
             more_open: false,
@@ -1123,7 +1128,8 @@ impl DocumentWindow {
         self.with_model(cx, |d| d.set_status(Some(text.to_owned())));
     }
 
-    /// Escape: closes a mixer strip's open input picker in this window.
+    /// Escape: closes a mixer strip's open input picker, instrument menu
+    /// or plug-in browser in this window.
     fn close_strip_input_pickers(&mut self, cx: &mut Context<Self>) -> bool {
         let views: Vec<_> = [
             &self.mix_view,
@@ -1137,7 +1143,7 @@ impl DocumentWindow {
         .collect();
         let mut closed = false;
         for v in views {
-            closed |= v.update(cx, |v, cx| v.close_input_picker(cx));
+            closed |= v.update(cx, |v, cx| v.escape(cx));
         }
         closed
     }
@@ -1813,6 +1819,8 @@ impl DocumentWindow {
                     window,
                     cx,
                 )
+            } else if view == PaneView::Plugins {
+                crate::plugins_pane::render(self, &mut scope.container(), window, cx)
             } else {
                 panes::content(view, host, &mut scope.container(), cx)
             };
@@ -1827,6 +1835,13 @@ impl DocumentWindow {
                 window,
                 cx,
             ));
+        }
+        // The Plug-ins view's search went with its view: the keyboard
+        // leaves it, so the transport keys work again.
+        let plugins_shown = frames.of(PaneSide::Right).is_some()
+            && host.setup.pane(PaneSide::Right).view == PaneView::Plugins;
+        if !plugins_shown && self.plugins_pane.focused(window, cx) {
+            window.blur(cx);
         }
         let bottom = {
             // A hidden pane, or an editor under another view, stays

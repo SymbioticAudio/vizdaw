@@ -45,6 +45,7 @@ actions!(
         CloseWindow,
         Quit,
         OpenSettings,
+        OpenPluginManager,
         PlayStop,
         StopAndReturn,
     ]
@@ -164,6 +165,8 @@ pub const WINDOW_CONTEXT: &str = "DocumentWindow";
 pub const PLUGIN_WINDOW_CONTEXT: &str = "PluginWindow";
 /// The Settings window's key context: no document key acts in it.
 pub const SETTINGS_WINDOW_CONTEXT: &str = "SettingsWindow";
+/// The Plugin Manager window's key context: no document key acts in it.
+pub const PLUGIN_MANAGER_CONTEXT: &str = "PluginManagerWindow";
 /// The editor commands (`commands::EDITOR_COMMANDS`) the GPUI app routes
 /// to its menus, keys and control channel: the grid, the Piano Roll, the
 /// List, closing the detail and Insert Event (the List's).
@@ -329,6 +332,9 @@ const APP_QUIT: &str = "app.quit";
 /// VizDAW › Settings… (menu-local: Swift's was the app menu's built-in
 /// item, never a registry command).
 const APP_SETTINGS: &str = "app.settings";
+/// Window › Plugin Manager: app-wide, it needs no document
+/// ([`OpenPluginManager`]).
+const WINDOW_PLUGIN_MANAGER: &str = "window.plugin_manager";
 const FILE_NEW: &str = "file.new";
 const FILE_CREATE_DEMO: &str = "file.create_demo";
 const FILE_OPEN: &str = "file.open";
@@ -373,6 +379,7 @@ pub fn action_for(id: &str) -> Box<dyn Action> {
     match id {
         APP_QUIT => Box::new(Quit),
         APP_SETTINGS => Box::new(OpenSettings),
+        WINDOW_PLUGIN_MANAGER => Box::new(OpenPluginManager),
         FILE_NEW => Box::new(NewDocument),
         FILE_CREATE_DEMO => Box::new(NewDemo),
         FILE_OPEN => Box::new(OpenDocument),
@@ -703,9 +710,16 @@ pub fn menu_model(front: Option<&DocumentModel>, keymap: &Keymap) -> MenuModel {
                 ],
             ),
             menu("Mixer", mixer_items(front)),
-            // The Plug-in Manager, Media Pool and Song Notes come with
-            // their windows; macOS adds the window list.
-            menu("Window", vec![cmd("window.mixer")]),
+            // The Media Pool and Song Notes come with their windows;
+            // macOS adds the window list. The Plugin Manager needs no
+            // document (`S/AppCommands.swift:161-162`).
+            menu(
+                "Window",
+                vec![
+                    cmd("window.mixer"),
+                    slice1(WINDOW_PLUGIN_MANAGER, "Plugin Manager", None, keymap),
+                ],
+            ),
         ],
     }
 }
@@ -925,8 +939,12 @@ pub fn bindings(keymap: &Keymap) -> Vec<KeyBinding> {
     ];
     fixed_keys(&mut keys, keymap, FILE_NEW, None, || NewDocument);
     fixed_keys(&mut keys, keymap, FILE_OPEN, None, || OpenDocument);
+    fixed_keys(&mut keys, keymap, WINDOW_PLUGIN_MANAGER, None, || {
+        OpenPluginManager
+    });
     for ctx in [
         SETTINGS_WINDOW_CONTEXT,
+        PLUGIN_MANAGER_CONTEXT,
         WINDOW_CONTEXT,
         PLUGIN_WINDOW_CONTEXT,
     ] {

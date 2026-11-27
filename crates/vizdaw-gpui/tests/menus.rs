@@ -143,7 +143,10 @@ fn the_menu_model_follows_the_swift_order() {
         );
         assert!(enabled);
     }
-    assert_eq!(ids(10), [Some("window.mixer")]);
+    assert_eq!(
+        ids(10),
+        [Some("window.mixer"), Some("window.plugin_manager")]
+    );
     // Swift `AppCommands.swift:354-365`.
     assert_eq!(
         ids(7),

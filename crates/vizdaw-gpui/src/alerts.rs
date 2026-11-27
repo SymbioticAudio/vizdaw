@@ -589,3 +589,31 @@ fn ask_in(w: AnyWindowHandle, ask: &Ask, cx: &mut App) -> Option<oneshot::Receiv
     })
     .ok()
 }
+
+/// Moves the plug-in catalog's alerts (Swift `PluginAlerts.watch`,
+/// `S/VizDAWApp.swift:547-570`) to the store: each shows with OK on the
+/// front window, in order. Under the control channel each goes to the
+/// channel's notes instead, as Swift's `ControlChannel.note` did.
+pub fn post_catalog_alerts(cx: &mut App) {
+    let app = AppState::global(cx);
+    let items: Vec<AlertItem> = app.update(cx, |s, _| {
+        std::iter::from_fn(|| s.app_plugins.next_alert())
+            .map(|(title, message)| AlertItem::new(title, message))
+            .collect()
+    });
+    if items.is_empty() {
+        return;
+    }
+    if crate::control::channel_on(cx) {
+        for item in items {
+            crate::control::note(item, cx);
+        }
+        return;
+    }
+    app.update(cx, |s, cx| {
+        for item in items {
+            s.store.post_alert(item);
+        }
+        cx.notify();
+    });
+}

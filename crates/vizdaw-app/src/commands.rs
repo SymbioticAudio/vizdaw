@@ -60,7 +60,8 @@ pub const VIEW_COMMANDS: &[&str] = &[
 /// The registry IDs of the mixer's commands `run` handles: the Mixer
 /// window (the UI opens it, see [`Ran::open_mixer_window`]), the channel's
 /// automation commands, the Automation menu's modes, New Bus, the strip
-/// edits, the strip colour, the group and VCA edits (registry
+/// edits, the plug-in edits and New Plug-in Instrument Track, the strip
+/// colour, the group and VCA edits (registry
 /// `GROUP_IDS`) and a MIDI strip's mix. (Make Mine is Co-Producer's: not
 /// yet.)
 pub const MIXER_COMMANDS: &[&str] = &[
@@ -80,6 +81,13 @@ pub const MIXER_COMMANDS: &[&str] = &[
     "mixer.add_send",
     "mixer.set_send",
     "mixer.remove_send",
+    "mixer.add_insert",
+    "mixer.remove_insert",
+    "mixer.move_insert",
+    "mixer.set_bypass",
+    "mixer.set_eq",
+    "mixer.set_param",
+    "track.new_plugin_instrument",
     "mixer.remove_bus",
     "mixer.set_colour",
     "mixer.new_group",

@@ -3,6 +3,7 @@
 //! placement that shows it (the Mix view, the bottom pane, the Mixer
 //! window).
 
+mod browser;
 pub mod commands;
 pub mod gesture;
 mod groups;
@@ -21,6 +22,10 @@ use std::time::Instant;
 
 use vizdaw_ffi::VizError;
 
+pub use browser::{
+    ADD_PLUGIN_FAILED, BrowserTarget, INSTRUMENT_FAILED, InstrumentChoice, InstrumentMaker,
+    InstrumentMenu, InstrumentMenuItem, LOAD_EQ_FAILED, NEW_INSTRUMENT_FAILED,
+};
 pub use groups::{GROUP_FAILED, GroupLabels, UNGROUP_FAILED, strips_text};
 pub use math::{AutomationModes, MixerMath, StripEntry};
 pub use meters::{MeterLevel, Meters};

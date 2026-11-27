@@ -51,6 +51,7 @@ Media Pool. Their checks come with their slices.
 | M23 | Settings › Surfaces: add a real MCU-compatible unit, move fader 1 and press Mute 1, then unplug it | The strip follows, the LEDs light, and unplugging reads "Disconnected" within a second | open |
 | M24 | Plug in a host-integration keyboard and choose it in Add Surface | Both ports fill with its "DAW" port; its transport, knob and tempo work | open |
 | M25 | Learn a knob to a fader from the mixer's menu, and a pad to Undo from Settings › Keys | The banner shows, then goes; the knob rides the fader; the pad undoes; the MIDI Learn Maps sheet lists the knob, changes its mode, and Undo reverts it | open |
+| M26 | Launch with AU, CLAP and VST3 plug-ins installed, then open an insert slot's browser and Window › Plugin Manager | The launch scan finds them (a format shows as AU, CLAP or VST3); the browser lists them and adds one; the Manager lists every plug-in with its status; Reveal in Finder selects the plug-in file | open |
 
 ## Linux (your desktop)
 
@@ -87,3 +88,4 @@ Media Pool. Their checks come with their slices.
 | L29 | View › Customize Transport Bar…: drag an item onto the bar, one along it, one off, then Done | The bar changes as dragged; Cancel instead leaves it as it was | open |
 | L30 | Settings › Surfaces on Linux | The empty lines draw; Add Surface… shows "No MIDI sources" and "No MIDI destinations", and Add is disabled | open |
 | L31 | The MIDI Learn banner and Maps sheet on Linux | They draw with the system font; Esc cancels | open |
+| L32 | The plug-in browser and Plugin Manager on Linux (XWayland) | They draw with the system font and open in a free window; the format filter offers All, CLAP and VST3; Show in Files opens the plug-in's folder | open |
