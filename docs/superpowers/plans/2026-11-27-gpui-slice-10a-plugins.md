@@ -231,3 +231,19 @@
 4. **The 4 Hz poll runs only while a scan runs or the Manager is open.** Swift polled at 4 Hz always; nothing else changes the catalog. Cost if wrong: a late row refresh after a change from outside the app.
 5. **The popover is a GPUI overlay anchored like `record_popover.rs`**, with Enter picking a single match (new, harmless).
 6. **"Remove from VCA" on the track header and the VCA offset display stay in the backlog**; this slice is plug-ins only.
+
+## Outcome (2026-11-27)
+
+All nine tasks landed on `next`, each with a clean task review. The final whole-branch review found no Critical or Important issues; its four minors and every task review's minors are in the backlog row "GPUI slice 10a: review leftovers".
+
+### Rulings
+
+1. `MixerModel::open_browser` takes `&AppPlugins` as a third argument, so the browser's rows come from the caller when it opens (Task 3).
+2. Picking a destination's loaded plug-in again sends nothing (Swift sent it), as Review Focus 5 asks for the instrument slot (Task 3).
+3. A pick from the instrument menu opens the new slot's plug-in window. A browser pick for an insert, an EQ, a new plug-in instrument track or a destination opens none, as in Swift (Tasks 4–5).
+4. The e2e found three app bugs, each fixed with a test that failed first (Task 8):
+   - every slot verb refused a song's first slot, id 0;
+   - `state.get mixer` slots now report `status` and `reason`;
+   - `ui.key` reaches the Plugin Manager, and its toolbar keeps Search inside the window at 760 wide.
+5. Ruling 4 above (poll only while needed) stands. Crash recovery's Disable also changes the catalog; the stale Manager rows that causes are logged in the backlog.
+6. MCP and Co-Producer plug-in paths stay out of scope. MCP's `plugin_params` still refuses slot 0 (backlog).
