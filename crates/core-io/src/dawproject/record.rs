@@ -698,7 +698,8 @@ pub struct PTrack {
     /// The notes it plays.
     #[serde(deserialize_with = "counted")]
     pub notes_played: Vec<PNote>,
-    /// Its other MIDI events: tick, "<kind> <channel> <number> <value>".
+    /// Its other MIDI events: tick, "<kind> <channel> <number> <value>";
+    /// one tick's by file lane, then as they play.
     #[serde(deserialize_with = "counted")]
     pub midi: Vec<(i64, String)>,
     /// Its regions.
@@ -867,6 +868,45 @@ fn midi_text(r: &ResolvedEvent) -> Option<String> {
         EventBody::Program { program, bank } => program_text(ch, *program, *bank),
         _ => return None,
     })
+}
+
+/// The file lane a [`PTrack::midi`] text is written in: its kind (in the
+/// export's lane order: controller, program, pitch bend, channel pressure,
+/// poly pressure), channel and number. A poly pressure on a sounding note
+/// goes in that note's expression instead, but one key's pressure at one
+/// tick is all on a note or all off one, so it keeps its place.
+fn lane_of(text: &str) -> (u8, u32, u32) {
+    let mut parts = text.split(' ');
+    let kind = match parts.next() {
+        Some("cc") => 0,
+        Some("program") => 1,
+        Some("pitch_bend") => 2,
+        Some("channel_pressure") => 3,
+        _ => 4,
+    };
+    let mut number = || parts.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+    let channel = number();
+    // A program's number is its lane's, not a controller's.
+    let index = if kind == 1 { 0 } else { number() };
+    (kind, channel, index)
+}
+
+/// `midi` and its identities `at` (parallel) in the order a DAWproject file
+/// gives them back: by tick, then by file lane ([`lane_of`]), then as they
+/// play. The file keeps each lane apart, so the order of events of
+/// different lanes at one tick does not survive it; without this the
+/// projection would carry it (as event IDs order a tick) and not be ID-free.
+fn by_lane(midi: &mut Vec<(i64, String)>, at: &mut Vec<EventAt>) {
+    if midi.len() != at.len() {
+        return;
+    }
+    let mut rows: Vec<((i64, String), EventAt)> = midi.drain(..).zip(at.drain(..)).collect();
+    // Stable: one lane's events at one tick keep their order.
+    rows.sort_by_cached_key(|(m, _)| (m.0, lane_of(&m.1)));
+    for (m, a) in rows {
+        midi.push(m);
+        at.push(a);
+    }
 }
 
 /// The projection of a layout.
@@ -1120,6 +1160,7 @@ pub(super) fn project_with_identity(
             t.automation.push((name, points));
             ids.automation.push(at);
         }
+        by_lane(&mut t.midi, &mut ids.midi);
         tracks.push(t);
         track_ids.push(ids);
     }
