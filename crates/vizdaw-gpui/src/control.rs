@@ -602,8 +602,12 @@ fn answer(command: &Command, cx: &mut App) -> Result<Value, ControlError> {
             focus,
             strokes,
         } => {
+            let focus = focus.as_ref().map(|f| f.id.as_str());
+            if let Some((handle, registry)) = manager_window(window.as_ref(), cx)? {
+                return manager_keys(handle, &registry, focus, strokes, cx);
+            }
             let entry = target(window.as_ref(), cx)?;
-            key_strokes(&entry, focus.as_ref().map(|f| f.id.as_str()), strokes, cx)
+            key_strokes(&entry, focus, strokes, cx)
         }
         Command::UiScreenshot {
             window,
@@ -1444,10 +1448,33 @@ fn key_strokes(
                 Err(e) => return Err(e),
             }
         }
-        deliver(entry, k, cx)?;
+        deliver(entry.handle, k, cx)?;
         sent += 2;
     }
     Ok(json!({ "window": number(entry.handle), "events": sent, "x": 0.0, "y": 0.0 }))
+}
+
+/// `ui.key` in the Plugin Manager, which is no document's: each stroke
+/// goes to the window through GPUI's own dispatch (its ⌘W, the focused
+/// search field), after a click on `focus` when given.
+fn manager_keys(
+    handle: AnyWindowHandle,
+    registry: &SharedRegistry,
+    focus: Option<&str>,
+    strokes: &[KeyStroke],
+    cx: &mut App,
+) -> Result<Value, ControlError> {
+    if let Some(id) = focus {
+        let mods = keys::Modifiers::default();
+        click(handle, registry, id, Button::Left, 1, mods, cx)?;
+    }
+    let mut sent: u32 = 0;
+    for k in strokes {
+        fresh_frame(handle, cx)?;
+        deliver(handle, k, cx)?;
+        sent += 2;
+    }
+    Ok(json!({ "window": number(handle), "events": sent, "x": 0.0, "y": 0.0 }))
 }
 
 /// Whether `id` is Close in a plug-in or Built-in Synth window, which
@@ -1540,9 +1567,8 @@ fn bound_command(entry: &WindowEntry, k: &KeyStroke, cx: &App) -> Option<&'stati
 /// dispatch (bindings, then the focused text input), then its key up.
 /// One update per stroke, so what a stroke changed (a field taking the
 /// keyboard) is drawn before the next.
-fn deliver(entry: &WindowEntry, k: &KeyStroke, cx: &mut App) -> Result<(), ControlError> {
+fn deliver(any: AnyWindowHandle, k: &KeyStroke, cx: &mut App) -> Result<(), ControlError> {
     let keystroke = gpui_keystroke(k);
-    let any: AnyWindowHandle = entry.handle;
     any.update(cx, |_, window, cx| {
         window.dispatch_keystroke(keystroke.clone(), cx);
         window.dispatch_event(PlatformInput::KeyUp(KeyUpEvent { keystroke }), cx);
@@ -1658,16 +1684,27 @@ fn ui_window(
     window: Option<&WindowRef>,
     cx: &App,
 ) -> Result<(AnyWindowHandle, SharedRegistry), ControlError> {
+    if let Some(found) = manager_window(window, cx)? {
+        return Ok(found);
+    }
+    let entry = target(window, cx)?;
+    let registry = entry.registry(cx).ok_or_else(gone)?;
+    Ok((entry.handle, registry))
+}
+
+/// The Plugin Manager and its registry when `window` is its number.
+fn manager_window(
+    window: Option<&WindowRef>,
+    cx: &App,
+) -> Result<Option<(AnyWindowHandle, SharedRegistry)>, ControlError> {
     if let Some(WindowRef::Number(n)) = window
         && let Some(h) = AppState::global(cx).read(cx).plugin_manager_window
         && number(h) == *n
     {
         let registry = h.read(cx).map_err(|_| gone())?.registry().clone();
-        return Ok((h.into(), registry));
+        return Ok(Some((h.into(), registry)));
     }
-    let entry = target(window, cx)?;
-    let registry = entry.registry(cx).ok_or_else(gone)?;
-    Ok((entry.handle, registry))
+    Ok(None)
 }
 
 /// A window's number, as `state.get windows` lists it.

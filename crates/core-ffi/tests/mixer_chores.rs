@@ -1695,6 +1695,46 @@ mod task4 {
         t.s.close().unwrap();
     }
 
+    /// A song's first plug-in is slot 0 (Kick's instrument here): the
+    /// slot verbs take it (slice 10a e2e).
+    #[test]
+    fn slot_zero_is_a_slot() {
+        if !in_temp_home("task4::slot_zero_is_a_slot") {
+            return;
+        }
+        let _g = serial();
+        let t = song();
+        let d = doc(&t.s);
+        assert!(
+            t.s.plugin_slots().unwrap().iter().any(|r| r.id == 0),
+            "the first plug-in is slot 0"
+        );
+        let fake = Fake {
+            slot: 0,
+            running: true,
+        };
+        for (verb, args) in [
+            (
+                "mixer.set_bypass",
+                vec![id("slot", 0), flag("bypass", true)],
+            ),
+            (
+                "mixer.set_param",
+                vec![id("slot", 0), int("param", 0), text("value", "0.5")],
+            ),
+        ] {
+            if let Err(e) = built(&d, verb, args, &fake) {
+                panic!("{verb}: {e:?}");
+            }
+        }
+        // Slot 0 is Kick's instrument, not an insert: the core's own words.
+        assert_eq!(
+            message(built(&d, "mixer.remove_insert", vec![id("slot", 0)], &fake)),
+            "Slot 0 is not an insert."
+        );
+        t.s.close().unwrap();
+    }
+
     #[test]
     fn parameters_need_a_running_plugin() {
         if !in_temp_home("task4::parameters_need_a_running_plugin") {

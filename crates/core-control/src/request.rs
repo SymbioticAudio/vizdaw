@@ -753,7 +753,8 @@ pub fn validate(raw: &RawRequest) -> Result<Command, ControlError> {
         "co_producer.params" => {
             p.only(&["slot", "window"])?;
             Ok(Command::CoProducerParams {
-                slot: p.int("slot", 1, registry::MAX_EXACT_ID)? as u64,
+                // A song's first plug-in is slot 0.
+                slot: p.int("slot", 0, registry::MAX_EXACT_ID)? as u64,
                 window: p.window()?,
             })
         }

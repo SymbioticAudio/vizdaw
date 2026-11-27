@@ -641,7 +641,9 @@ fn slot_of(
     id: &str,
     args: &[(String, ArgValue)],
 ) -> Result<(PluginInstanceId, SlotOwner), VizError> {
-    let n = need_id(id, args, "slot")?;
+    // Not `need_id`: a song's first plug-in is slot 0.
+    let n = opt_int(id, args, "slot")?.ok_or_else(|| bad(format!("{id}: give `slot`")))?;
+    let n = u64::try_from(n).map_err(|_| bad(format!("{id}: `slot` is out of range")))?;
     let slot = PluginInstanceId(n);
     let owner = doc
         .find_slot(slot)

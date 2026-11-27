@@ -1072,7 +1072,13 @@ fn state_get_mixer_spells_slots_sends_and_colours() {
         has_editor: false,
     };
     m.strips[0].eq = Some(slot(9, "Tone", true));
-    m.strips[0].inserts = vec![slot(10, "Gain", false)];
+    let mut off = slot(11, "Off", false);
+    off.status = SlotStatus::Placeholder {
+        reason: "Disabled in Plugin Manager".into(),
+    };
+    let mut loading = slot(12, "Slow", false);
+    loading.status = SlotStatus::Loading;
+    m.strips[0].inserts = vec![slot(10, "Gain", false), off, loading];
     m.strips[0].sends = vec![SendRow {
         target: 7,
         level_db: -6.0,
@@ -1090,11 +1096,21 @@ fn state_get_mixer_spells_slots_sends_and_colours() {
     // Plan 8d Ruling 5: each slot names its plug-in by reference text.
     assert_eq!(
         s["eq"],
-        json!({"slot": 9, "name": "Tone", "plugin": "clap:x", "bypass": true})
+        json!({"slot": 9, "name": "Tone", "plugin": "clap:x", "bypass": true,
+            "status": "live", "reason": null})
     );
+    // Slice 10a: each slot says whether it runs, loads or is a
+    // placeholder, and why.
     assert_eq!(
         s["inserts"],
-        json!([{"slot": 10, "name": "Gain", "plugin": "clap:x", "bypass": false}])
+        json!([
+            {"slot": 10, "name": "Gain", "plugin": "clap:x", "bypass": false,
+                "status": "live", "reason": null},
+            {"slot": 11, "name": "Off", "plugin": "clap:x", "bypass": false,
+                "status": "placeholder", "reason": "Disabled in Plugin Manager"},
+            {"slot": 12, "name": "Slow", "plugin": "clap:x", "bypass": false,
+                "status": "loading", "reason": null},
+        ])
     );
     assert_eq!(
         s["sends"],

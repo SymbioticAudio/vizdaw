@@ -1682,10 +1682,21 @@ fn audio_editor_json(doc: &str, e: &AudioEditorStateRow) -> Value {
 }
 
 /// A slot as `state.get mixer` spells it; `plugin` is its reference
-/// text (plan 8d Ruling 5).
+/// text (plan 8d Ruling 5); `status` is `loading`, `live` or
+/// `placeholder`, and `reason` a placeholder's reason, as the slot shows
+/// it (slice 10a).
 fn slot_json(s: &crate::snapshot::SlotRow) -> Value {
+    use crate::snapshot::SlotStatus;
     let plugin = crate::mixer_chores::plugin_ref_text(&(&s.plugin).into());
-    json!({ "slot": s.id, "name": s.plugin.name, "plugin": plugin, "bypass": s.bypass })
+    let (status, reason) = match &s.status {
+        SlotStatus::Loading => ("loading", None),
+        SlotStatus::Live => ("live", None),
+        SlotStatus::Placeholder { reason } => ("placeholder", Some(reason.as_str())),
+    };
+    json!({
+        "slot": s.id, "name": s.plugin.name, "plugin": plugin, "bypass": s.bypass,
+        "status": status, "reason": reason,
+    })
 }
 
 /// A swatch as `state.get mixer` spells it (the registry's colour names).

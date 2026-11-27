@@ -3119,6 +3119,42 @@ fn add_insert_over_the_channel_runs_the_core_mixer_edit(cx: &mut TestAppContext)
     assert!(lane_names(&doc).contains(&name), "{doc}");
 }
 
+/// `ui.key` reaches the Plugin Manager by its number: typed into its
+/// search field (focused by `element`), the table filters (slice 10a e2e:
+/// a real scan lists more rows than the window shows).
+#[gpui::test]
+fn ui_key_types_into_the_plugin_managers_search(cx: &mut TestAppContext) {
+    let s = setup(cx, mixer_fake());
+    ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "window.plugin_manager"}),
+    ));
+    let handle = cx
+        .update(|cx| AppState::global(cx).read(cx).plugin_manager_window)
+        .expect("the window");
+    let number = control::number(handle);
+    let tree = ok(call(&s, cx, "ui.tree", json!({"window": number})));
+    // At its least width (760) the toolbar fits: the field is in view.
+    let field = node(&tree, "textfield", "Search");
+    let right = field["frame"]["x"].as_f64().unwrap() + field["frame"]["width"].as_f64().unwrap();
+    assert!(right <= 760., "the search field is cut off: {field}");
+    let search = field["id"].as_str().unwrap().to_owned();
+    let typed = ok(call(
+        &s,
+        cx,
+        "ui.key",
+        json!({"window": number, "element": search, "text": "gain"}),
+    ));
+    assert_eq!(typed["window"], number);
+    cx.run_until_parked();
+    let text = cx.update(|cx| handle.read(cx).unwrap().model().search.clone());
+    assert_eq!(text, "gain");
+    let tree = ok(call(&s, cx, "ui.tree", json!({"window": number})));
+    assert_eq!(node(&tree, "textfield", "Search")["value"], "gain");
+}
+
 /// `window.plugin_manager` needs no document; a second call fronts the
 /// one window; `state.get windows` lists it as `plugin_manager`; `ui.tree`
 /// and `ui.click` reach its controls; the transport bar's button opens it.

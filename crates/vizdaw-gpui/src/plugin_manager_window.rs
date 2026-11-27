@@ -39,7 +39,7 @@ pub const ON_WIDTH: f32 = 30.;
 pub const FORMAT_WIDTH: f32 = 50.;
 pub const VERSION_WIDTH: f32 = 70.;
 pub const TYPE_WIDTH: f32 = 80.;
-/// The search field's width.
+/// The search field's width, at most (it narrows to fit the window).
 const SEARCH_WIDTH: f32 = 180.;
 
 /// The Plugin Manager's view.
@@ -66,7 +66,7 @@ impl PluginManagerWindow {
             });
         })
         .detach();
-        let search = cx.new(|cx| TextInput::new(SEARCH, cx));
+        let search = cx.new(|cx| TextInput::new(SEARCH, cx).compact());
         let app = AppState::global(cx);
         let subscriptions = vec![
             // The poll's news (scan progress, new rows) redraws the table.
@@ -205,6 +205,8 @@ impl PluginManagerWindow {
                     })),
             );
         }
+        // Toolbar-sized text, so the segments, the four buttons and the
+        // search fit the least width (760).
         let mut bar = div()
             .flex()
             .flex_row()
@@ -212,6 +214,7 @@ impl PluginManagerWindow {
             .items_center()
             .gap_2()
             .p_2()
+            .text_size(px(12.))
             .bg(rgb(t.surface_panel))
             .border_b_1()
             .border_color(rgb(t.surface_separator))
@@ -236,10 +239,12 @@ impl PluginManagerWindow {
         let text = self.search.read(cx).text().to_owned();
         let focused = self.search.focus_handle(cx).is_focused(window);
         bar.child(
+            // Up to its width, and never past the window's edge.
             div()
                 .relative()
-                .flex_none()
-                .w(px(SEARCH_WIDTH))
+                .flex_1()
+                .min_w_0()
+                .max_w(px(SEARCH_WIDTH))
                 .child(self.search.clone())
                 .child(scope.control_with("textfield", SEARCH, true, Some(&text), focused)),
         )

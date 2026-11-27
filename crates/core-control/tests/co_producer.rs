@@ -2413,7 +2413,8 @@ fn mixer_commands_refuse_hostile_input() {
     let long = "1".repeat(70_000);
     let big = json!(1u64 << 53);
     let edits = mixer_edits();
-    // A missing, zero, negative, text or too-large target.
+    // A missing, negative, text or too-large target, or strip zero (a
+    // song's first plug-in is slot 0).
     for (id, base) in &edits {
         let target = if base.get("strip").is_some() {
             "strip"
@@ -2421,7 +2422,10 @@ fn mixer_commands_refuse_hostile_input() {
             "slot"
         };
         let mut cases = vec![with(base, target, Value::Null)];
-        for bad in [json!(0), json!(-1), json!("2"), big.clone(), json!(2.5)] {
+        if target == "strip" {
+            cases.push(with(base, target, json!(0)));
+        }
+        for bad in [json!(-1), json!("2"), big.clone(), json!(2.5)] {
             cases.push(with(base, target, bad));
         }
         cases.push(with(base, "extra", json!(1)));
@@ -2691,6 +2695,34 @@ fn plugin_calls_only_on_the_co_producer_socket() {
     }
 }
 
+/// A song's first plug-in is slot 0 (`Counters::plugin` starts at 0):
+/// every slot verb takes it (slice 10a e2e).
+#[test]
+fn slot_zero_is_a_slot() {
+    for (cmd, params) in [
+        ("co_producer.params", json!({"slot": 0})),
+        (
+            "command.run",
+            json!({"id": "mixer.remove_insert", "params": {"slot": 0}}),
+        ),
+        (
+            "command.run",
+            json!({"id": "mixer.move_insert", "params": {"slot": 0, "index": 1}}),
+        ),
+        (
+            "command.run",
+            json!({"id": "mixer.set_bypass", "params": {"slot": 0, "bypass": true}}),
+        ),
+        (
+            "command.run",
+            json!({"id": "mixer.set_param", "params": {"slot": 0, "param": 0, "value": "1"}}),
+        ),
+    ] {
+        validate(&req(cmd, params.clone()))
+            .unwrap_or_else(|e| panic!("{cmd} {params}: {}", e.message));
+    }
+}
+
 #[test]
 fn plugin_calls_refuse_hostile_input() {
     for (cmd, params) in [
@@ -2702,7 +2734,6 @@ fn plugin_calls_refuse_hostile_input() {
         ("co_producer.plugins", json!({"extra": 1})),
         ("co_producer.plugins", json!({"window": 1})),
         ("co_producer.params", json!({})),
-        ("co_producer.params", json!({"slot": 0})),
         ("co_producer.params", json!({"slot": -1})),
         ("co_producer.params", json!({"slot": "a"})),
         ("co_producer.params", json!({"slot": "4"})),
