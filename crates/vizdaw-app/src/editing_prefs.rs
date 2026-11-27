@@ -96,6 +96,25 @@ impl ScaleKind {
         }
     }
 
+    /// Bit `i`: pitch class `root + i`, the core's mask convention (Swift
+    /// `Scale.mask`, `PitchMath.swift:20-30`).
+    pub fn mask(self) -> u16 {
+        match self {
+            ScaleKind::Major => 0b1010_1011_0101,
+            ScaleKind::NaturalMinor => 0b0101_1010_1101,
+            ScaleKind::HarmonicMinor => 0b1001_1010_1101,
+            ScaleKind::Dorian => 0b0110_1010_1101,
+            ScaleKind::Mixolydian => 0b0110_1011_0101,
+            ScaleKind::MajorPentatonic => 0b0010_1001_0101,
+            ScaleKind::MinorPentatonic => 0b0100_1010_1001,
+        }
+    }
+
+    /// The named scale with this mask, if any (Swift `Scale.of(mask:)`).
+    pub fn of_mask(mask: u16) -> Option<ScaleKind> {
+        Self::ALL.into_iter().find(|s| s.mask() == mask)
+    }
+
     /// Swift's raw value (the JSON name).
     pub fn name(self) -> &'static str {
         match self {
