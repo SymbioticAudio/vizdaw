@@ -23,6 +23,7 @@ pub mod menus;
 mod midi_strip;
 pub mod mixer_bar_menus;
 pub mod mixer_view;
+pub mod modify_panel;
 pub mod panes;
 pub mod piano_roll;
 pub mod plugin_browser;

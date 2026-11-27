@@ -167,6 +167,9 @@ pub const PLUGIN_WINDOW_CONTEXT: &str = "PluginWindow";
 pub const SETTINGS_WINDOW_CONTEXT: &str = "SettingsWindow";
 /// The Plugin Manager window's key context: no document key acts in it.
 pub const PLUGIN_MANAGER_CONTEXT: &str = "PluginManagerWindow";
+/// A Select and Modify panel's key context: Return is Apply, and no
+/// document key acts in it (its menu commands reach its document).
+pub const MODIFY_PANEL_CONTEXT: &str = "ModifyPanel";
 /// The editor commands (`commands::EDITOR_COMMANDS`) the GPUI app routes
 /// to its menus, keys and control channel: the grid, the Piano Roll, the
 /// List, closing the detail and Insert Event (the List's).
@@ -947,9 +950,16 @@ pub fn bindings(keymap: &Keymap) -> Vec<KeyBinding> {
         PLUGIN_MANAGER_CONTEXT,
         WINDOW_CONTEXT,
         PLUGIN_WINDOW_CONTEXT,
+        MODIFY_PANEL_CONTEXT,
     ] {
         fixed_keys(&mut keys, keymap, FILE_CLOSE, Some(ctx), || CloseWindow);
     }
+    // The panel's default button (a focused field's Return confirms it).
+    keys.push(KeyBinding::new(
+        "enter",
+        crate::modify_panel::Apply,
+        Some(MODIFY_PANEL_CONTEXT),
+    ));
     fixed_keys(&mut keys, keymap, FILE_SAVE, Some(WINDOW_CONTEXT), || Save);
     fixed_keys(
         &mut keys,

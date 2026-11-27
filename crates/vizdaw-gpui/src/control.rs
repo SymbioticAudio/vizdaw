@@ -607,6 +607,12 @@ fn answer(command: &Command, cx: &mut App) -> Result<Value, ControlError> {
                 return manager_keys(handle, &registry, focus, strokes, cx);
             }
             let entry = target(window.as_ref(), cx)?;
+            // The Select and Modify panel types into its fields, and its
+            // Return is Apply: no stroke runs a document key there.
+            if entry.kind == WindowKind::ModifyPanel {
+                let registry = entry.registry(cx).ok_or_else(gone)?;
+                return manager_keys(entry.handle, &registry, focus, strokes, cx);
+            }
             key_strokes(&entry, focus, strokes, cx)
         }
         Command::UiScreenshot {
@@ -699,7 +705,10 @@ fn run_command(
                 }
             }
             if ran.open_modify_panel {
-                // Task 5: open the document's Select and Modify panel here.
+                crate::modify_panel::open_modify_panel(doc, cx);
+                if alert_id(cx) != before {
+                    return Err(failure(before, "the panel did not open", cx));
+                }
             }
             return Ok(ran_json(id, doc, entry, ran.undo, ran.status));
         }
@@ -1459,9 +1468,10 @@ fn key_strokes(
     Ok(json!({ "window": number(entry.handle), "events": sent, "x": 0.0, "y": 0.0 }))
 }
 
-/// `ui.key` in the Plugin Manager, which is no document's: each stroke
-/// goes to the window through GPUI's own dispatch (its ⌘W, the focused
-/// search field), after a click on `focus` when given.
+/// `ui.key` in the Plugin Manager, which is no document's, or in a Select
+/// and Modify panel: each stroke goes to the window through GPUI's own
+/// dispatch (its ⌘W, the focused field, the panel's Return), after a click
+/// on `focus` when given.
 fn manager_keys(
     handle: AnyWindowHandle,
     registry: &SharedRegistry,

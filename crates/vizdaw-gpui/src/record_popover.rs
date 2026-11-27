@@ -168,7 +168,8 @@ impl DocumentWindow {
             WindowKind::Document
             | WindowKind::Plugin
             | WindowKind::Other
-            | WindowKind::PluginManager => PopoverHost::Document,
+            | WindowKind::PluginManager
+            | WindowKind::ModifyPanel => PopoverHost::Document,
         }
     }
 

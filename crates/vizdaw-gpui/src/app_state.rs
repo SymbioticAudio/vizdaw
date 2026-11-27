@@ -35,6 +35,9 @@ pub enum WindowKind {
     /// ([`crate::plugin_manager_window`]). Like Settings, it is kept
     /// apart from a document's windows.
     PluginManager,
+    /// A document's Select and Modify panel ([`crate::modify_panel`]): a
+    /// floating window, at most one per document, that closes with it.
+    ModifyPanel,
 }
 
 impl WindowKind {
@@ -46,6 +49,7 @@ impl WindowKind {
             WindowKind::Plugin => "plugin",
             WindowKind::Other => "other",
             WindowKind::PluginManager => "plugin_manager",
+            WindowKind::ModifyPanel => "modify_panel",
         }
     }
 
@@ -76,6 +80,9 @@ impl WindowEntry {
     /// The elements the window drew last (`ui.tree`, `ui.click`).
     pub fn registry(&self, cx: &App) -> Option<SharedRegistry> {
         if let Some(h) = self.document_window() {
+            return h.read(cx).ok().map(|v| v.registry().clone());
+        }
+        if let Some(h) = self.handle.downcast::<crate::modify_panel::ModifyPanel>() {
             return h.read(cx).ok().map(|v| v.registry().clone());
         }
         crate::plugin_windows::registry(self.handle, cx)
@@ -292,6 +299,13 @@ impl AppState {
             .find(|w| w.doc == doc && w.kind == WindowKind::Mixer)
     }
 
+    /// `doc`'s Select and Modify panel, while it is open.
+    pub fn modify_panel_of(&self, doc: DocId) -> Option<&WindowEntry> {
+        self.windows
+            .iter()
+            .find(|w| w.doc == doc && w.kind == WindowKind::ModifyPanel)
+    }
+
     /// The plug-in and Built-in Synth windows' registry.
     pub fn plugin_windows(&self) -> &PluginWindows {
         &self.plugin_windows
@@ -306,13 +320,15 @@ impl AppState {
 
     /// What window `w`'s title bar says: the document's title (the
     /// window marks an edit itself), "Mixer — <title>", a plug-in
-    /// window's "‹strip› — ‹plug-in›" or "Built-in Synth".
+    /// window's "‹strip› — ‹plug-in›", "Built-in Synth" or "Select and
+    /// Modify — <title>".
     pub fn window_title(&self, w: &WindowEntry) -> Option<String> {
         match w.kind {
             WindowKind::Document => self.title(w.doc),
             WindowKind::Mixer => self.store.document(w.doc).map(mixer_title),
             WindowKind::Plugin | WindowKind::Other => self.plugin_windows.title(w.token),
             WindowKind::PluginManager => Some(vizdaw_app::plugin_manager::TITLE.to_owned()),
+            WindowKind::ModifyPanel => self.store.document(w.doc).map(modify_panel_title),
         }
     }
 
@@ -390,8 +406,13 @@ impl AppState {
     /// `doc`'s window went: its plug-in windows close their editors
     /// first (before the session drops), then the document and its
     /// transport go too, and its other windows' entries (each window
-    /// closes itself when it sees its entry or document gone).
+    /// closes itself when it sees its entry or document gone). Its Select
+    /// and Modify panel's entry goes first, so nothing finds the panel to
+    /// Apply against the closing document (the panel model is told by the
+    /// store's close).
     pub fn close_document(&mut self, doc: DocId) {
+        self.windows
+            .retain(|w| !(w.doc == doc && w.kind == WindowKind::ModifyPanel));
         self.plugin_windows.close_document(doc, &mut self.store);
         self.windows.retain(|w| w.doc != doc);
         self.transports.remove(&doc);
@@ -693,6 +714,16 @@ impl AppState {
 /// A Mixer window's title (Swift `MixerWindow`): "Mixer — <title>".
 pub fn mixer_title(d: &DocumentModel) -> String {
     format!("Mixer \u{2014} {}", d.snapshot().title)
+}
+
+/// A Select and Modify panel's title (`S/ModifyPanel.swift:42`):
+/// "Select and Modify — <title>".
+pub fn modify_panel_title(d: &DocumentModel) -> String {
+    format!(
+        "{}{}",
+        vizdaw_app::select_modify::PANEL_TITLE_PREFIX,
+        d.snapshot().title
+    )
 }
 
 fn home() -> Option<PathBuf> {

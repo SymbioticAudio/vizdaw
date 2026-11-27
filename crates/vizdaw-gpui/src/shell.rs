@@ -392,7 +392,10 @@ impl DocumentWindow {
                     let host = match kind {
                         WindowKind::Document => Some(PopoverHost::Document),
                         WindowKind::Mixer => Some(PopoverHost::MixerWindow),
-                        WindowKind::Plugin | WindowKind::Other | WindowKind::PluginManager => None,
+                        WindowKind::Plugin
+                        | WindowKind::Other
+                        | WindowKind::PluginManager
+                        | WindowKind::ModifyPanel => None,
                     };
                     if host.is_some_and(|h| d.record().shows_popover_in(h)) {
                         d.set_record_popover(false);
@@ -409,7 +412,8 @@ impl DocumentWindow {
                     WindowKind::Mixer
                     | WindowKind::Plugin
                     | WindowKind::Other
-                    | WindowKind::PluginManager => s.remove_window(token),
+                    | WindowKind::PluginManager
+                    | WindowKind::ModifyPanel => s.remove_window(token),
                 }
                 cx.notify();
             });
@@ -749,9 +753,10 @@ impl DocumentWindow {
                         let _ = DocumentWindow::open_mixer(&app, doc, cx);
                     });
                 }
+                // A Modify panel task: the document's panel, after this
+                // update, as the Mixer window.
                 if ran.open_modify_panel {
-                    // Task 5: open the document's Select and Modify panel,
-                    // deferred as the Mixer window is.
+                    cx.defer(move |cx| crate::modify_panel::open_modify_panel(doc, cx));
                 }
                 if let Some(focus) = ran.focus {
                     self.focus_field(focus.field(), window, cx);

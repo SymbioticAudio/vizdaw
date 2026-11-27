@@ -292,6 +292,12 @@ fn single_keys_are_off_in_text_fields() {
             assert_eq!(b.predicate().as_deref(), Some(&roll));
             continue;
         }
+        // The Select and Modify panel's Return (Apply) acts only in it.
+        if b.action().name().starts_with("modify_panel::") {
+            let panel = KeyBindingContextPredicate::parse(menus::MODIFY_PANEL_CONTEXT).unwrap();
+            assert_eq!(b.predicate().as_deref(), Some(&panel));
+            continue;
+        }
         if b.keystrokes().iter().any(|k| k.modifiers().modified()) {
             continue;
         }
