@@ -95,6 +95,9 @@ pub struct AppState {
     pub editing: vizdaw_app::editing_prefs::EditingPrefs,
     /// Settings › Plug-ins: the new-channel EQ, pushed to the core at launch.
     pub plugins: vizdaw_app::plugin_prefs::PluginPrefs,
+    /// Settings › Surfaces: the core's surfaces and learned commands as
+    /// the tab's poll last read them, and the Add Surface sheet's draft.
+    pub surfaces: vizdaw_app::surface_settings::SurfaceSettings,
     /// The keyboard layout id the windows use instead of the platform's
     /// (tests; `None`: `cx.keyboard_layout().id()`).
     pub keyboard_layout_override: Option<String>,
@@ -140,6 +143,7 @@ impl AppState {
             automation: Default::default(),
             editing: Default::default(),
             plugins: Default::default(),
+            surfaces: vizdaw_app::surface_settings::SurfaceSettings::new(),
             keyboard_layout_override: None,
             transports: HashMap::new(),
             windows: Vec::new(),

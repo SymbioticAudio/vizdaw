@@ -259,15 +259,8 @@ impl DocumentWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(mut sheet) = self.sheet.sheet.take() else {
-            return;
-        };
-        let enabled = sheet.buttons(cx).get(index).is_some_and(|b| b.enabled);
-        let close = enabled && sheet.press(index, window, cx);
-        if close {
+        if self.sheet.press(index, window, cx) {
             self.sheet_closed(window, cx);
-        } else {
-            self.sheet.sheet = Some(sheet);
         }
         cx.notify();
     }
@@ -298,53 +291,13 @@ impl DocumentWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(sheet) = &self.sheet.sheet else {
-            return false;
-        };
-        // A prompt drawn over the sheet has the keyboard.
-        if window.has_active_prompt() {
-            return false;
-        }
-        let m = &key.modifiers;
-        let bare = !(m.control || m.alt || m.platform || m.function);
-        match key.key.as_str() {
-            "escape" if bare && !m.shift => {
-                if let Some(i) = cancel_index(&sheet.buttons(cx)) {
-                    self.press_sheet_button(i, window, cx);
-                }
+        match self.sheet.key(key, window, cx) {
+            SheetKey::Press(i) => {
+                self.press_sheet_button(i, window, cx);
                 true
             }
-            "enter" if bare && !m.shift => {
-                if let Some(i) = default_index(&sheet.buttons(cx)) {
-                    self.press_sheet_button(i, window, cx);
-                }
-                true
-            }
-            "tab" if bare => {
-                let order = sheet.focus_order(cx);
-                if !order.is_empty() {
-                    let at = order.iter().position(|f| f.is_focused(window));
-                    let n = order.len();
-                    let next = match (at, m.shift) {
-                        (Some(i), false) => (i + 1) % n,
-                        (Some(i), true) => (i + n - 1) % n,
-                        (None, false) => 0,
-                        (None, true) => n - 1,
-                    };
-                    window.focus(&order[next], cx);
-                    cx.notify();
-                }
-                true
-            }
-            _ => {
-                if self.sheet.focus.contains_focused(window, cx) {
-                    return false;
-                }
-                // The keyboard got out of the sheet: back in, and the key
-                // does nothing.
-                window.focus(&self.sheet.focus, cx);
-                true
-            }
+            SheetKey::Stop => true,
+            SheetKey::Pass => false,
         }
     }
 
@@ -376,38 +329,147 @@ impl DocumentWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let mut sheet = self.sheet.sheet.take()?;
+        self.sheet.sheet.as_ref()?;
         // A field inside the card has the keyboard: the document's keys
         // are off.
         let editing =
             self.sheet.focus.contains_focused(window, cx) && !self.sheet.focus.is_focused(window);
         self.set_sheet_editing(editing, cx);
-        let width = sheet.width();
-        let min_height = sheet.min_height();
-        let buttons = sheet.buttons(cx);
-        let mut card_scope = scope.container();
-        let body = sheet.render(&mut card_scope.container(), window, cx);
-        // After the body: a sheet's title can follow what it drew (the
-        // report sheet's).
-        let label = sheet.label();
-        let mut row_scope = card_scope.container();
-        let row = buttons_row(&buttons, &mut row_scope, |i, b| {
-            b.on_click(cx.listener(move |this, _, window, cx| {
-                this.press_sheet_button(i, window, cx);
-                cx.stop_propagation();
-            }))
-        });
-        self.sheet.sheet = Some(sheet);
-        let card = card()
-            .w(px(width))
-            .min_h(px(min_height))
-            .id("sheet-card")
-            .track_focus(&self.sheet.focus)
-            .child(body)
-            .child(row)
-            .child(card_scope.this("sheet", &label, true));
-        Some(backdrop().child(card).into_any_element())
+        render_card(
+            |v: &mut Self| &mut v.sheet,
+            self,
+            scope,
+            window,
+            cx,
+            |v, i, window, cx| v.press_sheet_button(i, window, cx),
+        )
     }
+}
+
+/// What a key does while a sheet is up.
+pub(crate) enum SheetKey {
+    /// It goes on (to the sheet's field, or no sheet is up).
+    Pass,
+    /// It stops here, having done what it does (Tab moved the focus).
+    Stop,
+    /// It presses this button (Esc's or Return's).
+    Press(usize),
+}
+
+impl SheetHost {
+    /// Presses the sheet's button `index` (an enabled one): the sheet
+    /// answers; true when it closed (it is taken down then).
+    pub(crate) fn press(&mut self, index: usize, window: &mut Window, cx: &mut App) -> bool {
+        let Some(mut sheet) = self.sheet.take() else {
+            return false;
+        };
+        let enabled = sheet.buttons(cx).get(index).is_some_and(|b| b.enabled);
+        let close = enabled && sheet.press(index, window, cx);
+        if !close {
+            self.sheet = Some(sheet);
+        }
+        close
+    }
+
+    /// Takes the sheet down without a press; true if one was up.
+    pub(crate) fn take_down(&mut self) -> bool {
+        self.sheet.take().is_some()
+    }
+
+    /// Puts `sheet` up and gives it the keyboard.
+    pub(crate) fn put_up(&mut self, sheet: Box<dyn Sheet>, window: &mut Window, cx: &mut App) {
+        self.sheet = Some(sheet);
+        window.focus(&self.focus, cx);
+    }
+
+    /// A key while a sheet is up: Esc and Return press the cancel and
+    /// default buttons, Tab moves between the sheet's fields; any other
+    /// key goes on only when the sheet has the keyboard (to its field).
+    pub(crate) fn key(&self, key: &Keystroke, window: &mut Window, cx: &mut App) -> SheetKey {
+        let Some(sheet) = &self.sheet else {
+            return SheetKey::Pass;
+        };
+        // A prompt drawn over the sheet has the keyboard.
+        if window.has_active_prompt() {
+            return SheetKey::Pass;
+        }
+        let m = &key.modifiers;
+        let bare = !(m.control || m.alt || m.platform || m.function);
+        match key.key.as_str() {
+            "escape" if bare && !m.shift => {
+                cancel_index(&sheet.buttons(cx)).map_or(SheetKey::Stop, SheetKey::Press)
+            }
+            "enter" if bare && !m.shift => {
+                default_index(&sheet.buttons(cx)).map_or(SheetKey::Stop, SheetKey::Press)
+            }
+            "tab" if bare => {
+                let order = sheet.focus_order(cx);
+                if !order.is_empty() {
+                    let at = order.iter().position(|f| f.is_focused(window));
+                    let n = order.len();
+                    let next = match (at, m.shift) {
+                        (Some(i), false) => (i + 1) % n,
+                        (Some(i), true) => (i + n - 1) % n,
+                        (None, false) => 0,
+                        (None, true) => n - 1,
+                    };
+                    window.focus(&order[next], cx);
+                    window.refresh();
+                }
+                SheetKey::Stop
+            }
+            _ => {
+                if self.focus.contains_focused(window, cx) {
+                    return SheetKey::Pass;
+                }
+                // The keyboard got out of the sheet: back in, and the key
+                // does nothing.
+                window.focus(&self.focus, cx);
+                SheetKey::Stop
+            }
+        }
+    }
+}
+
+/// The sheet of `view`'s host (`host` finds it), if one is up: a dimmed
+/// backdrop that takes every click, and the card, its buttons wired to
+/// `press`. Recorded in `scope` (the root's last container, so the
+/// window's own paths stay put).
+pub(crate) fn render_card<V: 'static>(
+    host: fn(&mut V) -> &mut SheetHost,
+    view: &mut V,
+    scope: &mut RegistryScope,
+    window: &mut Window,
+    cx: &mut Context<V>,
+    press: fn(&mut V, usize, &mut Window, &mut Context<V>),
+) -> Option<AnyElement> {
+    let mut sheet = host(view).sheet.take()?;
+    let width = sheet.width();
+    let min_height = sheet.min_height();
+    let buttons = sheet.buttons(cx);
+    let mut card_scope = scope.container();
+    let body = sheet.render(&mut card_scope.container(), window, cx);
+    // After the body: a sheet's title can follow what it drew (the
+    // report sheet's).
+    let label = sheet.label();
+    let mut row_scope = card_scope.container();
+    let row = buttons_row(&buttons, &mut row_scope, |i, b| {
+        b.on_click(cx.listener(move |this, _, window, cx| {
+            press(this, i, window, cx);
+            cx.stop_propagation();
+        }))
+    });
+    let h = host(view);
+    h.sheet = Some(sheet);
+    let card = card()
+        .w(px(width))
+        .min_h(px(min_height))
+        .id("sheet-card")
+        .track_focus(&h.focus)
+        .child(body)
+        .child(row)
+        .child(card_scope.this("sheet", &label, true));
+    Some(backdrop().child(card).into_any_element())
 }
 
 /// The dimmed backdrop over a window, taking every click.
@@ -1070,10 +1132,24 @@ pub(crate) fn sheet_is(window: AnyWindowHandle, label: &str, cx: &App) -> bool {
 }
 
 /// Keeps every key of a window with a sheet up inside the sheet
-/// ([`DocumentWindow::sheet_key`]). Interceptors run before any binding
+/// ([`DocumentWindow::sheet_key`], and the Settings window's). Interceptors run before any binding
 /// matches.
 pub fn install(cx: &mut App) {
     cx.intercept_keystrokes(|e, window, cx| {
+        // The Settings window's sheet (Add Surface) keeps its keys the
+        // same way.
+        if let Some(Some(root)) = window.root::<crate::settings_window::SettingsWindow>() {
+            if crate::file_panels::is_up(cx) {
+                if root.read(cx).sheet_label().is_some() {
+                    cx.stop_propagation();
+                }
+                return;
+            }
+            if root.update(cx, |v, cx| v.sheet_key(&e.keystroke, window, cx)) {
+                cx.stop_propagation();
+            }
+            return;
+        }
         let Some(Some(root)) = window.root::<DocumentWindow>() else {
             return;
         };

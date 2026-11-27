@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use vizdaw_ffi::VizError;
+use vizdaw_ffi::surfaces::{
+    CommandMapRow, LearnStateRow, SurfaceKindRow, SurfacePortsRow, SurfaceRow, SurfaceStateRow,
+};
 use vizdaw_ffi::{
     AafInfoRow, BounceSettingsRow, DawprojectInfoRow, OpenOptions, ProjectFormatRow, RecoveryInfo,
 };
@@ -91,6 +94,48 @@ impl CoreCalls for Makers {
     }
     fn bounce_settings(&self) -> BounceSettingsRow {
         LiveCore.bounce_settings()
+    }
+    // The surfaces are the fake's here, as Swift's `FakeSurfaceCore`: no
+    // CoreMIDI client and no `surfaces.json` (slice 9d).
+    fn surfaces_load(&self) -> Result<(), VizError> {
+        Ok(())
+    }
+    fn surface_list(&self) -> Vec<SurfaceRow> {
+        vec![]
+    }
+    fn surface_ports(&self) -> SurfacePortsRow {
+        SurfacePortsRow::default()
+    }
+    fn kontrol_ports(&self) -> SurfacePortsRow {
+        SurfacePortsRow::default()
+    }
+    fn surface_add(
+        &self,
+        _kind: SurfaceKindRow,
+        _input: &str,
+        _output: &str,
+        _position: Option<u8>,
+    ) -> Result<u32, VizError> {
+        Err(not_scripted("surface_add"))
+    }
+    fn surface_remove(&self, _id: u32) -> Result<(), VizError> {
+        Err(not_scripted("surface_remove"))
+    }
+    fn surfaces_state(&self) -> SurfaceStateRow {
+        SurfaceStateRow::default()
+    }
+    fn command_maps(&self) -> Vec<CommandMapRow> {
+        vec![]
+    }
+    fn remove_command_map(&self, _command: &str) -> Result<(), VizError> {
+        Err(not_scripted("remove_command_map"))
+    }
+    fn learn_command(&self, _id: &str) -> Result<(), VizError> {
+        Err(not_scripted("learn_command"))
+    }
+    fn cancel_learn(&self) {}
+    fn learn_state(&self) -> LearnStateRow {
+        LearnStateRow::default()
     }
 }
 

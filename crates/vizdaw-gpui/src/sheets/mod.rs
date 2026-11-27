@@ -2,6 +2,7 @@
 //! each a [`crate::sheet_host::Sheet`].
 
 pub mod aaf;
+pub mod add_surface;
 pub(crate) mod audio_format;
 pub mod bounce;
 pub mod customize_transport;
