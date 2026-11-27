@@ -7,11 +7,14 @@
 //! plugins found. …", or "No match." with a search, at least 80 high. A
 //! click on a row picks it; Return picks the one row a search leaves; Esc
 //! (the field's Cancel) or a press outside closes it. The list is the
-//! mixer's [`PluginBrowserModel`], read once per presentation.
+//! mixer's [`PluginBrowserModel`], read once per presentation. The right
+//! pane's Plug-ins view shows the same browser at the pane's width
+//! ([`Fit::Pane`], `S/PluginBrowserView.swift:48-49`).
 
 use crate::appearance::ThemedCorners as _;
 use std::rc::Rc;
 
+use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, Entity, Focusable, FontWeight, InteractiveElement, IntoElement,
     MouseDownEvent, ParentElement, StatefulInteractiveElement, Styled, Window, anchored, deferred,
@@ -40,6 +43,15 @@ pub type OnPick = Rc<dyn Fn(&PluginRefRow, &mut Window, &mut App)>;
 /// A press outside the popover.
 pub type OnOutside = Rc<dyn Fn(&MouseDownEvent, &mut Window, &mut App)>;
 
+/// Where the browser shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fit {
+    /// A popover, [`WIDTH`] wide, its list scrolling past a height.
+    Popover,
+    /// The right pane's view: the pane's width and height.
+    Pane,
+}
+
 /// The plug-in `search` leaves when it leaves exactly one (Return picks
 /// it).
 pub fn only_match(model: &PluginBrowserModel, search: &str) -> Option<PluginRefRow> {
@@ -48,8 +60,11 @@ pub fn only_match(model: &PluginBrowserModel, search: &str) -> Option<PluginRefR
     rows.next().is_none().then_some(first.plugin)
 }
 
-/// The popover's panel for `model`, filtered by `search`'s text.
+/// The browser's panel for `model`, filtered by `search`'s text, as `fit`
+/// shows it (`on_outside` is the popover's only).
+#[allow(clippy::too_many_arguments)]
 pub fn view(
+    fit: Fit,
     model: &PluginBrowserModel,
     search: &Entity<TextInput>,
     on_pick: OnPick,
@@ -84,7 +99,10 @@ pub fn view(
             .id("plugin-browser-list")
             .relative()
             .min_h(px(LIST_MIN_HEIGHT))
-            .max_h(px(LIST_MAX_HEIGHT))
+            .map(|d| match fit {
+                Fit::Popover => d.max_h(px(LIST_MAX_HEIGHT)),
+                Fit::Pane => d.flex_1(),
+            })
             .overflow_y_scroll()
             .flex()
             .flex_col();
@@ -136,26 +154,28 @@ pub fn view(
         }
         list.into_any_element()
     };
-    div()
+    let panel = div()
         .id("plugin-browser")
-        .occlude()
         .relative()
         .flex()
         .flex_col()
         .gap_2()
         .p_2()
-        .w(px(WIDTH))
-        .bg(rgb(colors::list()))
-        .border_1()
-        .border_color(rgb(colors::border()))
-        .round_md()
-        .shadow_md()
         .text_color(rgb(colors::text()))
-        .child(scope.this("group", PLUGIN_BROWSER, true))
-        .on_mouse_down_out(move |e: &MouseDownEvent, window, cx| on_outside(e, window, cx))
-        .child(field)
-        .child(list)
-        .into_any_element()
+        .child(scope.this("group", PLUGIN_BROWSER, true));
+    let panel = match fit {
+        Fit::Popover => panel
+            .occlude()
+            .w(px(WIDTH))
+            .bg(rgb(colors::list()))
+            .border_1()
+            .border_color(rgb(colors::border()))
+            .round_md()
+            .shadow_md()
+            .on_mouse_down_out(move |e: &MouseDownEvent, window, cx| on_outside(e, window, cx)),
+        Fit::Pane => panel.size_full().min_h_0(),
+    };
+    panel.child(field).child(list).into_any_element()
 }
 
 /// `panel` hung from the bottom edge of the opener it is laid over (the

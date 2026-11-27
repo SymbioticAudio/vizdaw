@@ -1,5 +1,6 @@
 //! The mixer (Swift `MixerView`, `MixerBar`, `ChannelStrips`,
-//! `ChannelStrip`): the bar (the DSP load and Add Bus) over the strips,
+//! `ChannelStrip`): the bar (the DSP load, Add Bus and the Add Track and
+//! Instruments menus, `mixer_bar_menus`) over the strips,
 //! side by side in the model's order with master after a divider. Every
 //! strip shares the rows above its fader (`StripGrid`, explicit heights,
 //! Decision M8), so faders, level boxes and buttons line up. Top to
@@ -89,6 +90,7 @@ use crate::controls::{
 };
 use crate::frame_stats;
 use crate::input_picker;
+use crate::mixer_bar_menus::BarMenu;
 use crate::plugin_browser;
 use crate::plugin_windows::{self, Subject};
 use crate::registry::RegistryScope;
@@ -321,6 +323,8 @@ pub struct MixerView {
     pub(crate) rename: Option<RenameField>,
     /// The instrument menu's state while it is the open menu.
     pointer_menu: Option<PointerMenu>,
+    /// The bar's open menu (no strip's menu is open meanwhile).
+    bar_menu: Option<BarMenu>,
     /// The open plug-in browser's field.
     browser: Option<BrowserField>,
     /// Where the open browser's opener was drawn: a press on it is its
@@ -407,6 +411,7 @@ impl MixerView {
             insert_drag: None,
             rename: None,
             pointer_menu: None,
+            bar_menu: None,
             browser: None,
             browser_opener: Rc::default(),
             appeared: false,
@@ -683,6 +688,7 @@ impl MixerView {
         };
         self.submenu = None;
         self.pointer_menu = None;
+        self.bar_menu = None;
         cx.notify();
     }
 
@@ -691,6 +697,22 @@ impl MixerView {
         self.menu = Some((strip, which));
         self.submenu = None;
         self.pointer_menu = None;
+        self.bar_menu = None;
+        cx.notify();
+    }
+
+    /// The bar's open menu.
+    pub fn bar_menu(&self) -> Option<BarMenu> {
+        self.bar_menu
+    }
+
+    /// Opens the bar's menu `which`, or closes it when it is open.
+    pub(crate) fn toggle_bar_menu(&mut self, which: BarMenu, cx: &mut Context<Self>) {
+        let open = self.bar_menu != Some(which);
+        self.close_menu(cx);
+        if open {
+            self.bar_menu = Some(which);
+        }
         cx.notify();
     }
 
@@ -698,6 +720,7 @@ impl MixerView {
         self.menu = None;
         self.submenu = None;
         self.pointer_menu = None;
+        self.bar_menu = None;
         cx.notify();
     }
 
@@ -717,13 +740,17 @@ impl MixerView {
         }
     }
 
-    /// Escape: closes an open input picker, the instrument menu or the
-    /// plug-in browser. True when one was open.
+    /// Escape: closes an open input picker, the instrument menu, a bar
+    /// menu or the plug-in browser. True when one was open.
     pub(crate) fn escape(&mut self, cx: &mut Context<Self>) -> bool {
         if self
             .menu
             .is_some_and(|(_, m)| matches!(m, StripMenu::Input | StripMenu::Instrument))
         {
+            self.close_menu(cx);
+            return true;
+        }
+        if self.bar_menu.is_some() {
             self.close_menu(cx);
             return true;
         }
@@ -779,6 +806,7 @@ impl MixerView {
             return;
         };
         self.menu = Some((strip, StripMenu::Instrument));
+        self.bar_menu = None;
         self.submenu = None;
         self.pointer_menu = Some(PointerMenu {
             at,
@@ -1729,7 +1757,7 @@ fn dot(state: SlotState) -> Rgba {
 pub fn render(
     view: &Entity<MixerView>,
     scope: &mut RegistryScope,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let (mixer, appeared) = {
@@ -1775,7 +1803,7 @@ pub fn render(
     let weak = view.downgrade();
     // The left pane's strip has no bar.
     let bar = (mixer.placement != MixerPlacement::Strip)
-        .then(|| bar(&load, &mixer, &mut scope.container()));
+        .then(|| crate::mixer_bar_menus::bar(view, &load, &mut scope.container(), window, cx));
     // A waiting learn's banner, below the bar (`S/MixerView.swift:78`).
     let banner = (mixer.placement != MixerPlacement::Strip)
         .then(|| crate::learn_banner::learn_banner(doc, &mut scope.container(), cx))
@@ -2022,51 +2050,6 @@ fn unavailable(refused: bool, scope: &mut RegistryScope) -> AnyElement {
             );
     }
     note.into_any_element()
-}
-
-/// The mixer's bar: the load, then Add Bus.
-fn bar(load: &str, mixer: &MixerRef, scope: &mut RegistryScope) -> AnyElement {
-    let t = tokens();
-    let adding = mixer.clone();
-    div()
-        .flex()
-        .flex_row()
-        .flex_none()
-        .items_center()
-        .justify_end()
-        .gap(px(12.))
-        .h(px(BAR_HEIGHT as f32))
-        .px(px(8.))
-        .text_xs()
-        .child(
-            div()
-                .relative()
-                .text_color(rgb(t.text_secondary))
-                .whitespace_nowrap()
-                .child(load.to_owned())
-                .child(scope.control("text", load, true)),
-        )
-        .child(
-            div()
-                .id("mixer-add-bus")
-                .relative()
-                .h(px(22.))
-                .px(px(8.))
-                .flex()
-                .items_center()
-                .rounded(px(t.radius))
-                .border_1()
-                .border_color(rgb(t.surface_separator))
-                .bg(rgb(t.surface_inset))
-                .cursor_pointer()
-                .whitespace_nowrap()
-                .child(ADD_BUS)
-                .child(scope.control("button", ADD_BUS, true))
-                .on_click(move |_, _, cx| {
-                    adding.with(cx, |m, d| m.add_bus(d));
-                }),
-        )
-        .into_any_element()
 }
 
 /// A part of a strip at (`x`, `y`) inside it, `w` × `h`.
@@ -2966,7 +2949,7 @@ fn add_face(
 
 /// The plug-in browser, if it is open here for `target`: hung under the
 /// element it is a child of (its opener, whose bounds it records).
-fn browser_popover(
+pub(crate) fn browser_popover(
     view: &Entity<MixerView>,
     target: BrowserTarget,
     scope: &mut RegistryScope,
@@ -2993,7 +2976,14 @@ fn browser_popover(
             let shown = m.shows_browser(p) && m.browser_target() == Some(target);
             let model = m.browser().filter(|_| shown)?;
             Some(plugin_browser::view(
-                model, &b.field, on_pick, on_outside, scope, window, cx,
+                plugin_browser::Fit::Popover,
+                model,
+                &b.field,
+                on_pick,
+                on_outside,
+                scope,
+                window,
+                cx,
             ))
         })
         .flatten();

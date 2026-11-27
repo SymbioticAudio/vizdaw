@@ -23,6 +23,7 @@ use vizdaw_ffi::automation::GesturePhaseRow;
 use vizdaw_ffi::events::AutomationTargetRow as T;
 use vizdaw_ffi::mixer::{DestRow, SendRow, StripKindRow};
 use vizdaw_ffi::snapshot::SlotStatus;
+use vizdaw_gpui::mixer_bar_menus::{ADD_TRACK, INSTRUMENTS, add_track_help};
 use vizdaw_gpui::mixer_view::MixerView;
 use vizdaw_gpui::plugin_browser::{PLUGIN_BROWSER, WIDTH};
 use vizdaw_gpui::plugin_windows::Subject;
@@ -1150,4 +1151,223 @@ fn the_browser_says_no_plugins_found_when_empty(cx: &mut TestAppContext) {
     s.cx.simulate_input("zzz");
     s.cx.run_until_parked();
     assert!(s.find("text", NO_MATCH).is_some());
+}
+
+/// [`fake`] with destination 9 named Strings and Pad's destination 4,
+/// which plays the plug-in Pad.
+fn bar_fake() -> FakeSession {
+    let f = fake();
+    f.edit_destinations(|d| {
+        if let Some(x) = d.iter_mut().find(|x| x.id == 9) {
+            x.name = "Strings".into();
+        }
+        let mut pad = dest_row(4, "Pad");
+        pad.plugin = Some(
+            catalog_row(
+                "Pad",
+                "V",
+                vizdaw_ffi::snapshot::PluginFormatTag::Clap,
+                vizdaw_ffi::PluginKindTag::Instrument,
+                vizdaw_ffi::PluginStatusRow::Ok,
+            )
+            .plugin,
+        );
+        d.push(pad);
+    });
+    f
+}
+
+/// Swift `MixerBar` (`S/MixerView.swift:156-168`).
+#[gpui::test]
+fn the_instruments_menu_lists_new_plugin_instrument_and_each_destination(cx: &mut TestAppContext) {
+    let mut s = setup(cx, bar_fake());
+    with_catalog(&mut s, catalog());
+    assert!(s.element("button", INSTRUMENTS).enabled);
+    s.click("button", INSTRUMENTS);
+    assert_eq!(
+        s.titles(),
+        [
+            "New Plugin Instrument\u{2026}",
+            "Built-in Synth: MIDI \u{2192} Plugin\u{2026}",
+            "Strings: MIDI \u{2192} Plugin\u{2026}",
+            "Pad: Pad \u{2192} Plugin\u{2026}",
+        ]
+    );
+    // New Plugin Instrument…: the instrument browser; a pick is a new
+    // instrument and its track, and opens no window (Swift's opened none).
+    s.click("menuitem", "New Plugin Instrument\u{2026}");
+    assert!(
+        s.find("menuitem", "New Plugin Instrument\u{2026}")
+            .is_none()
+    );
+    let panel = s.element("group", PLUGIN_BROWSER);
+    assert_eq!(f32::from(panel.bounds.size.width), WIDTH - 2.);
+    assert!(s.element("textfield", "Search").focused);
+    assert!(s.find("button", "Keys").is_some());
+    assert!(s.find("button", "Chorus").is_none(), "instruments only");
+    assert!(s.fake.calls().is_empty());
+    s.click("button", "Keys");
+    assert_eq!(
+        s.calls_like("add_plugin_instrument"),
+        ["add_plugin_instrument(Keys,x.Keys)"]
+    );
+    assert!(s.find("group", PLUGIN_BROWSER).is_none());
+    assert!(!browser_open(&mut s));
+    assert_eq!(s.open_windows(), 0);
+    // A destination's item: the browser for it; a pick replaces what it
+    // plays.
+    s.fake.clear_calls();
+    s.click("button", INSTRUMENTS);
+    s.click("menuitem", "Strings: MIDI \u{2192} Plugin\u{2026}");
+    assert!(s.find("group", PLUGIN_BROWSER).is_some());
+    s.click("button", "Pad");
+    assert_eq!(
+        s.calls_like("set_destination_plugin"),
+        ["set_destination_plugin(9,x.Pad)"]
+    );
+    assert!(s.find("group", PLUGIN_BROWSER).is_none());
+    assert_eq!(s.open_windows(), 0);
+    // Esc closes it with no pick; so does the Instruments button.
+    s.fake.clear_calls();
+    s.click("button", INSTRUMENTS);
+    s.click("menuitem", "Pad: Pad \u{2192} Plugin\u{2026}");
+    assert!(browser_open(&mut s));
+    s.cx.simulate_keystrokes("escape");
+    s.cx.run_until_parked();
+    assert!(!browser_open(&mut s));
+    s.click("button", INSTRUMENTS);
+    s.click("menuitem", "New Plugin Instrument\u{2026}");
+    assert!(browser_open(&mut s));
+    s.click("button", INSTRUMENTS);
+    assert!(!browser_open(&mut s));
+    assert!(
+        s.find("menuitem", "New Plugin Instrument\u{2026}")
+            .is_none()
+    );
+    assert!(s.fake.calls().is_empty(), "{:?}", s.fake.calls());
+}
+
+/// Swift `MixerBar`'s Add Track menu (`S/MixerView.swift:146-155`).
+#[gpui::test]
+fn add_track_runs_the_track_commands(cx: &mut TestAppContext) {
+    // With a sequence: the three items, each its track command.
+    let mut s = setup(cx, fake());
+    assert!(s.element("button", ADD_TRACK).enabled);
+    assert_eq!(add_track_help(true), "Add a track");
+    s.click("button", ADD_TRACK);
+    assert_eq!(
+        s.titles(),
+        ["New Audio Track", "New Instrument Track", "New MIDI Track"]
+    );
+    s.click("menuitem", "New MIDI Track");
+    assert_eq!(s.fake.count("new_track(3,Midi,None)"), 1);
+    assert!(s.find("menuitem", "New Audio Track").is_none());
+    s.click("button", ADD_TRACK);
+    s.click("menuitem", "New Audio Track");
+    // After the selected track (the new MIDI track, 32).
+    assert_eq!(s.fake.count("new_track(3,Audio,Some(32))"), 1);
+}
+
+#[gpui::test]
+fn add_track_is_disabled_without_a_sequence(cx: &mut TestAppContext) {
+    // No sequence: disabled, its help says why, and a click opens nothing.
+    let f = FakeSession::new(vec![]);
+    f.set_mixer(fake().mixer_snapshot());
+    let mut s = setup(cx, f);
+    assert_eq!(add_track_help(false), "Select a sequence first");
+    assert!(!s.element("button", ADD_TRACK).enabled);
+    s.click("button", ADD_TRACK);
+    assert!(s.find("menuitem", "New Audio Track").is_none());
+    assert!(s.calls_like("new_track").is_empty());
+}
+
+/// The right pane's Plug-ins view (Swift `PluginsPane`,
+/// `S/PaneViews.swift:236-257`).
+#[gpui::test]
+fn the_plugins_pane_browses_and_a_pick_goes_on_the_target_strip(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    with_catalog(&mut s, catalog());
+    s.cx.dispatch_action(RunCommand::new("ui.toggle_right"));
+    s.cx.run_until_parked();
+    let picker = s
+        .elements()
+        .into_iter()
+        .find(|e| {
+            e.role == "button"
+                && e.label == "Right Pane"
+                && !matches!(e.value.as_deref(), Some("on" | "off"))
+        })
+        .expect("the right pane's picker");
+    s.click_at(picker.bounds.center());
+    s.click("menuitem", "Plug-ins");
+    assert!(
+        s.find("text", "Plug-ins comes in a later version.")
+            .is_none()
+    );
+    // The browser at the pane's width: the effects, the search not
+    // focused.
+    let panel = s.element("group", PLUGIN_BROWSER);
+    let pane = s.model(|d| {
+        d.layout()
+            .views
+            .current()
+            .pane(vizdaw_app::editor::PaneSide::Right)
+            .size
+    });
+    let w = f64::from(f32::from(panel.bounds.size.width));
+    assert_eq!(w, pane, "the pane's width, not the popover's {WIDTH}");
+    assert!(!s.element("textfield", "Search").focused);
+    assert_eq!(s.value("button", "Delay").as_deref(), Some("VST3"));
+    assert!(s.find("button", "Keys").is_none(), "effects only");
+    // No strip to put it on: the status says so.
+    s.model_mut(|d| {
+        d.clear_selection();
+        d.set_selected_strips(Default::default());
+    });
+    s.click("button", "Chorus");
+    assert_eq!(
+        s.status().as_deref(),
+        Some("Select a track or one mixer strip first.")
+    );
+    assert!(s.fake.add_inserts().is_empty());
+    // The one selected strip in the Mix view: the end of its inserts, no
+    // window, and the pane's browser stays.
+    s.model_mut(|d| d.set_selected_strips([6].into()));
+    s.click("button", "Chorus");
+    let added = s.fake.add_inserts();
+    assert_eq!(added.len(), 1, "{added:?}");
+    assert_eq!((added[0].0, added[0].1), (6, None));
+    assert_eq!(added[0].2.id, "x.Chorus");
+    assert_eq!(s.open_windows(), 0);
+    assert!(s.find("group", PLUGIN_BROWSER).is_some());
+    // The search filters it (Audio 2's new insert is a "Chorus" button
+    // too, outside the pane).
+    s.click("textfield", "Search");
+    assert!(s.element("textfield", "Search").focused);
+    s.cx.simulate_input("del");
+    s.cx.run_until_parked();
+    let panel = s.element("group", PLUGIN_BROWSER).bounds;
+    let listed: Vec<String> = s
+        .elements()
+        .into_iter()
+        .filter(|e| e.role == "button" && panel.contains(&e.bounds.center()))
+        .map(|e| e.label)
+        .collect();
+    assert_eq!(listed, ["Delay"]);
+    // Return picks the one plug-in left.
+    s.cx.simulate_keystrokes("enter");
+    s.cx.run_until_parked();
+    assert_eq!(s.fake.add_inserts().len(), 2);
+    assert_eq!(s.fake.add_inserts()[1].2.id, "x.Delay");
+}
+
+impl Setup {
+    fn model_mut(&mut self, f: impl FnOnce(&mut vizdaw_app::DocumentModel)) {
+        let doc = self.window.read_with(&self.cx, |v, _| v.doc()).unwrap();
+        self.app.update(&mut self.cx, |a, cx| {
+            a.store.with_document(doc, |d, _| f(d));
+            cx.notify();
+        });
+        self.cx.run_until_parked();
+    }
 }

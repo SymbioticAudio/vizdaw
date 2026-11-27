@@ -104,6 +104,8 @@ pub struct DocumentWindow {
     pub(crate) transport_fields: TransportFields,
     /// The record popover's punch fields (this window's host).
     pub(crate) record_popover: RecordPopover,
+    /// The right pane's Plug-ins view's search.
+    pub(crate) plugins_pane: crate::plugins_pane::PluginsPane,
     /// Rewind and Fast Forward held, and their held keys.
     shuttle: Shuttle,
     /// Winds a held button every `Shuttle::TICK_EVERY` until it ends.
@@ -413,6 +415,7 @@ impl DocumentWindow {
         }));
         let list_editor = ListEditor::new(cx);
         let record_popover = RecordPopover::new(window, cx);
+        let plugins_pane = crate::plugins_pane::PluginsPane::new(window, cx);
         let views_seen = app.read(cx).store.document(doc).map(seen_views);
         let weak = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
@@ -446,6 +449,7 @@ impl DocumentWindow {
             _status_timer: None,
             transport_fields: TransportFields::new(cx),
             record_popover,
+            plugins_pane,
             shuttle: Shuttle::new(),
             _hold: None,
             more_open: false,
@@ -1814,6 +1818,8 @@ impl DocumentWindow {
                     window,
                     cx,
                 )
+            } else if view == PaneView::Plugins {
+                crate::plugins_pane::render(self, &mut scope.container(), window, cx)
             } else {
                 panes::content(view, host, &mut scope.container(), cx)
             };
@@ -1828,6 +1834,13 @@ impl DocumentWindow {
                 window,
                 cx,
             ));
+        }
+        // The Plug-ins view's search went with its view: the keyboard
+        // leaves it, so the transport keys work again.
+        let plugins_shown = frames.of(PaneSide::Right).is_some()
+            && host.setup.pane(PaneSide::Right).view == PaneView::Plugins;
+        if !plugins_shown && self.plugins_pane.focused(window, cx) {
+            window.blur(cx);
         }
         let bottom = {
             // A hidden pane, or an editor under another view, stays

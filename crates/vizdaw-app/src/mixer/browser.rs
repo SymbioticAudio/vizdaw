@@ -198,21 +198,7 @@ impl MixerModel {
     pub fn pick(&mut self, doc: &mut DocumentModel, plugin: &PluginRefRow) -> Option<u64> {
         let target = self.browser.take()?.target;
         match target {
-            BrowserTarget::Insert { strip } => {
-                let before: HashSet<u64> = self
-                    .strip(strip)
-                    .map(|s| s.inserts.iter().map(|x| x.id).collect())
-                    .unwrap_or_default();
-                let p = plugin.clone();
-                if !self.command(doc, ADD_PLUGIN_FAILED, |s| s.add_insert(strip, None, p)) {
-                    return None;
-                }
-                self.strip(strip)?
-                    .inserts
-                    .iter()
-                    .map(|x| x.id)
-                    .find(|id| !before.contains(id))
-            }
+            BrowserTarget::Insert { strip } => self.add_insert_at_end(doc, strip, plugin),
             BrowserTarget::Instrument => {
                 let before: HashSet<u64> = self.instrument_slots().collect();
                 let p = plugin.clone();
@@ -240,6 +226,30 @@ impl MixerModel {
                 self.strip(strip)?.eq.as_ref().map(|x| x.id)
             }
         }
+    }
+
+    /// Puts `plugin` on the end of `strip`'s inserts (a browser pick, or
+    /// the right pane's). Returns the new insert's slot; `None` for a
+    /// refusal, whose alert "Add Plugin Failed" is up.
+    pub fn add_insert_at_end(
+        &mut self,
+        doc: &mut DocumentModel,
+        strip: u64,
+        plugin: &PluginRefRow,
+    ) -> Option<u64> {
+        let before: HashSet<u64> = self
+            .strip(strip)
+            .map(|s| s.inserts.iter().map(|x| x.id).collect())
+            .unwrap_or_default();
+        let p = plugin.clone();
+        if !self.command(doc, ADD_PLUGIN_FAILED, |s| s.add_insert(strip, None, p)) {
+            return None;
+        }
+        self.strip(strip)?
+            .inserts
+            .iter()
+            .map(|x| x.id)
+            .find(|id| !before.contains(id))
     }
 
     /// Every plug-in instrument's own slot.

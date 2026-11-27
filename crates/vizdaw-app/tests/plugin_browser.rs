@@ -10,12 +10,14 @@ use std::sync::Arc;
 use support::{FakeSession, dest_row, lane_row, mixer_fake, slot_row, strip_row};
 use vizdaw_app::DocumentModel;
 use vizdaw_app::alerts::error_message;
+use vizdaw_app::commands::perform_from_menu;
 use vizdaw_app::mixer::{
     BrowserTarget, InstrumentMenuItem, MixerModel, MixerPlacement, NEW_INSTRUMENT_FAILED,
 };
 use vizdaw_app::plugin_browser::{NO_MATCH, NO_PLUGINS, PluginBrowserModel, SEARCH};
 use vizdaw_app::plugins::AppPlugins;
 use vizdaw_app::testing::{FakeCatalog, catalog_row};
+use vizdaw_app::view::{PANE_NO_MIXER, PANE_NO_STRIP, pane_insert_plugin, pane_insert_target};
 use vizdaw_ffi::mixer::StripKindRow;
 use vizdaw_ffi::snapshot::{PluginFormatTag, PluginRefRow};
 use vizdaw_ffi::{CatalogRowFfi, PluginKindTag, PluginStatusRow, VizError};
@@ -606,4 +608,77 @@ fn an_insert_pick_returns_the_new_slot_and_a_new_instrument_refusal_alerts() {
     });
     assert_eq!(d.alert.as_ref().unwrap().title, NEW_INSTRUMENT_FAILED);
     assert_eq!(NEW_INSTRUMENT_FAILED, "New Instrument Failed");
+}
+
+/// Audio track 30 plays strip 10 (path 7); Synth (1), Bus 1 (2) and
+/// Master (0) as `mixer_fake`.
+fn pane_doc() -> (Arc<FakeSession>, DocumentModel) {
+    let f = mixer_fake();
+    let mut on_path = lane_row(30, "Groove", false);
+    on_path.audio_out = Some(7);
+    f.set_lanes(3, vec![on_path, lane_row(31, "Chords", false)]);
+    f.edit_mixer(|m| {
+        m.strips.insert(
+            0,
+            strip_row(10, "Out 1", StripKindRow::AudioPath { path: 7 }),
+        )
+    });
+    make_with(f)
+}
+
+/// Swift `PaneContent.insertPlugin` (`M/PaneContent.swift:233-253`).
+#[test]
+fn the_pane_target_is_the_selected_strip_else_the_left_pane_strip() {
+    let (_f, mut d) = pane_doc();
+    // The left pane's strip: track 30's.
+    d.select_track(30, false);
+    assert_eq!(pane_insert_target(&mut d), Ok(10));
+    // In the Arrange view the left pane's strip comes first.
+    d.set_selected_strips([2].into());
+    assert_eq!(pane_insert_target(&mut d), Ok(10));
+    // In the Mix view the one selected strip comes first.
+    perform_from_menu("ui.view_mix", &mut d).unwrap();
+    assert_eq!(pane_insert_target(&mut d), Ok(2));
+    // Master, or two strips, is no selection: the left pane's strip.
+    d.set_selected_strips([0].into());
+    assert_eq!(pane_insert_target(&mut d), Ok(10));
+    d.set_selected_strips([1, 2].into());
+    assert_eq!(pane_insert_target(&mut d), Ok(10));
+    // With no track focused, the selected strip in either view.
+    d.clear_selection();
+    d.set_selected_strips([1].into());
+    assert_eq!(pane_insert_target(&mut d), Ok(1));
+    perform_from_menu("ui.view_arrange", &mut d).unwrap();
+    assert_eq!(pane_insert_target(&mut d), Ok(1));
+}
+
+#[test]
+fn the_pane_pick_without_a_strip_says_select_a_track() {
+    let (f, mut d) = pane_doc();
+    let p = pref("x.Gain", "Gain", "V");
+    pane_insert_plugin(&mut d, &p);
+    assert_eq!(d.status(), Some(PANE_NO_STRIP));
+    assert_eq!(PANE_NO_STRIP, "Select a track or one mixer strip first.");
+    assert!(f.add_inserts().is_empty());
+    // With a strip it goes on the end of its inserts, no alert, no status.
+    d.set_status(None);
+    d.select_track(30, false);
+    pane_insert_plugin(&mut d, &p);
+    let added = f.add_inserts();
+    assert_eq!(added.len(), 1);
+    assert_eq!((added[0].0, added[0].1), (10, None));
+    assert_eq!(d.status(), None);
+    assert!(d.alert.is_none());
+    // A mixer that cannot be read says so.
+    let g = Arc::new(mixer_fake());
+    g.set_call_error("mixer", Some(model_err("unreadable")));
+    let mut e = DocumentModel::new(g.clone()).unwrap();
+    assert_eq!(pane_insert_target(&mut e), Err(PANE_NO_MIXER));
+    pane_insert_plugin(&mut e, &p);
+    assert_eq!(e.status(), Some(PANE_NO_MIXER));
+    assert_eq!(
+        PANE_NO_MIXER,
+        "The mixer of this document could not be read."
+    );
+    assert!(g.add_inserts().is_empty());
 }
