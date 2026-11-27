@@ -1368,6 +1368,14 @@ impl FakeSession {
             Self::scripted(&mut s, call)?;
             s.calls.push(call.to_owned());
             change(&mut s.surfaces);
+            // As the core: one undo step, named for the edit.
+            let label = if call == "set_learn_mode" || call == "set_learn_pickup" {
+                "MIDI Learn"
+            } else {
+                "Remove MIDI Learn"
+            };
+            Self::command_result(&mut s);
+            s.snap.undo_label = Some(label.into());
         }
         Ok(self.snap())
     }

@@ -377,6 +377,19 @@ impl DocumentStore {
         }
     }
 
+    /// The first document whose learn waits, for Esc
+    /// (`S/KeyMonitor.swift:161`).
+    pub fn learning_document(&self) -> Option<DocId> {
+        let mut ids: Vec<DocId> = self
+            .documents
+            .iter()
+            .filter(|(_, d)| d.learn.is_learning())
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort();
+        ids.first().copied()
+    }
+
     /// A window closed: its document goes. Closing twice is harmless.
     pub fn close(&mut self, id: DocId) {
         if self.key_window.map(|(d, _)| d) == Some(id) {
@@ -396,6 +409,10 @@ impl DocumentStore {
             }
         }
         if let Some(mut doc) = self.documents.remove(&id) {
+            // Review Focus 2: no learn lands in a closed session.
+            if doc.learn.is_learning() {
+                self.core.cancel_learn();
+            }
             if let Some(a) = doc.alert.take() {
                 self.alerts.push_back((None, a));
             }

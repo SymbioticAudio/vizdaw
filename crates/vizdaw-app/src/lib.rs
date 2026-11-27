@@ -28,6 +28,7 @@ pub mod interchange_commands;
 pub mod jobs;
 pub mod key_prefs;
 pub mod lane_inputs;
+pub mod learn;
 pub mod list;
 pub mod marker_list;
 pub mod merge;

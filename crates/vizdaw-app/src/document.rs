@@ -167,6 +167,8 @@ pub struct DocumentModel {
     /// A surface's button is running (ruling T9-1): the keys a text field
     /// holds back act regardless.
     pub(crate) surface_acting: bool,
+    /// MIDI learn: the banner, the maps and their sheet (slice 9d).
+    pub learn: crate::learn::LearnModel,
 }
 
 /// What the arrangement reads of one track, read when first asked for.
@@ -243,6 +245,7 @@ impl DocumentModel {
         // (and stays on disk until the next save).
         let editor = EditorModel::new(session.ui_layout().ok().flatten().as_deref());
         let waves = crate::region_waves::DocWaves::new(session.clone());
+        let learn = crate::learn::LearnModel::new(session.clone());
         let mut model = DocumentModel {
             waves,
             session,
@@ -299,6 +302,7 @@ impl DocumentModel {
             surface_steps: vec![],
             sent_count_in: None,
             surface_acting: false,
+            learn,
         };
         model.refresh_project_info();
         // The time left reads the core's free space from the start.
@@ -392,6 +396,10 @@ impl DocumentModel {
         }
         // The count-in for the surfaces, and what they asked for.
         if self.surface_tick(std::time::Instant::now()) {
+            arrived = true;
+        }
+        // A waiting learn's banner and the open maps sheet follow the core.
+        if self.learn_tick() {
             arrived = true;
         }
         pending || arrived
