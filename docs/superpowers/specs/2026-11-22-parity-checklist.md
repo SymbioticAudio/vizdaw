@@ -343,11 +343,11 @@ item (false: keys, the Keys settings and the control channel only).
 
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
-| surface.add | Surfaces | Add Surface |  | false | | |
-| surface.remove | Surfaces | Remove Surface |  | false | | |
-| surface.inject | Surfaces | Inject Surface Bytes |  | false | | |
-| surface.learn | Surfaces | MIDI Learn |  | false | | |
-| surface.unlearn | Surfaces | Remove MIDI Learn |  | false | | |
+| surface.add | Surfaces | Add Surface |  | false | S9d | |
+| surface.remove | Surfaces | Remove Surface |  | false | S9d | |
+| surface.inject | Surfaces | Inject Surface Bytes |  | false | S9d | |
+| surface.learn | Surfaces | MIDI Learn |  | false | S9d | |
+| surface.unlearn | Surfaces | Remove MIDI Learn |  | false | S9d | |
 
 ### Settings
 
@@ -394,11 +394,11 @@ editors). The record popover is a popover, not a window.
 | Licences | `licences` | | |
 | Settings: Appearance | Settings tab | S9b (user themes: later) | S9b (CI; on screen: L27) |
 | Settings: Editing | Settings tab | S9c (no consumers yet: backlog) | S9c (CI; on screen: owner check) |
-| Settings: Keys | Settings tab | S9c (Learn MIDI: Surfaces slice) | S9c (CI; on screen: L28) |
+| Settings: Keys | Settings tab | S9c, S9d (Learn MIDI) | S9c (CI; on screen: L28) |
 | Settings: Audio | Settings tab | S9a | S9a (CI; on screen: L26) |
 | Settings: Recording | Settings tab | S9a | S9a (CI; on screen: L26) |
 | Settings: Automation | Settings tab | S9a | S9a (CI; on screen: L26) |
-| Settings: Surfaces | Settings tab | | |
+| Settings: Surfaces | Settings tab | S9d (on screen: M23, M24) | |
 | Settings: Plug-ins | Settings tab | S9c | S9c (CI; no bundled EQ) |
 | Settings: Co-Producer | Settings tab | | |
 
@@ -430,11 +430,11 @@ Maps is opened from two places.
 | Project Settings | document | | |
 | Merge DAWproject | document | | |
 | Customize Transport Bar | document and mixer windows | S9c (on screen: pending) | S9c (CI; on screen: L29) |
-| MIDI Learn Maps | mixer and panes (two `.sheet(` sites, one sheet) | | |
+| MIDI Learn Maps | mixer and panes (two `.sheet(` sites, one sheet) | S9d (on screen: M25) | |
 | Comment (`CommentSheet`) | sequence sidebar | | |
 | Key slot (`KeySlotSheet`) | sequence sidebar | | |
 | Remove Old Co-Producer Copies? | Media Pool | | |
-| Add Surface | Settings > Surfaces | | |
+| Add Surface | Settings > Surfaces | S9d (on screen: M23, M24) | |
 
 ### Alerts and confirmations
 
@@ -443,8 +443,8 @@ Maps is opened from two places.
 | Recovered Recordings | document | S7b, S8a (`record.recover`; never shown under the channel) | S7b, S8a (Move to Trash: gap H4) |
 | Document alert (its title is set per error) | document | | |
 | Replace question (MIDI import and export) | MidiSheets | | |
-| MIDI Learn alert (title set per error) | MIDI Learn Maps | | |
-| Surfaces alert (title set per error) | Settings > Surfaces | | |
+| MIDI Learn alert (title set per error) | MIDI Learn Maps | S9d (a red line in the sheet when it is open) | |
+| Surfaces alert (title set per error) | Settings > Surfaces | S9d | |
 | Delete notes and copies? | Settings > Co-Producer | | |
 | Delete all time records? | Settings > Co-Producer | | |
 | Delete this sequence and every reference to it? | sequence sidebar | | |
@@ -513,10 +513,10 @@ a group of by-eye steps the GPUI app must pass.
 | Record UI and monitoring (plans 5d-1 and 5d-2) | | |
 | Automation recording, the engine (plan 5e-1) | | |
 | Automation recording, the UI (plan 5e-2) | | |
-| Control surfaces and MIDI learn (plan 5f-1) | | |
+| Control surfaces and MIDI learn (plan 5f-1) | complete (S9d) | |
 | Bounce and export (plan 5f-2) | | |
 | External sample editor (plan 5f-3) | | |
-| Host-integration keyboards (plan 5f-4) | | |
+| Host-integration keyboards (plan 5f-4) | S9d (the keyboard over the channel; on screen: M24) | |
 | Window, main views and panes (plan 7a) | | |
 | Themes and the channel strip (plan 7b) | | |
 | Audio editor (plan 7c) | | |
@@ -550,8 +550,10 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 | tracks_the_fake_synth | | |
 | arms_meters_counts_in_and_draws_the_take | S8c, S9a (`gpui_arms_meters_counts_in_and_draws_the_take`, with the `audio.set` steps) | S8c, S9a (offline device, fake input, with the `audio.set` steps; CI run 45743593726) |
 | touch_writes_a_fader_over_the_channel | S6a (mixer parts) | S6a (mixer parts) |
-| drives_a_fader_and_a_button_from_an_mcu | | |
-| drives_the_mixer_from_a_kontrol_mk3 | | |
+| drives_a_fader_and_a_button_from_an_mcu | S9d (`gpui_drives_a_fader_and_a_button_from_an_mcu`) | |
+| drives_the_mixer_from_a_kontrol_mk3 | S9d (`gpui_drives_the_mixer_from_a_kontrol_mk3`) | |
+| midi_learn_over_the_channel | S9d (`gpui_midi_learn_over_the_channel`) | |
+| a_damaged_surfaces_file_is_kept_aside | S9d (`gpui_a_damaged_surfaces_file_is_kept_aside`) | |
 | bounces_the_demo_and_checks_the_file | | |
 | edits_a_region_through_the_stub_editor | | |
 | window_views_and_panes_over_the_channel | S6a (views and panes; mixer-window step later), S8c (markers step) | S6a (views via ui.view_*; ⌃2 is ⌘2 on Linux), S8c (markers step) |
@@ -600,3 +602,4 @@ unknown.
 | Media import on Linux (only VizDAW CAF files import, with no resampler: `media.import` answers `failed` "… not a VizDAW CAF file" for WAV/AIFF and "… resampling needs the system importer" across rates; the e2e import steps assert those refusals on Linux) | Host track H4: Linux audio import reads WAV/AIFF and other formats (Symphonia) and adds a resampler | |
 | Live audio/MIDI input on Linux (input device list and channel names, duplex PipeWire input, ALSA MIDI input, step entry from a played keyboard) | Host track H3; until then recording on Linux uses the offline device (`VIZDAW_AUDIO=offline`, fake input `VIZDAW_AUDIO_INPUT=fake`) and MIDI by `midi.inject`; the picker offers two unnamed channels until H3 | |
 | Move to Trash for recovered recordings (`record.recover action: trash`, and Recovered Recordings' Move to Trash) | Host track H4: Linux Trash support. Until then the file stays where it is (kept for the next open) and the call answers `failed` with the problem line `<path>: not moved to the Trash (this platform has no Trash support yet)`; `gpui_record_recover_trash_over_the_channel` asserts it on Linux | |
+| Control-surface MIDI ports on Linux (Settings › Surfaces lists no ports; a unit added stays Disconnected) | Host track H3 (ALSA sequencer ports); until then `surface.inject` and the offline fake transport work, and the e2e run on them | |

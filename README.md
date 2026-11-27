@@ -43,8 +43,8 @@ being ported from it in stages ("slices").
   automation.
 - **Settings:** the Settings window, with its Appearance (six themes:
   Classic Light, Studio Dark, Flat, Console, Symbiotic and EG13), Editing,
-  Keys, Audio, Recording, Automation and Plug-ins tabs. Surfaces and
-  Co-Producer come in later slices.
+  Keys, Audio, Recording, Automation, Surfaces and Plug-ins tabs.
+  Co-Producer comes in a later slice.
 - **Customize Transport Bar** (View menu): drag items onto, along and off the
   bar, size them, and add command buttons.
 
@@ -52,18 +52,16 @@ being ported from it in stages ("slices").
 
 These worked in the retired Swift app and are still to be ported:
 
-- Settings › Surfaces and Co-Producer, user themes, and Learn MIDI in
-  Settings › Keys.
+- Settings › Co-Producer and user themes.
 - Adding, moving and bypassing inserts, and the Plugin Manager.
 - The Strip Chart, drum grid and audio editors, and editors in windows of
   their own.
 - Choosing takes, and the Media Pool.
-- Changeable key bindings, control surfaces and MIDI learn.
 - Co-Producer, VizDAW's assistant for agents.
 
 On Linux, live audio and MIDI input and output wait for the PipeWire and
 ALSA work (host track H3); until then the Linux app runs on an offline
-device. Importing WAV and AIFF files on Linux comes with host track H4.
+device. Control surfaces need H3's MIDI ports. Importing WAV and AIFF files on Linux comes with host track H4.
 
 ## Platforms
 

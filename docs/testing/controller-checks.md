@@ -91,3 +91,12 @@ Not yet seen on screen. Open, on an unlocked Mac:
 - [ ] Settings › Editing: the height (600, estimated) fits; root and scale disable; the "Choose External Sample Editor" panel title.
 - [ ] Settings › Plug-ins with the bundled Multi-Q: the switch, the picker, "(not available)" for a missing choice, the Replace question.
 - [ ] The Customize Transport Bar sheet (760 wide): chips in the bar's faces, the palette grid, drag onto, along and off, the inspector's size, command and label, in a dark and a light theme.
+
+## Surfaces and MIDI Learn (9d)
+
+Not yet seen on screen. Open, on an unlocked Mac:
+
+- [ ] Settings › Surfaces at 560 wide: the unit rows, their state words, the empty lines.
+- [ ] The Add Surface sheet at 420 wide, for each type.
+- [ ] The MIDI Learn banner in the mixer, in the Keys tab and in a plug-in window.
+- [ ] The MIDI Learn Maps sheet at 640 wide, in a dark and a light theme.
