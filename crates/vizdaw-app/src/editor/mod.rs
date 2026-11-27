@@ -70,6 +70,10 @@ pub struct EditorModel {
     pub(crate) roll: crate::piano_roll::PianoRollModel,
     /// The audition notes held, the note-offs to retry.
     pub(crate) audition: crate::audition::Audition,
+    /// Exact Mode: a note or block drag opens the Modify panel with its
+    /// amounts instead of applying (Swift `EditorModel.exactMode`). Not
+    /// saved.
+    pub(crate) exact_mode: bool,
 }
 
 impl EditorModel {
@@ -84,7 +88,17 @@ impl EditorModel {
             list: crate::list::ListModel::default(),
             roll: crate::piano_roll::PianoRollModel::default(),
             audition: crate::audition::Audition::default(),
+            exact_mode: false,
         }
+    }
+
+    /// Exact Mode is on (off in every new document).
+    pub fn exact_mode(&self) -> bool {
+        self.exact_mode
+    }
+
+    pub fn set_exact_mode(&mut self, on: bool) {
+        self.exact_mode = on;
     }
 
     pub fn layout(&self) -> &EditorLayout {

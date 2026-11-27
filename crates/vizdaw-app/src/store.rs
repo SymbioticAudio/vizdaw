@@ -482,6 +482,8 @@ impl DocumentStore {
             doc.audition_off_all();
             // No mixer touch outlives its document.
             doc.end_mixer_drags(std::time::Instant::now());
+            // Its Modify panel closes with it: no focus or text owner stays.
+            doc.modify_panel_closed();
             let session = doc.session();
             if session.transport().map(|t| t.playing).unwrap_or(false) {
                 let _ = session.stop();

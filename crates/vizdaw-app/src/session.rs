@@ -9,11 +9,12 @@ use vizdaw_ffi::automation::{
 use vizdaw_ffi::blocks::{BlockRow, BlockRule};
 use vizdaw_ffi::bundled::DefaultEqRow;
 use vizdaw_ffi::control::ControlArg;
-use vizdaw_ffi::edit::{EditCommand, MonitorModeRow};
+use vizdaw_ffi::edit::{EditCommand, MonitorModeRow, ViewFilterRow};
 use vizdaw_ffi::events::{AutomationTargetRow, LaneEvents, MarkerRow, SequenceInfo};
 use vizdaw_ffi::host::InputDeviceRow;
 use vizdaw_ffi::live::InputChannelsRow;
 use vizdaw_ffi::mixer::{DestRow, MidiMixRow, MixerLevels, MixerSnapshot, SendRow, SwatchRow};
+use vizdaw_ffi::modify::{ModifyRow, ModifyTemplateRow};
 use vizdaw_ffi::record::{RecordSpecRow, RecordStateRow, RecoveredFileRow};
 use vizdaw_ffi::selection::{SelectionRow, TickRange};
 use vizdaw_ffi::session::CopiesSizeRow;
@@ -92,6 +93,17 @@ pub trait DocSession: Send + Sync {
     ) -> Result<DocSnapshot, VizError>;
     fn duplicate_track(&self, seq: u64, lane: u64) -> Result<DocSnapshot, VizError>;
     fn edit(&self, cmd: EditCommand) -> Result<DocSnapshot, VizError>;
+    /// [`DocSession::edit`] through a view's filter: what it hides is
+    /// left alone (a list-opened Modify panel, Modify Again).
+    fn edit_filtered(
+        &self,
+        cmd: EditCommand,
+        filter: Option<ViewFilterRow>,
+    ) -> Result<DocSnapshot, VizError>;
+    /// The saved select-and-modify templates, by name.
+    fn modify_templates(&self) -> Result<Vec<ModifyTemplateRow>, VizError>;
+    /// The modification Modify Again repeats, if any.
+    fn last_modify(&self) -> Result<Option<ModifyRow>, VizError>;
     fn set_lane_mute(&self, seq: u64, lane: u64, mute: bool) -> Result<DocSnapshot, VizError>;
     fn selection(&self) -> Result<SelectionRow, VizError>;
     fn set_selection(&self, s: SelectionRow) -> Result<(), VizError>;
@@ -535,6 +547,19 @@ impl DocSession for Session {
     }
     fn edit(&self, cmd: EditCommand) -> Result<DocSnapshot, VizError> {
         Session::edit(self, cmd, None)
+    }
+    fn edit_filtered(
+        &self,
+        cmd: EditCommand,
+        filter: Option<ViewFilterRow>,
+    ) -> Result<DocSnapshot, VizError> {
+        Session::edit(self, cmd, filter)
+    }
+    fn modify_templates(&self) -> Result<Vec<ModifyTemplateRow>, VizError> {
+        Session::modify_templates(self)
+    }
+    fn last_modify(&self) -> Result<Option<ModifyRow>, VizError> {
+        Session::last_modify(self)
     }
     fn set_lane_mute(&self, seq: u64, lane: u64, mute: bool) -> Result<DocSnapshot, VizError> {
         Session::set_lane_mute(self, seq, lane, mute)

@@ -15,6 +15,7 @@ use crate::arrangement::PPQ;
 use crate::editing_prefs::ScaleKind;
 
 mod fields;
+pub mod model;
 
 pub use fields::{
     Edge, Field, FieldKind, GROOVE_HELP, GROOVE_LABEL, NOTE_MAP_PLACEHOLDER, condition_fields,
