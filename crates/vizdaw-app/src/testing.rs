@@ -2876,7 +2876,42 @@ impl DocSession for FakeSession {
         Self::scripted(&mut s, "set_destination_plugin")?;
         s.calls
             .push(format!("set_destination_plugin({dest},{})", plugin.id));
-        s.destination_plugins.push((dest, plugin));
+        s.destination_plugins.push((dest, plugin.clone()));
+        // Like the core (Swift `FakeSession.setDestinationPlugin`): the
+        // destination plays it, keeping a name the user gave it, and its
+        // strip (or the Built-in Synth's) and tracks show it at once; the
+        // new instrument's slot is 900 + `dest`.
+        if let Some(i) = s.dests.iter().position(|d| d.id == dest) {
+            let old = s.dests[i].clone();
+            let default_name = old.plugin.as_ref().map_or("Built-in Synth", |p| &p.name);
+            let follows = old.name == default_name;
+            s.dests[i].plugin = Some(plugin.clone());
+            if follows {
+                s.dests[i].name = plugin.name.clone();
+            }
+            let name = s.dests[i].name.clone();
+            let was_synth = old.plugin.is_none() && !old.external;
+            if let Some(st) = s.mixer.strips.iter_mut().find(|x| {
+                x.kind == StripKindRow::Instrument { dest }
+                    || (x.kind == StripKindRow::BuiltinSynth && was_synth)
+            }) {
+                if follows {
+                    st.name = name.clone();
+                }
+                st.kind = StripKindRow::Instrument { dest };
+                st.kind_label = name.clone();
+                st.instrument = Some(SlotRow {
+                    plugin,
+                    instrument: true,
+                    ..slot_row(900 + dest, &name)
+                });
+            }
+            for rows in s.lanes.values_mut() {
+                for l in rows.iter_mut().filter(|l| l.midi_dest == Some(dest)) {
+                    l.destination = Some(name.clone());
+                }
+            }
+        }
         let snap = Self::command_result(&mut s);
         s.mixer.version = snap.version;
         Ok(snap)

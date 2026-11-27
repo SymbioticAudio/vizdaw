@@ -10,9 +10,10 @@
 //!
 //! "Open" (and a slot's double-click, the EQ slot's click) opens the
 //! slot's plug-in window, and the Built-in Synth slot's double-click its
-//! sound window; the GPUI crate makes those windows. Out of this slice (no
-//! new strings): everything that picks a plugin: "+", "EQ ＋", "Replace…"
-//! and the instrument menu. Their items show disabled.
+//! sound window; the GPUI crate makes those windows. Picking a plug-in
+//! ("+", "EQ ＋", "Replace…" and the instrument menu) opens the browser or
+//! the instrument menu of `mixer/browser.rs`, whose picks are the session's
+//! add-insert, set-EQ and instrument calls.
 
 use vizdaw_ffi::mixer::{StripKindRow, StripRow};
 use vizdaw_ffi::snapshot::{SlotRow, SlotStatus};
@@ -81,7 +82,7 @@ pub enum SlotMenuItem {
     Bypass {
         bypassed: bool,
     },
-    /// The EQ's plugin pick: out of this slice, disabled.
+    /// The EQ's plug-in pick: reopens the browser for the EQ slot.
     Replace,
     Sidechain(Vec<SidechainChoice>),
     /// An insert's Remove.
@@ -104,9 +105,9 @@ impl SlotMenuItem {
         }
     }
 
-    /// The catalogue is a later slice: its item stays disabled.
+    /// Every item but the divider.
     pub fn enabled(&self) -> bool {
-        !matches!(self, SlotMenuItem::Replace | SlotMenuItem::Divider)
+        !matches!(self, SlotMenuItem::Divider)
     }
 }
 
@@ -129,10 +130,10 @@ impl SlotLabels {
     /// A faulted slot's reason.
     pub const FAULTED: &'static str = "Bypassed: the plugin misbehaved";
     pub const INSERTS: &'static str = "Inserts";
-    /// The inserts' add button (disabled: the catalogue is later).
+    /// The inserts' add button (opens the effect browser).
     pub const ADD_FACE: &'static str = "+";
     pub const ADD_HELP: &'static str = "Add an effect";
-    /// The empty EQ slot (disabled: the catalogue is later).
+    /// The empty EQ slot (opens the effect browser for the EQ).
     pub const EQ_ADD_FACE: &'static str = "EQ \u{FF0B}";
     pub const EQ_ADD_HELP: &'static str = "Add an EQ";
     pub const EQ_EMPTY: &'static str = "empty";

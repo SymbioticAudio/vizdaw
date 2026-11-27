@@ -165,7 +165,7 @@ fn slot_labels_are_swifts() {
 }
 
 #[test]
-fn menus_follow_swifts_and_leave_the_catalogue_off() {
+fn menus_follow_swifts() {
     let f = slots_fake();
     f.edit_mixer(|m| {
         m.strips[0].inserts[1].has_sidechain_input = true;
@@ -226,10 +226,9 @@ fn menus_follow_swifts_and_leave_the_catalogue_off() {
     );
     // The instrument's own slot: no sidechain, no Remove.
     assert_eq!(titles(11), ["Open", "Bypass"]);
-    // Open opens the plug-in window; Replace… is disabled (the
-    // catalogue comes later).
+    // Every item but the divider is live (Replace… reopens the browser).
     for item in menu(12) {
-        let off = matches!(item, SlotMenuItem::Replace | SlotMenuItem::Divider);
+        let off = matches!(item, SlotMenuItem::Divider);
         assert_eq!(item.enabled(), !off, "{}", item.title());
     }
     assert_eq!(m.sidechain_sources(synth).len(), 2);

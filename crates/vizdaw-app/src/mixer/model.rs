@@ -134,6 +134,12 @@ pub struct MixerModel {
     gestures: HashMap<(MixerPlacement, Target), ControlGesture>,
     /// Moves when a tick changed what the placements show.
     shown_version: u64,
+    /// The open plug-in browser (its target, placement and list).
+    pub(super) browser: Option<super::browser::OpenBrowser>,
+    /// The built-in synth destination of the track the left pane shows,
+    /// so a pick on the shared Built-in Synth strip replaces that track's
+    /// instrument (`None`: the first built-in synth destination).
+    pub synth_focus: Option<u64>,
 }
 
 /// What a tick can change of what the placements show.
@@ -182,6 +188,8 @@ impl MixerModel {
             presses: HashMap::new(),
             gestures: HashMap::new(),
             shown_version: 0,
+            browser: None,
+            synth_focus: None,
         })
     }
 
