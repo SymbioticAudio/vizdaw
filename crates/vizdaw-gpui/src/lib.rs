@@ -62,12 +62,15 @@ pub fn install(store: DocumentStore, cx: &mut App) -> gpui::Entity<AppState> {
     let state = app_state::create(store, cx);
     // No window key acts while a file panel is up.
     file_panels::install(cx);
+    // Esc cancels a waiting MIDI learn from any window. Before the sheet
+    // host's: GPUI runs every interceptor in turn, so this one must see a
+    // sheet still up (its Esc is the sheet's) before the sheet's Esc
+    // closes it.
+    learn_banner::install(cx);
     // A window's keys stay in its sheet while one is up.
     sheet_host::install(cx);
     // Alerts and questions show as prompts when the state changes.
     alerts::install(&state, cx);
-    // Esc cancels a waiting MIDI learn from any window.
-    learn_banner::install(cx);
     // Any quit closes every plug-in editor before a session drops.
     plugin_windows::install(cx);
     // The store's file reads (DAWproject and AAF opens) run off the UI

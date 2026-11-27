@@ -358,6 +358,8 @@ impl DocumentWindow {
         let state = app.clone();
         subscriptions.push(cx.on_release(move |this: &mut Self, cx| {
             this._hold = None;
+            // The MIDI Learn Maps sheet goes with it: its polling stops.
+            let maps = this.sheet_label().as_deref() == Some(crate::sheets::learn_maps::TITLE);
             // A transport field's edit ends with its window: the keys come
             // back, and a bar punch draft does not stay to refuse Record.
             let field = this.transport_fields.editing();
@@ -373,6 +375,9 @@ impl DocumentWindow {
                 s.store.with_document(doc, |d, _| {
                     if let Some(owner) = &sheet_owner {
                         d.end_text_editing(owner);
+                    }
+                    if maps {
+                        d.learn.close_maps();
                     }
                     if field.is_some() {
                         d.end_text_editing(vizdaw_app::transport_fields::TEXT_OWNER);

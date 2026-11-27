@@ -3025,7 +3025,8 @@ fn mixer_entries(
 /// `StripColourMenu`): Rename…, Set All Strips to ▸, Remove Bus (a bus),
 /// Colour ▸ (None and the eight colours), then, but on master, Group,
 /// Assign to VCA ▸ (each VCA, then New VCA) and Remove from VCA ▸, on
-/// the selection when it holds the strip, else on the strip.
+/// the selection when it holds the strip, else on the strip; then MIDI
+/// Learn Maps….
 fn strip_entries(
     view: &WeakEntity<MixerView>,
     mixer: &MixerRef,
@@ -3076,9 +3077,32 @@ fn strip_entries(
         .map(colour)
         .collect();
     out.push(MenuEntry::submenu("Colour", true, colours));
-    if s.kind == StripKindRow::Master {
-        return out;
+    if s.kind != StripKindRow::Master {
+        group_entries(mixer, m, d, strip, &mut out);
     }
+    // Swift `S/ChannelStrip.swift:401-402`: the sheet in the window that
+    // holds this mixer.
+    out.push(MenuEntry::Separator);
+    out.push(MenuEntry::item(
+        crate::sheets::learn_maps::ITEM,
+        |window, cx| {
+            if let Some(Some(root)) = window.root::<crate::shell::DocumentWindow>() {
+                root.update(cx, |v, cx| crate::sheets::learn_maps::show(v, window, cx));
+            }
+        },
+    ));
+    out
+}
+
+/// Group, Assign to VCA ▸ and Remove from VCA ▸ of `strip`'s name menu
+/// (not master's), after a divider.
+fn group_entries(
+    mixer: &MixerRef,
+    m: &MixerModel,
+    d: &DocumentModel,
+    strip: u64,
+    out: &mut Vec<MenuEntry>,
+) {
     let strips = m.menu_strips(d, strip);
     out.push(MenuEntry::Separator);
     let (mx, grouped) = (mixer.clone(), strips.clone());
@@ -3125,7 +3149,6 @@ fn strip_entries(
         .collect();
     let any = !holding.is_empty();
     out.push(MenuEntry::submenu("Remove from VCA", any, holding));
-    out
 }
 
 /// Slot `slot`'s menu (Swift `SlotView.menu`, `EqSlotView.menu`): Open

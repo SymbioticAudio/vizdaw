@@ -1313,7 +1313,8 @@ fn the_strip_menu_has_the_swift_items(cx: &mut TestAppContext) {
             "Colour",
             "Group",
             "Assign to VCA",
-            "Remove from VCA"
+            "Remove from VCA",
+            "MIDI Learn Maps\u{2026}"
         ]
     );
     assert!(s.enabled_item("Group"));
@@ -1321,19 +1322,25 @@ fn the_strip_menu_has_the_swift_items(cx: &mut TestAppContext) {
     s.click("menuitem", "Set All Strips to");
     let titles = s.titles();
     assert_eq!(
-        titles[7..],
+        titles[8..],
         ["Off", "Read", "Touch", "Latch", "Write", "Trim"],
         "{titles:?}"
     );
     s.close_menus();
-    // Only a bus has Remove Bus; master has no group or VCA items.
+    // Only a bus has Remove Bus; master has no group or VCA items, and
+    // has MIDI Learn Maps….
     s.right_click("text", "Audio 1");
     assert!(!s.titles().contains(&"Remove Bus".to_owned()));
     s.close_menus();
     s.right_click("text", "Master");
     assert_eq!(
         s.titles(),
-        ["Rename\u{2026}", "Set All Strips to", "Colour"]
+        [
+            "Rename\u{2026}",
+            "Set All Strips to",
+            "Colour",
+            "MIDI Learn Maps\u{2026}"
+        ]
     );
     s.close_menus();
     // A right-click does not select.
@@ -1346,15 +1353,15 @@ fn the_strip_menu_colours_renames_sets_all_and_removes_a_bus(cx: &mut TestAppCon
     s.right_click("text", "Audio 1");
     s.click("menuitem", "Colour");
     let items = s.items();
-    // Audio 1 is no bus: six items, then the submenu's.
-    let colours: Vec<&str> = items[6..].iter().map(|i| i.0.as_str()).collect();
+    // Audio 1 is no bus: seven items, then the submenu's.
+    let colours: Vec<&str> = items[7..].iter().map(|i| i.0.as_str()).collect();
     assert_eq!(
         colours,
         [
             "None", "Red", "Orange", "Yellow", "Green", "Teal", "Blue", "Purple", "Pink"
         ]
     );
-    assert!(items[6].2, "no colour of its own: None is checked");
+    assert!(items[7].2, "no colour of its own: None is checked");
     s.click("menuitem", "Teal");
     assert!(
         s.fake
@@ -1399,7 +1406,7 @@ fn the_strip_menu_groups_and_assigns_its_strips(cx: &mut TestAppContext) {
     // Not in the selection: the strip alone.
     s.right_click("text", "Audio 1");
     s.click("menuitem", "Assign to VCA");
-    assert_eq!(s.titles()[6..], ["VCA 1", "New VCA"]);
+    assert_eq!(s.titles()[7..], ["VCA 1", "New VCA"]);
     assert!(s.enabled_item("VCA 1"));
     s.click("menuitem", "VCA 1");
     assert_eq!(s.mixer_calls().last().unwrap().0, "mixer.assign_vca");
