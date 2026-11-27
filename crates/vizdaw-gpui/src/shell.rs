@@ -749,6 +749,10 @@ impl DocumentWindow {
                         let _ = DocumentWindow::open_mixer(&app, doc, cx);
                     });
                 }
+                if ran.open_modify_panel {
+                    // Task 5: open the document's Select and Modify panel,
+                    // deferred as the Mixer window is.
+                }
                 if let Some(focus) = ran.focus {
                     self.focus_field(focus.field(), window, cx);
                 }

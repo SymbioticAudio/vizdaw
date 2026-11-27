@@ -671,15 +671,16 @@ fn the_mix_view_hides_the_selection() {
     assert!(!m.selection_hidden());
     set(&mut m, true, PaneView::AudioEditor);
     assert!(!m.selection_hidden());
-    let key = if cfg!(target_os = "macos") {
-        "\u{2303}1"
+    // Off macOS, Ctrl-1 is Piano Roll's (⌘1 owns it), so the menu item.
+    let how = if cfg!(target_os = "macos") {
+        "press \u{2303}1"
     } else {
-        "Ctrl-1"
+        "choose View > Arrange View"
     };
     assert_eq!(
         HIDDEN_SELECTION,
         format!(
-            "The Mix view shows no editor: press {key}, or show the Editor in the bottom pane, to edit the selection."
+            "The Mix view shows no editor: {how}, or show the Editor in the bottom pane, to edit the selection."
         )
     );
 }

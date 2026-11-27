@@ -120,5 +120,6 @@ pub fn run_ui_theme(
         status: Some(format!("theme {theme}")),
         focus: None,
         open_mixer_window: false,
+        open_modify_panel: false,
     })
 }

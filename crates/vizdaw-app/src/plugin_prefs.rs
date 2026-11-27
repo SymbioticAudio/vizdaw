@@ -419,6 +419,7 @@ pub fn run_plugins_with(
         status: Some(status),
         focus: None,
         open_mixer_window: false,
+        open_modify_panel: false,
     };
     let write = |r: Result<(), String>| r.map_err(|m| ControlError::new(ErrorCode::Failed, m));
     match id {

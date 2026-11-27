@@ -660,5 +660,6 @@ pub fn run_audio_set(
         status: None,
         focus: None,
         open_mixer_window: false,
+        open_modify_panel: false,
     })
 }

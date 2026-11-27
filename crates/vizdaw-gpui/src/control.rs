@@ -74,7 +74,7 @@ use gpui::{
 use serde_json::{Value, json};
 use vizdaw_app::audio_prefs;
 use vizdaw_app::commands::{
-    self, APP_COMMANDS, LANE_INPUT_COMMANDS, RECORD_COMMANDS, TRANSPORT_COMMANDS,
+    self, APP_COMMANDS, LANE_INPUT_COMMANDS, MODIFY_COMMANDS, RECORD_COMMANDS, TRANSPORT_COMMANDS,
 };
 use vizdaw_app::key_prefs as keys_prefs;
 use vizdaw_app::step_entry::STEP_COMMANDS;
@@ -674,7 +674,9 @@ fn run_command(
         _ => None,
     });
     match id {
-        _ if menus::routed(id) => {
+        // The Modify commands run as the document's; a panel task opens
+        // the panel afterwards.
+        _ if menus::routed(id) || MODIFY_COMMANDS.contains(&id) => {
             let ran = app.update(cx, |s, cx| {
                 cx.notify();
                 s.store.with_document(doc, |d, _| {
@@ -695,6 +697,9 @@ fn run_command(
                 if let Err(m) = DocumentWindow::open_mixer(&app, doc, cx) {
                     return Err(failure(before, &m, cx));
                 }
+            }
+            if ran.open_modify_panel {
+                // Task 5: open the document's Select and Modify panel here.
             }
             return Ok(ran_json(id, doc, entry, ran.undo, ran.status));
         }
@@ -1011,7 +1016,7 @@ fn editor_state(doc: DocId, cx: &App) -> Result<Value, ControlError> {
             tool: d.tool().name().to_owned(),
             snap_enabled: snap.enabled,
             snap_division: snap.division.name().to_owned(),
-            exact_mode: false,
+            exact_mode: d.editor().exact_mode(),
             gesture: d.gesture_open(),
             status: d.status().map(String::from),
             step: d.step_state_row(),

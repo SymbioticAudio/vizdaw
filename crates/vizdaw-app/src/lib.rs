@@ -33,6 +33,7 @@ pub mod list;
 pub mod marker_list;
 pub mod merge;
 pub mod mixer;
+pub mod modify_commands;
 pub mod panels;
 pub mod piano_roll;
 pub mod plugin_browser;

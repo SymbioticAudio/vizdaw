@@ -18,6 +18,7 @@ use crate::editor::{DetailEditorKind, GESTURE_OPEN};
 pub use crate::lane_inputs::LANE_INPUT_COMMANDS;
 use crate::mixer::commands::{SELECTION_FILLED, SUSPEND, mode_of, suspend};
 use crate::mixer::strips_text;
+pub use crate::modify_commands::MODIFY_COMMANDS;
 use crate::prefs::Prefs;
 use crate::step_entry::STEP_COMMANDS;
 use crate::transport_bar::TransportLayout;
@@ -233,6 +234,9 @@ pub struct Ran {
     /// The UI is to open this document's Mixer window, or bring it to the
     /// front (`window.mixer`).
     pub open_mixer_window: bool,
+    /// The UI is to show this document's Select and Modify panel, or
+    /// bring it to the front (a Modify menu task).
+    pub open_modify_panel: bool,
 }
 
 /// A transport bar field a command asks the UI to focus. The UI answers
@@ -276,6 +280,7 @@ pub fn run_app(
         status: Some(s.into()),
         focus: None,
         open_mixer_window: false,
+        open_modify_panel: false,
     };
     let write = |r: Result<(), String>| r.map_err(failed);
     match id {
@@ -308,6 +313,7 @@ pub fn run_app(
                 status: None,
                 focus: None,
                 open_mixer_window: false,
+                open_modify_panel: false,
             })
         }
         _ => Err(ControlError::new(
@@ -396,6 +402,9 @@ pub fn enabled(id: &str, doc: &DocumentModel) -> bool {
     if STEP_COMMANDS.contains(&id) {
         return crate::step_entry::step_enabled(id, doc);
     }
+    if MODIFY_COMMANDS.contains(&id) {
+        return crate::modify_commands::enabled(id, doc);
+    }
     if EDITOR_COMMANDS.contains(&id) {
         return match id {
             "editors.close_detail" => doc.layout().detail.is_some(),
@@ -446,6 +455,9 @@ pub fn perform_from_menu(id: &str, doc: &mut DocumentModel) -> Result<Ran, Contr
     }
     if STEP_COMMANDS.contains(&id) {
         return crate::step_entry::run_step(id, &[], doc).map_err(|e| refused(doc, e));
+    }
+    if MODIFY_COMMANDS.contains(&id) {
+        return crate::modify_commands::perform_from_menu(id, doc);
     }
     if EDITOR_COMMANDS.contains(&id) {
         return run_editor(id, &[], doc).map_err(|e| refused(doc, e));
@@ -505,6 +517,7 @@ pub(crate) fn ran(doc: &DocumentModel) -> Ran {
         status: doc.status().map(String::from),
         focus: None,
         open_mixer_window: false,
+        open_modify_panel: false,
     }
 }
 
@@ -575,6 +588,9 @@ pub fn run(
     }
     if STEP_COMMANDS.contains(&id) {
         return crate::step_entry::run_step(id, args, doc);
+    }
+    if MODIFY_COMMANDS.contains(&id) {
+        return crate::modify_commands::run(id, args, doc);
     }
     if EDITOR_COMMANDS.contains(&id) {
         return run_editor(id, args, doc);

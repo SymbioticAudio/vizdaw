@@ -37,11 +37,13 @@ pub const NOT_SELECTED: &str = "The dragged notes could not be selected.";
 /// Save as Template with a blank name (`:55`).
 pub const NO_NAME: &str = "Name the template first.";
 /// Why the nudges and Modify Again wait in the Mix view
-/// (`M/DocumentModel.swift:593-594`); ⌃1 as the menus show it.
+/// (`M/DocumentModel.swift:593-594`). Off macOS, Arrange View's ⌃1 is
+/// Ctrl-1, which ⌘1 (Piano Roll) owns there (`menus::owner` in
+/// vizdaw-gpui), so the message names the menu item instead.
 pub const HIDDEN_SELECTION: &str = if cfg!(target_os = "macos") {
     "The Mix view shows no editor: press \u{2303}1, or show the Editor in the bottom pane, to edit the selection."
 } else {
-    "The Mix view shows no editor: press Ctrl-1, or show the Editor in the bottom pane, to edit the selection."
+    "The Mix view shows no editor: choose View > Arrange View, or show the Editor in the bottom pane, to edit the selection."
 };
 /// Modify Again with nothing to repeat (`M/ControlCommands.swift:657`).
 pub const NO_MODIFICATION: &str = "There is no modification to repeat.";

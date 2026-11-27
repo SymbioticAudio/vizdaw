@@ -224,6 +224,7 @@ pub fn run_keys(
         status: None,
         focus: None,
         open_mixer_window: false,
+        open_modify_panel: false,
     };
     let path = || {
         args.iter().find_map(|(n, v)| match (n.as_str(), v) {
