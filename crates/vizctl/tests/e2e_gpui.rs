@@ -5232,45 +5232,52 @@ fn gpui_midi_learn_over_the_channel() {
 fn gpui_drives_a_fader_and_a_button_from_an_mcu() {
     let home = temp_home();
     let mut app = App::start(home.path(), false);
-    // The launch window holds an empty document: close it first, so the
-    // call below has no document to answer for.
-    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
-    loop {
-        let ws = app.call("state.get", json!({"target": "windows"}));
-        if let Some(d) = ws["windows"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|x| x["kind"] == "document")
-        {
-            let n = d["number"].clone();
-            app.call("command.run", json!({"id": "file.close", "window": n}));
-            break;
+    // Mac only: on Linux GPUI quits when the last window closes
+    // (`QuitMode::LastWindowClosed`), so closing the launch document
+    // there would quit the app. The no-document check runs on macOS.
+    if cfg!(target_os = "macos") {
+        // The launch window holds an empty document: close it first, so the
+        // call below has no document to answer for.
+        let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+        loop {
+            let ws = app.call("state.get", json!({"target": "windows"}));
+            if let Some(d) = ws["windows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|x| x["kind"] == "document")
+            {
+                let n = d["number"].clone();
+                app.call("command.run", json!({"id": "file.close", "window": n}));
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no launch document window in {ws}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
         }
+        // Pre-flight M29: surfaces are app-wide, so `state.get surfaces`
+        // answers without a document.
+        let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+        let st = loop {
+            let st = app.call("state.get", json!({"target": "surfaces"}));
+            if st["doc"].is_null() {
+                break st;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the launch document closes: {st}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        };
         assert!(
-            Instant::now() < deadline,
-            "no launch document window in {ws}"
+            st["feedback"].as_array().is_some_and(|f| f.is_empty()),
+            "{st}"
         );
-        std::thread::sleep(Duration::from_millis(100));
+    } else {
+        eprintln!("skipped on Linux: closing the last window quits the app there");
     }
-    // Pre-flight M29: surfaces are app-wide, so `state.get surfaces`
-    // answers without a document.
-    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
-    let st = loop {
-        let st = app.call("state.get", json!({"target": "surfaces"}));
-        if st["doc"].is_null() {
-            break st;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the launch document closes: {st}"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    };
-    assert!(
-        st["feedback"].as_array().is_some_and(|f| f.is_empty()),
-        "{st}"
-    );
     let w = app.call("app.new_demo", json!({}))["window"].clone();
     app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
     let run = |app: &mut App, id: &str, params: Value| {
