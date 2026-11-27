@@ -290,11 +290,17 @@ fn answer_questions(cx: &mut App) {
     if notes.is_empty() {
         return;
     }
-    let kept = &mut cx.default_global::<Notes>().0;
     for n in notes {
-        eprintln!("vizdaw: alert {}: {}", n.title, n.message);
-        kept.push(n);
+        note(n, cx);
     }
+}
+
+/// Keeps `item` for the channel to report instead of showing it (Swift
+/// `ControlChannel.note`); the last [`NOTES_KEPT`] stay.
+pub(crate) fn note(item: vizdaw_app::AlertItem, cx: &mut App) {
+    eprintln!("vizdaw: alert {}: {}", item.title, item.message);
+    let kept = &mut cx.default_global::<Notes>().0;
+    kept.push(item);
     if kept.len() > NOTES_KEPT {
         let extra = kept.len() - NOTES_KEPT;
         kept.drain(..extra);
@@ -1698,15 +1704,18 @@ pub fn start(path: &Path, cx: &mut App) -> Result<(), StartError> {
     Ok(())
 }
 
-/// What the command line asks for. `--no-scan` and
-/// `-ApplePersistenceIgnoreState YES` (passed by `vizctl launch`) are
-/// accepted and ignored, as is anything else unknown.
+/// What the command line asks for. `-ApplePersistenceIgnoreState YES`
+/// (passed by `vizctl launch`) is accepted and ignored, as is anything
+/// else unknown.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LaunchOptions {
     /// `--control PATH`, else `VIZDAW_CONTROL`.
     pub control: Option<PathBuf>,
     /// `--demo`: the first window is the demo project.
     pub demo: bool,
+    /// `--no-scan` or `--smoke`: no plug-in scan at launch (Swift
+    /// `LaunchArguments`, `S/VizDAWApp.swift:308,625-640`).
+    pub no_scan: bool,
 }
 
 impl LaunchOptions {
@@ -1722,6 +1731,7 @@ impl LaunchOptions {
             match a.to_str() {
                 Some("--control") => o.control = args.next().map(PathBuf::from),
                 Some("--demo") => o.demo = true,
+                Some("--no-scan" | "--smoke") => o.no_scan = true,
                 Some("-ApplePersistenceIgnoreState") => {
                     args.next();
                 }

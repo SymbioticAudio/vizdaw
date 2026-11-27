@@ -118,6 +118,12 @@ pub struct AppState {
     /// The Settings window, while it is open. It belongs to no document,
     /// so it is not one of `windows`.
     pub settings_window: Option<WindowHandle<crate::settings_window::SettingsWindow>>,
+    /// The app's plug-in catalog ([`crate::start_plugins`] at launch;
+    /// none until then).
+    pub app_plugins: vizdaw_app::plugins::AppPlugins,
+    /// The Plugin Manager window is open: the catalog's progress is
+    /// polled while it is, scan or not.
+    pub plugin_manager_open: bool,
 }
 
 /// The poll's interval while a retry waits on Busy (Swift's 60 Hz tick).
@@ -158,6 +164,8 @@ impl AppState {
             listening: HashMap::new(),
             plugin_windows: PluginWindows::default(),
             settings_window: None,
+            app_plugins: Default::default(),
+            plugin_manager_open: false,
         }
     }
 

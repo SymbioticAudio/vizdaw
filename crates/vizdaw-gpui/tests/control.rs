@@ -748,6 +748,7 @@ fn launch_arguments_take_the_socket_and_ignore_the_rest() {
     ]
     .map(String::from);
     let o = control::LaunchOptions::parse(args, None);
+    assert!(o.no_scan);
     assert_eq!(
         o.control.as_deref(),
         Some(std::path::Path::new("/tmp/x/s.sock"))

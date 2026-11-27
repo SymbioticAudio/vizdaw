@@ -4787,6 +4787,8 @@ pub struct FakeCatalogState {
     pub enabled_calls: Vec<(PluginKey, bool)>,
     /// Every `reveal_path(key)`.
     pub revealed: Vec<PluginKey>,
+    /// How many times `rows` answered.
+    pub rows_reads: usize,
     /// Refusals, every time while set; a refused call records nothing.
     pub fail_take_problem: Option<VizError>,
     pub fail_rows: Option<VizError>,
@@ -4843,8 +4845,9 @@ impl crate::plugins::PluginCatalogCalls for FakeCatalog {
         Ok(s.problems.pop_front())
     }
     fn rows(&self) -> Result<Vec<CatalogRowFfi>, VizError> {
-        let s = self.state();
+        let mut s = self.state();
         refuse(&s.fail_rows)?;
+        s.rows_reads += 1;
         Ok(s.rows.clone())
     }
     fn browser(&self, kind: PluginKindTag) -> Result<Vec<CatalogRowFfi>, VizError> {
