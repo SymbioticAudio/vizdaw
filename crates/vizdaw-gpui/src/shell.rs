@@ -418,7 +418,10 @@ impl DocumentWindow {
             // The Mixer window's transport is the document's: its own
             // window polls it.
             _poll: match kind {
-                WindowKind::Document => Self::start_polling(doc, window, cx),
+                WindowKind::Document => {
+                    Self::start_surface_tick(doc, window, cx);
+                    Self::start_polling(doc, window, cx)
+                }
                 _ => Task::ready(()),
             },
             app,
@@ -460,6 +463,35 @@ impl DocumentWindow {
             fast_poll: false,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// The surface tick (slice 9d review I1): every [`FAST_POLL`] while a
+    /// surface is set up, the document's surface events are taken and run
+    /// in this window, as Swift's 60 Hz timer did, without speeding up the
+    /// transport poll. Ends with the window.
+    ///
+    /// [`FAST_POLL`]: crate::app_state::FAST_POLL
+    fn start_surface_tick(doc: DocId, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                let interval = this
+                    .update(cx, |this, cx| this.app.read(cx).surface_interval(doc))
+                    .ok()
+                    .flatten();
+                let Some(interval) = interval else { break };
+                cx.background_executor().timer(interval).await;
+                let ticked = this.update_in(cx, |this, window, cx| {
+                    let steps = this.app.update(cx, |s, _| s.surface_tick(doc));
+                    if !steps.is_empty() {
+                        this.run_surface_steps(steps, window, cx);
+                    }
+                });
+                if ticked.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     /// Polls the transport every `poll_interval()` (read again each tick:

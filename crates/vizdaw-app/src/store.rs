@@ -133,6 +133,9 @@ pub struct DocumentStore {
     /// The document the surfaces were last focused on, once the core
     /// took it (`S/VizDAWApp.swift:590-603`).
     surface_focus: Option<DocId>,
+    /// A surface is set up, as the core's list last said: the windows'
+    /// fast surface tick runs.
+    has_surfaces: bool,
 }
 
 impl DocumentStore {
@@ -174,6 +177,7 @@ impl DocumentStore {
             input_sources: crate::lane_inputs::InputSources::default(),
             claimed_ports: vec![],
             surface_focus: None,
+            has_surfaces: false,
         }
     }
 
@@ -258,16 +262,18 @@ impl DocumentStore {
     /// The surfaces' input ports, read again from the core's list (after
     /// a surface is added or removed), for every document's picker.
     pub fn refresh_claimed_ports(&mut self) {
-        let ports: Vec<String> = self
-            .core
-            .surface_list()
-            .into_iter()
-            .map(|r| r.input)
-            .collect();
+        let list = self.core.surface_list();
+        self.has_surfaces = !list.is_empty();
+        let ports: Vec<String> = list.into_iter().map(|r| r.input).collect();
         for d in self.documents.values_mut() {
             d.inputs.set_claimed_ports(ports.clone());
         }
         self.claimed_ports = ports;
+    }
+
+    /// A surface is set up (read at launch and after each add or remove).
+    pub fn has_surfaces(&self) -> bool {
+        self.has_surfaces
     }
 
     pub fn new_empty(&mut self) -> Option<DocId> {

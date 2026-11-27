@@ -391,7 +391,7 @@ impl DocumentModel {
             arrived = true;
         }
         // The count-in for the surfaces, and what they asked for.
-        if self.idle_surfaces(std::time::Instant::now()) {
+        if self.surface_tick(std::time::Instant::now()) {
             arrived = true;
         }
         pending || arrived

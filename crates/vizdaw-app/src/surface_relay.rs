@@ -62,7 +62,9 @@ pub struct SurfaceCommand {
     /// never opens a dialog (pre-flight I9).
     pub programmatic: bool,
     /// A device's button that runs while a text field has the keyboard
-    /// (ruling T9-1); never for a command that can open a dialog.
+    /// (ruling T9-1); never for a command that can open a dialog. (The
+    /// window also sets surface-acting around a programmatic command, as
+    /// Swift's `acting(m) { quietly(id) }`, `M/SurfaceRelay.swift:70`.)
     pub bypass: bool,
 }
 
@@ -121,6 +123,11 @@ impl SurfaceRelay {
         self.take_pending()
     }
 
+    /// Detents wait for the jog window.
+    pub fn pending(&self) -> bool {
+        self.since.is_some()
+    }
+
     fn take_pending(&mut self) -> Option<RelayStep> {
         self.since.take()?;
         let detents = std::mem::take(&mut self.detents);
@@ -133,8 +140,10 @@ impl crate::DocumentModel {
     /// tells the core the count-in, for a keyboard's Count-in light, once
     /// per change and again after a refusal (final review T7 m3); drains
     /// the session's events into steps and adds the jog's locate once its
-    /// window passed. True when steps wait.
-    pub(crate) fn idle_surfaces(&mut self, now: Instant) -> bool {
+    /// window passed. True when steps wait. `idle` runs it, and the window
+    /// runs it on its ~16 ms surface tick while a surface is set up (Swift's
+    /// 60 Hz timer, `S/VizDAWApp.swift:587-589`).
+    pub fn surface_tick(&mut self, now: Instant) -> bool {
         let count_in = self.record.count_in_bars() > 0;
         if self.sent_count_in != Some(count_in)
             && self.session.set_surface_count_in(count_in).is_ok()
@@ -152,6 +161,11 @@ impl crate::DocumentModel {
             self.surface_steps.push(l);
         }
         self.surface_steps.len() > before
+    }
+
+    /// Steps or jog detents wait: the surface tick keeps running.
+    pub fn surfaces_waiting(&self) -> bool {
+        !self.surface_steps.is_empty() || self.surface_relay.pending()
     }
 
     /// The steps the surfaces asked for since the last call, in order.

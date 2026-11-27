@@ -116,6 +116,10 @@ pub struct AppState {
 /// The poll's interval while a retry waits on Busy (Swift's 60 Hz tick).
 pub const FAST_POLL: Duration = Duration::from_millis(16);
 
+/// How often a window's surface tick looks again while no surface is set
+/// up (it does nothing then; the transport poll still takes events).
+const SURFACE_IDLE: Duration = Duration::from_millis(250);
+
 /// The least time between two idle ticks of one document.
 const IDLE_EVERY: Duration = Duration::from_millis(50);
 
@@ -471,6 +475,38 @@ impl AppState {
         self.store
             .with_document(doc, |d, _| d.idle())
             .unwrap_or(false)
+    }
+
+    /// How long until `doc`'s next surface tick; `None` once it is closed.
+    /// [`FAST_POLL`] while a surface is set up or steps or detents wait,
+    /// else [`SURFACE_IDLE`], when the tick does nothing.
+    pub fn surface_interval(&self, doc: DocId) -> Option<std::time::Duration> {
+        let d = self.store.document(doc)?;
+        Some(if self.store.has_surfaces() || d.surfaces_waiting() {
+            FAST_POLL
+        } else {
+            SURFACE_IDLE
+        })
+    }
+
+    /// `doc`'s surface tick (Swift's 60 Hz timer, `S/VizDAWApp.swift:
+    /// 587-603`): the focus follows the front document, the session's
+    /// events are taken and the jog flushed, outside the idle's 50 ms
+    /// throttle. The steps are for `doc`'s window to run. No work while no
+    /// surface is set up and nothing waits.
+    pub fn surface_tick(&mut self, doc: DocId) -> Vec<vizdaw_app::surface_relay::RelayStep> {
+        let has = self.store.has_surfaces();
+        if has {
+            self.store.follow_surface_focus();
+        }
+        let Some(d) = self.store.document_mut(doc) else {
+            return vec![];
+        };
+        if !has && !d.surfaces_waiting() {
+            return vec![];
+        }
+        d.surface_tick(Instant::now());
+        d.take_surface_steps()
     }
 
     /// How long until `doc`'s next poll; `None` once it is closed. While
