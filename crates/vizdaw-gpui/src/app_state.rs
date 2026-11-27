@@ -424,6 +424,9 @@ impl AppState {
 
     /// Polls `doc`'s transport; true when what the window shows changed.
     pub fn poll(&mut self, doc: DocId) -> bool {
+        // The surfaces drive the front document, refocused when it
+        // changes (`S/VizDAWApp.swift:590-603`).
+        self.store.follow_surface_focus();
         let idled = self.idle(doc);
         let Some(t) = self.transports.get_mut(&doc) else {
             return idled;

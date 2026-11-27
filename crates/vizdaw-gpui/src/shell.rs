@@ -38,6 +38,7 @@ use vizdaw_app::editor::{MainView, PaneSide, PaneView, ViewLayouts};
 use vizdaw_app::marker_list::{MarkerList, MarkerListRow};
 use vizdaw_app::mixer::MixerPlacement;
 use vizdaw_app::record::PopoverHost;
+use vizdaw_app::surface_relay::RelayStep;
 use vizdaw_app::transport::Shuttle;
 use vizdaw_app::transport_bar::TransportItem;
 use vizdaw_app::transport_fields::{self as fields_model, TransportField};
@@ -473,12 +474,19 @@ impl DocumentWindow {
                     .flatten();
                 let Some(interval) = interval else { break };
                 cx.background_executor().timer(interval).await;
-                let polled = this.update(cx, |this, cx| {
-                    this.app.update(cx, |s, cx| {
+                let polled = this.update_in(cx, |this, window, cx| {
+                    let steps = this.app.update(cx, |s, cx| {
                         if s.poll(doc) {
                             cx.notify();
                         }
+                        s.store
+                            .document_mut(doc)
+                            .map(DocumentModel::take_surface_steps)
+                            .unwrap_or_default()
                     });
+                    // What this document's session took from the surfaces
+                    // runs here, in its own window, whichever is in front.
+                    this.run_surface_steps(steps, window, cx);
                     // A job the poll ended may close a project the store
                     // made (or open one): outside this window's update.
                     if this.app.read(cx).store.settling() {
@@ -490,6 +498,62 @@ impl DocumentWindow {
                 }
             }
         })
+    }
+
+    /// Applies the surfaces' steps to this window's document, in order
+    /// (slice 9d; `M/SurfaceRelay.swift:66-89`). A device's command runs
+    /// as its menu item, through this window; with `bypass` the document
+    /// takes it as a surface button, not a key (ruling T9-1), until the
+    /// dispatched action ran. A programmatic one runs as `command.run`
+    /// does and opens no dialog. The steps after a command wait for it.
+    pub fn run_surface_steps(
+        &mut self,
+        steps: Vec<RelayStep>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let doc = self.doc;
+        let mut steps = steps.into_iter();
+        while let Some(step) = steps.next() {
+            let command = self.app.update(cx, |s, cx| {
+                cx.notify();
+                s.store
+                    .with_document(doc, |d, _| d.apply_surface_step(step))
+                    .flatten()
+            });
+            let Some(c) = command else { continue };
+            let rest: Vec<RelayStep> = steps.collect();
+            if c.programmatic {
+                // Outside this window's update, as the channel runs it
+                // (the command may close or update the window); as a
+                // surface button too (`M/SurfaceRelay.swift:70`).
+                let app = self.app.clone();
+                let own = window.window_handle().downcast::<DocumentWindow>();
+                cx.defer(move |cx| {
+                    set_surface_acting(&app, doc, true, cx);
+                    crate::control::run_quietly(&c.id, doc, cx);
+                    set_surface_acting(&app, doc, false, cx);
+                    if let Some(own) = own {
+                        let _ = own.update(cx, |this, window, cx| {
+                            this.run_surface_steps(rest, window, cx);
+                        });
+                    }
+                });
+            } else {
+                if c.bypass {
+                    set_surface_acting(&self.app, doc, true, cx);
+                }
+                window.dispatch_action(menus::action_for(&c.id), cx);
+                // Queued after the dispatch, which runs deferred too.
+                cx.defer_in(window, move |this, window, cx| {
+                    if c.bypass {
+                        set_surface_acting(&this.app, doc, false, cx);
+                    }
+                    this.run_surface_steps(rest, window, cx);
+                });
+            }
+            return;
+        }
     }
 
     pub fn doc(&self) -> DocId {
@@ -2370,4 +2434,13 @@ fn bar_state(
             })
             .collect(),
     })
+}
+
+/// Sets `doc`'s surface-acting flag (ruling T9-1).
+fn set_surface_acting(app: &Entity<AppState>, doc: DocId, on: bool, cx: &mut App) {
+    app.update(cx, |s, _| {
+        if let Some(d) = s.store.document_mut(doc) {
+            d.set_surface_acting(on);
+        }
+    });
 }

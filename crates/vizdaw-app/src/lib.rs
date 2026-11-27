@@ -47,6 +47,7 @@ pub mod session;
 pub mod step_entry;
 pub mod store;
 pub mod surface_commands;
+pub mod surface_relay;
 pub mod surface_settings;
 #[cfg(feature = "test-support")]
 pub mod testing;

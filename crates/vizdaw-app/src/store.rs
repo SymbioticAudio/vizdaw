@@ -130,6 +130,9 @@ pub struct DocumentStore {
     /// The surfaces' input ports, which reach no track (plan 5f-1 Ruling
     /// 17): every document's picker marks them.
     claimed_ports: Vec<String>,
+    /// The document the surfaces were last focused on, once the core
+    /// took it (`S/VizDAWApp.swift:590-603`).
+    surface_focus: Option<DocId>,
 }
 
 impl DocumentStore {
@@ -170,6 +173,7 @@ impl DocumentStore {
             disable_plugins: Box::new(move |p| disabling.disable_plugins(p).is_ok()),
             input_sources: crate::lane_inputs::InputSources::default(),
             claimed_ports: vec![],
+            surface_focus: None,
         }
     }
 
@@ -345,6 +349,26 @@ impl DocumentStore {
             .iter()
             .copied()
             .find(|d| self.documents.contains_key(d))
+    }
+
+    /// The surfaces drive the front document (plan 5f-1 Ruling 11): its
+    /// session is focused when the front changes, not every tick, so a
+    /// `surface.inject` into another window keeps the focus it took. It is
+    /// remembered only once the core took it, so a refusal is retried at
+    /// the next call; with no document open it is forgotten.
+    pub fn follow_surface_focus(&mut self) {
+        let front = self.front();
+        if front == self.surface_focus {
+            return;
+        }
+        match front {
+            None => self.surface_focus = None,
+            Some(id) => {
+                if self.documents[&id].session().focus_surfaces().is_ok() {
+                    self.surface_focus = Some(id);
+                }
+            }
+        }
     }
 
     /// A window closed: its document goes. Closing twice is harmless.

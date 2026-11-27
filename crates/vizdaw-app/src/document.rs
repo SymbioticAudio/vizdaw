@@ -158,6 +158,15 @@ pub struct DocumentModel {
     /// Whether the saved project has Co-Producer copies, and when that
     /// was read.
     pub(crate) copies_read: Mutex<Option<(std::time::Instant, bool)>>,
+    /// The jog detents waiting to be located by (slice 9d).
+    pub(crate) surface_relay: crate::surface_relay::SurfaceRelay,
+    /// What the surfaces asked for, for the window to apply in order.
+    pub(crate) surface_steps: Vec<crate::surface_relay::RelayStep>,
+    /// The count-in the core last took (`None`: not yet told).
+    pub(crate) sent_count_in: Option<bool>,
+    /// A surface's button is running (ruling T9-1): the keys a text field
+    /// holds back act regardless.
+    pub(crate) surface_acting: bool,
 }
 
 /// What the arrangement reads of one track, read when first asked for.
@@ -286,6 +295,10 @@ impl DocumentModel {
             merge: crate::merge::Merge::default(),
             media_rows: Mutex::new(None),
             copies_read: Mutex::new(None),
+            surface_relay: crate::surface_relay::SurfaceRelay::default(),
+            surface_steps: vec![],
+            sent_count_in: None,
+            surface_acting: false,
         };
         model.refresh_project_info();
         // The time left reads the core's free space from the start.
@@ -375,6 +388,10 @@ impl DocumentModel {
         }
         // A held Recovered Recordings offer shows again.
         if self.reoffer_if_held() {
+            arrived = true;
+        }
+        // The count-in for the surfaces, and what they asked for.
+        if self.idle_surfaces(std::time::Instant::now()) {
             arrived = true;
         }
         pending || arrived
@@ -702,14 +719,16 @@ impl DocumentModel {
     }
 
     /// Space and the other bare transport keys work: no field is typed in.
+    /// A surface's button is no key (ruling T9-1,
+    /// `M/DocumentModel.swift:582`): it acts regardless.
     pub fn transport_keys_enabled(&self) -> bool {
-        self.text_editors.is_empty()
+        self.surface_acting || self.text_editors.is_empty()
     }
 
     /// Return (Return to Start) also waits while the list table has the
     /// keyboard; Space still plays.
     pub fn return_key_enabled(&self) -> bool {
-        self.transport_keys_enabled() && !self.list_focused
+        self.surface_acting || (self.transport_keys_enabled() && !self.list_focused)
     }
 
     /// Where the last Play started; Stop returns there.

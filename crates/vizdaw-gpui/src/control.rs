@@ -767,6 +767,32 @@ fn run_command(
     Ok(ran_json(id, doc, entry, undo, None))
 }
 
+/// A command a surface's programmatic event asked for (`surface.inject`,
+/// `midi.inject`), run as `command.run` runs it on `doc`'s window with no
+/// arguments, so it opens no dialog (pre-flight I9). A failure is the
+/// document's status line; a `Later` or `Job` is not waited on
+/// (`S/VizDAWApp.swift:178-186`).
+pub fn run_quietly(id: &str, doc: DocId, cx: &mut App) {
+    let app = AppState::global(cx);
+    let Some(n) = app.read(cx).window_of(doc).map(|w| number(w.handle)) else {
+        return;
+    };
+    let command = Command::CommandRun {
+        id: id.to_owned(),
+        args: vec![],
+        window: Some(WindowRef::Number(n)),
+    };
+    match handle(&command, cx) {
+        Handled::Reply(Err(e)) => app.update(cx, |s, cx| {
+            if let Some(d) = s.store.document_mut(doc) {
+                d.set_status(Some(e.message));
+            }
+            cx.notify();
+        }),
+        Handled::Reply(Ok(_)) | Handled::Quit | Handled::Job { .. } | Handled::Later(_) => {}
+    }
+}
+
 /// A `command.run` reply: `{command, doc, window, undo, status}`.
 fn ran_json(
     id: &str,
