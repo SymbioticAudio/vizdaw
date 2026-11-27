@@ -591,3 +591,21 @@
 7. **The Maps sheet belongs to its window** and closes with it, or with Done. Swift also closed it when its mixer placement disappeared (`S/MixerView.swift:83-87`), for example when the Mix pane was hidden. Backlog row. Cost: a sheet left open after hiding the pane under it.
 8. **Closing a learning document cancels its learn** (Review Focus 2). Swift left the core's waiting learn for a closed session. Nothing landed in it, but the core kept waiting. Cost: none known.
 9. **A surface's dialog command runs as its key does** (`menus::action_for`), so `file.save` on an untitled song opens the Save panel from a real button. A programmatic one runs quietly (Swift pre-flight I9).
+
+## Outcome (2026-11-26)
+
+All nine tasks are done, each with a task review. Tasks 3 and 4 needed one fix round each. The final whole-branch review found one Important issue, which is fixed.
+
+- Commits `21617121..e9717337` on `next`. The Mac run is green: `cargo fmt --check`, clippy `-D warnings`, `cargo test --workspace`, and the e2e `gpui_a_damaged_surfaces_file_is_kept_aside`, `gpui_midi_learn_over_the_channel`, `gpui_drives_a_fader_and_a_button_from_an_mcu` and `gpui_drives_the_mixer_from_a_kontrol_mk3`.
+- **Task fixes:** surface events at Swift's pace, from a 16 ms surface tick (Task 3, `29129e6d`); a newer learn replaces an older one and closing a document cancels only its own learn (Task 4, `37f92415`); an alert or an open menu takes Esc before a waiting learn (Task 5, `f2992e51`).
+- **Final review fix:** the core routes live surface input only in the session idle, which ran at the transport poll's 250 ms. The surface tick now runs the idle every 16 ms while a surface, command map, learn or learn map exists (`e9717337`). About 0.7 µs per idle in release.
+- **Outside the plan:** `scripts/make-gpui-app.sh` now seals the bundle last (`bac9d619`) and ships `vizdaw-scan` and the microphone usage text (`bf015a51`), after the owner's testing. A pre-existing DAWproject round-trip proptest failure (same-tick MIDI of different kinds) is fixed in `c70a04c8`.
+- **Not seen on screen or with hardware yet:** M23–M25, L30–L31, controller-checks "9d".
+
+### Rulings
+
+1. Task 5's two Esc minors (an alert, an open menu) were fixed in the task, because a second Esc to close an alert is something a user meets at once. Cost: a little extra scope.
+2. The DAWproject failure was outside 9d and did not hold up Task 9; it was fixed separately so CI stays green.
+3. DAWproject keeps each MIDI kind in its own lane, so the order of different kinds on one tick is not kept; the round-trip projection now compares them in lane order. Cost if wrong: same-tick CC or pressure order changes after a DAWproject round trip, with no musical effect.
+4. Surface commands while a sheet is up run as their keys would; there is no modal guard, as Swift's timer had none. Cost if wrong: a surface button acts behind a sheet.
+5. `Session::idle` runs at about 60 Hz on the UI thread while surfaces are set up, as Swift's 60 Hz timer did. Cost if wrong: UI-thread load with a surface configured.
