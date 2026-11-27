@@ -7,7 +7,8 @@
 //! maps are this document's (`DocSession::learn_maps`); the command learn
 //! and its cancel are process-wide, so they go through `CoreCalls`.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::events::AutomationTargetRow;
@@ -122,11 +123,25 @@ pub fn target_title(t: &AutomationTargetRow, doc: &DocumentModel) -> String {
     }
 }
 
+/// Which document's learn the core waits on, shared by every document
+/// of a store: the core holds one learn, and a newer one replaces the
+/// older (Ruling 7), so only the latest starter is learning.
+pub type LearnOwner = Arc<Mutex<Option<u64>>>;
+
+/// Each learn model's token in its [`LearnOwner`].
+static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
+
 /// One document's learn state (`DocumentModel.learn`).
 pub struct LearnModel {
     session: Arc<dyn DocSession>,
-    /// A learn this document started waits (Swift `banner != nil`).
-    learning: bool,
+    /// This model's token in `owner`.
+    token: u64,
+    /// The document whose learn waits (Swift `banner != nil` for the
+    /// one that started it).
+    owner: LearnOwner,
+    /// Learning, as the last idle tick saw it (a newer learn elsewhere
+    /// takes the banner away between ticks: the window redraws).
+    shown: bool,
     /// What it waits for, as the last read of `surface_state` said.
     waiting_for: Option<String>,
     maps: Vec<LearnMapRow>,
@@ -140,7 +155,9 @@ impl LearnModel {
     pub fn new(session: Arc<dyn DocSession>) -> Self {
         LearnModel {
             session,
-            learning: false,
+            token: NEXT_TOKEN.fetch_add(1, Ordering::Relaxed),
+            owner: Arc::new(Mutex::new(None)),
+            shown: false,
             waiting_for: None,
             maps: vec![],
             maps_open: false,
@@ -148,19 +165,37 @@ impl LearnModel {
         }
     }
 
+    /// Joins the store's shared owner, so a learn started in another
+    /// document replaces this one's.
+    pub fn share_owner(&mut self, owner: LearnOwner) {
+        if self.is_learning() {
+            *owner.lock().unwrap_or_else(|e| e.into_inner()) = Some(self.token);
+        }
+        self.owner = owner;
+    }
+
     pub fn is_learning(&self) -> bool {
-        self.learning
+        *self.owner.lock().unwrap_or_else(|e| e.into_inner()) == Some(self.token)
+    }
+
+    fn set_learning(&mut self, on: bool) {
+        let mut o = self.owner.lock().unwrap_or_else(|e| e.into_inner());
+        if on {
+            *o = Some(self.token);
+        } else if *o == Some(self.token) {
+            *o = None;
+        }
     }
 
     /// The idle poll runs only while this holds (`M/LearnModel.swift:76`).
     pub fn is_active(&self) -> bool {
-        self.learning || self.maps_open
+        self.is_learning() || self.maps_open
     }
 
     /// The banner for a window, naming `project` (`None` with one project
     /// open) and what the learn waits for; `None` when not learning.
     pub fn banner_text(&self, project: Option<&str>) -> Option<String> {
-        self.learning
+        self.is_learning()
             .then(|| waiting(project, self.waiting_for.as_deref()))
     }
 
@@ -217,12 +252,12 @@ impl LearnModel {
     fn started(&mut self, result: Result<(), VizError>) -> Option<AlertItem> {
         match result {
             Ok(()) => {
-                self.learning = true;
+                self.set_learning(true);
                 self.waiting_for = self.read_waiting();
                 None
             }
             Err(e) => {
-                self.learning = false;
+                self.set_learning(false);
                 self.waiting_for = None;
                 self.refusal(&e)
             }
@@ -244,7 +279,7 @@ impl LearnModel {
     }
 
     fn cancelled(&mut self) {
-        self.learning = false;
+        self.set_learning(false);
         self.waiting_for = None;
     }
 
@@ -253,7 +288,7 @@ impl LearnModel {
     /// project (a learn landed, undo, redo). True when something changed.
     fn poll(&mut self) -> bool {
         let mut changed = false;
-        if self.learning {
+        if self.is_learning() {
             match self.session.surface_state() {
                 Ok(s) if s.learning.is_none() => {
                     self.cancelled();
@@ -342,6 +377,9 @@ impl DocumentModel {
 
     /// The learn's idle poll, while it is active.
     pub(crate) fn learn_tick(&mut self) -> bool {
-        self.learn.is_active() && self.learn.poll()
+        let learning = self.learn.is_learning();
+        let changed = learning != self.learn.shown;
+        self.learn.shown = learning;
+        (self.learn.is_active() && self.learn.poll()) || changed
     }
 }

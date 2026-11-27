@@ -136,6 +136,9 @@ pub struct DocumentStore {
     /// A surface is set up, as the core's list last said: the windows'
     /// fast surface tick runs.
     has_surfaces: bool,
+    /// The document whose learn the core waits on, shared by every
+    /// document's learn model (a newer learn replaces the older).
+    learn_owner: crate::learn::LearnOwner,
 }
 
 impl DocumentStore {
@@ -178,6 +181,7 @@ impl DocumentStore {
             claimed_ports: vec![],
             surface_focus: None,
             has_surfaces: false,
+            learn_owner: Default::default(),
         }
     }
 
@@ -295,6 +299,7 @@ impl DocumentStore {
                 model.apply_record_defaults(self.record_defaults);
                 model.inputs.attach(self.core.clone(), &self.input_sources);
                 model.inputs.set_claimed_ports(self.claimed_ports.clone());
+                model.learn.share_owner(self.learn_owner.clone());
                 let id = DocId(self.next_id);
                 self.next_id += 1;
                 self.documents.insert(id, model);
@@ -377,17 +382,14 @@ impl DocumentStore {
         }
     }
 
-    /// The first document whose learn waits, for Esc
-    /// (`S/KeyMonitor.swift:161`).
+    /// The document whose learn waits, for Esc (`S/KeyMonitor.swift:161`;
+    /// at most one: a newer learn replaces the older).
     pub fn learning_document(&self) -> Option<DocId> {
-        let mut ids: Vec<DocId> = self
-            .documents
+        self.documents
             .iter()
             .filter(|(_, d)| d.learn.is_learning())
             .map(|(id, _)| *id)
-            .collect();
-        ids.sort();
-        ids.first().copied()
+            .min()
     }
 
     /// A window closed: its document goes. Closing twice is harmless.

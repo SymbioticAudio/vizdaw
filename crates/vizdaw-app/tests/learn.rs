@@ -381,3 +381,57 @@ fn a_new_document_is_not_learning() {
     assert_eq!(l.banner_text(Some("Song")), None);
     assert!(l.problem().is_none());
 }
+
+/// Review Focus 2, round 1: B's learn replaces A's (Ruling 7), so A
+/// shows no banner, and closing A leaves B's learn waiting.
+#[test]
+fn a_newer_learn_replaces_the_older_and_closing_the_older_cancels_nothing() {
+    let core = Arc::new(FakeCore::new());
+    let a = Arc::new(mixer_fake());
+    let b = Arc::new(mixer_fake());
+    core.hand_out("new_demo", a.clone());
+    core.hand_out("new_demo", b.clone());
+    let mut store = DocumentStore::with_core(core.clone());
+    let da = store.new_demo().unwrap();
+    let db = store.new_demo().unwrap();
+    waiting(&a, Some("Fader 1"));
+    waiting(&b, Some("Fader 1"));
+    let fader = AutomationTargetRow::StripFader { strip: 1 };
+    store.document_mut(da).unwrap().learn_target(fader);
+    store.document_mut(db).unwrap().learn_target(fader);
+    let a_doc = store.document(da).unwrap();
+    assert!(!a_doc.learn.is_learning(), "B's learn replaced A's");
+    assert_eq!(a_doc.learn.banner_text(None), None);
+    assert!(store.document(db).unwrap().learn.is_learning());
+    assert_eq!(store.learning_document(), Some(db));
+    store.close(da);
+    assert_eq!(core.learn_cancels(), 0, "B's learn still waits");
+    assert!(store.document(db).unwrap().learn.is_learning());
+}
+
+/// Review Focus 2: once closing the learning document cancels the learn,
+/// no other window shows a banner.
+#[test]
+fn after_a_close_cancels_the_learn_no_window_shows_a_banner() {
+    let core = Arc::new(FakeCore::new());
+    let a = Arc::new(mixer_fake());
+    let b = Arc::new(mixer_fake());
+    core.hand_out("new_demo", a.clone());
+    core.hand_out("new_demo", b.clone());
+    let mut store = DocumentStore::with_core(core.clone());
+    let da = store.new_demo().unwrap();
+    let db = store.new_demo().unwrap();
+    waiting(&a, Some("Fader 1"));
+    waiting(&b, Some("Fader 1"));
+    let fader = AutomationTargetRow::StripFader { strip: 1 };
+    store.document_mut(da).unwrap().learn_target(fader);
+    store.document_mut(db).unwrap().learn_target(fader);
+    store.close(db);
+    assert_eq!(core.learn_cancels(), 1);
+    // The core no longer waits.
+    waiting(&a, None);
+    let doc = store.document_mut(da).unwrap();
+    doc.idle();
+    assert_eq!(doc.learn.banner_text(Some("Song")), None);
+    assert_eq!(store.learning_document(), None);
+}
