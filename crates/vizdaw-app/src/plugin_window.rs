@@ -40,7 +40,8 @@ pub const PARAMETER_FAILED: &str = "Parameter Failed";
 pub const CHANGE_PLUGIN_PARAMETER: &str = "Change Plugin Parameter";
 /// The header's bypass toggle.
 pub const BYPASS: &str = "Bypass";
-/// The header's MIDI Learn button (disabled until the surfaces slice).
+/// The header's MIDI Learn button: learns the parameter last touched,
+/// once there is one (`S/PluginWindows.swift:267-270`).
 pub const LEARN: &str = "Learn";
 /// Learn's help before a parameter was touched.
 pub const LEARN_HELP: &str = "Touch a parameter, then learn a MIDI control for it";
@@ -200,6 +201,19 @@ impl PluginWindowModel {
     /// (slot, parameter) of the last touched parameter.
     pub fn last_touched(&self) -> Option<(u64, u64)> {
         self.last_touched
+    }
+
+    /// Learn is enabled: a parameter was touched here.
+    pub fn can_learn(&self) -> bool {
+        self.last_touched.is_some()
+    }
+
+    /// Learns a MIDI control for the parameter last touched
+    /// (`M/PluginWindowModel.swift:255-258`); nothing before any.
+    pub fn learn_last_touched(&self, doc: &mut DocumentModel) {
+        if let Some((slot, param)) = self.last_touched {
+            doc.learn_target(AutomationTargetRow::PluginParam { slot, param });
+        }
     }
 
     pub fn open_owed(&self) -> bool {

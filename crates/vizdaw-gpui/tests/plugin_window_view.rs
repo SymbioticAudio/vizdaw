@@ -1,18 +1,20 @@
 //! What the plug-in and Built-in Synth windows draw, through GPUI's test
-//! platform with the scripted session: the header (Bypass, the disabled
-//! Learn and its help, the placeholder's reason), the parameter list
+//! platform with the scripted session: the header (Bypass, Learn and its
+//! help, the placeholder's reason or the learn banner), the parameter list
 //! (Swift `ParameterList`), the Built-in Synth window's sounds, and ⌘W.
 
 mod mixer_support;
 
 use gpui::{AnyWindowHandle, Modifiers, TestAppContext, VisualTestContext, point, px};
 use mixer_support::{Setup, setup};
+use vizdaw_app::learn;
 use vizdaw_app::plugin_window::{LEARN_HELP, NO_PARAMETERS};
 use vizdaw_app::testing::{FakeSession, dest_row, mixer_fake, slot_row};
 use vizdaw_ffi::automation::GesturePhaseRow;
 use vizdaw_ffi::events::AutomationTargetRow;
 use vizdaw_ffi::mixer::DestRow;
 use vizdaw_ffi::snapshot::{ParamRow, SlotStatus};
+use vizdaw_ffi::surfaces::SurfaceStateRow;
 use vizdaw_ffi::{BuiltinSound, EditorSize};
 use vizdaw_gpui::plugin_windows::{self, PluginWindowView, Subject};
 use vizdaw_gpui::registry::Element;
@@ -119,11 +121,71 @@ fn the_header_has_bypass_and_a_disabled_learn(cx: &mut TestAppContext) {
     let bypass = w.element("checkbox", "Bypass");
     assert!(bypass.enabled && !bypass.selected);
     let learn = w.element("button", "Learn");
-    assert!(!learn.enabled, "MIDI Learn comes with the surfaces");
+    assert!(!learn.enabled, "nothing touched yet");
     assert_eq!(learn.value.as_deref(), Some(LEARN_HELP));
     // The header is 37 points, the list under it.
     assert!(bypass.bounds.origin.y < px(37.));
     assert!(w.element("slider", "Gain").bounds.origin.y > px(37.));
+}
+
+/// `M/PluginWindowModel.swift:255-258`: Learn learns the parameter last
+/// touched here, once there is one.
+#[gpui::test]
+fn learn_is_enabled_after_a_touch_and_learns_the_param(cx: &mut TestAppContext) {
+    let f = fake();
+    f.set_surface_state(SurfaceStateRow {
+        learning: Some("Gain · Gain".into()),
+        ..SurfaceStateRow::default()
+    });
+    let mut s = setup(cx, f);
+    let mut w = open(&mut s, Subject::Plugin(10));
+    w.click("button", "Learn");
+    assert!(s.fake.learn_targets().is_empty(), "disabled before a touch");
+    w.click("slider", "Gain");
+    let learn = w.element("button", "Learn");
+    assert!(learn.enabled);
+    assert_eq!(learn.value.as_deref(), Some("MIDI Learn: Gain"));
+    w.click("button", "Learn");
+    assert_eq!(s.fake.learn_targets(), vec![gain_target()]);
+    assert!(s.model(|d| d.learn.is_learning()));
+}
+
+/// `S/PluginWindows.swift:267-275`: while a learn waits, its banner and
+/// Cancel take the place of the placeholder's reason.
+#[gpui::test]
+fn the_header_shows_the_banner_while_learning(cx: &mut TestAppContext) {
+    let f = fake();
+    f.set_params(10, vec![]);
+    f.edit_mixer(|m| {
+        m.strips[0].inserts[0].status = SlotStatus::Placeholder {
+            reason: "Missing".into(),
+        }
+    });
+    f.set_surface_state(SurfaceStateRow {
+        learning: Some("Gain · Gain".into()),
+        ..SurfaceStateRow::default()
+    });
+    let mut s = setup(cx, f);
+    let mut w = open(&mut s, Subject::Plugin(10));
+    assert!(w.find("button", "Cancel").is_none());
+    let doc = s.doc();
+    s.app.update(&mut s.cx, |a, cx| {
+        a.store
+            .with_document(doc, |d, _| d.learn_target(gain_target()));
+        cx.notify();
+    });
+    w.cx.run_until_parked();
+    let text = learn::waiting(None, Some("Gain · Gain"));
+    assert!(w.element("text", &text).bounds.origin.y < px(37.));
+    assert!(w.element("button", "Cancel").bounds.origin.y < px(37.));
+    // The reason is left to the list.
+    let reasons: Vec<Element> = w
+        .elements()
+        .into_iter()
+        .filter(|e| e.role == "text" && e.label == "Missing")
+        .collect();
+    assert_eq!(reasons.len(), 1, "{reasons:#?}");
+    assert!(reasons[0].bounds.origin.y > px(37.));
 }
 
 #[gpui::test]

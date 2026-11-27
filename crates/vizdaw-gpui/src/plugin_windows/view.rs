@@ -3,9 +3,10 @@
 //!
 //! - **The header** (37 points with its divider): the "Bypass" toggle
 //!   (`checkbox`, selected while bypassed; one undo step, a refusal the
-//!   alert "Bypass Failed"), "Learn" (disabled until the surfaces slice;
-//!   its help, the tree value, names what it would learn), then the
-//!   placeholder's reason in secondary text.
+//!   alert "Bypass Failed"), "Learn" (enabled once a parameter was
+//!   touched, it learns that parameter; its help, the tree value, names
+//!   what it would learn), then, while a learn waits, the banner's text
+//!   and "Cancel", else the placeholder's reason in secondary text.
 //! - **Under it** the plug-in's own editor, or its parameters: a row per
 //!   parameter a user sees (the name 110 wide, a slider labelled by the
 //!   name and valued with its text, ", read-only" when the user cannot
@@ -292,7 +293,11 @@ struct Header {
     /// The slot's bypass, when it has a row.
     bypass: Option<bool>,
     learn_help: String,
+    /// A parameter was touched: Learn learns it.
+    can_learn: bool,
     reason: Option<String>,
+    /// The document's waiting learn: its banner text.
+    banner: Option<(DocId, String)>,
 }
 
 /// One parameter row.
@@ -349,6 +354,8 @@ impl Render for PluginWindowView {
         let Some(e) = s.plugin_windows.entry(token) else {
             return root.into_any_element();
         };
+        let doc = e.doc;
+        let banner = crate::learn_banner::banner_text(doc, cx).map(|t| (doc, t));
         let (header, body) = match &e.model {
             Model::Synth(m) => {
                 let sound = m.sound();
@@ -360,7 +367,9 @@ impl Render for PluginWindowView {
                 let header = Header {
                     bypass: m.row().map(|r| r.bypass),
                     learn_help: m.learn_help(),
+                    can_learn: m.can_learn(),
                     reason: m.placeholder_reason().map(str::to_owned),
+                    banner,
                 };
                 let body = match m.editor_size() {
                     Some(ed) => Body::Editor {
@@ -447,7 +456,8 @@ fn header_view(
             });
         });
     }
-    let learn = div()
+    let can_learn = h.can_learn;
+    let mut learn = div()
         .id("plugin-learn")
         .relative()
         .flex_none()
@@ -457,21 +467,42 @@ fn header_view(
         .items_center()
         .round_px(4.)
         .bg(rgb(colors::button()))
-        .opacity(0.45)
+        .opacity(if can_learn { 1. } else { 0.45 })
         .child(LEARN)
-        .child(scope.control_with("button", LEARN, false, Some(&h.learn_help), false));
+        .child(scope.control_with("button", LEARN, can_learn, Some(&h.learn_help), false));
+    if can_learn {
+        let learning = app.clone();
+        learn = learn.cursor_pointer().on_click(move |_, _, cx| {
+            learning.update(cx, |s, cx| {
+                s.plugin_windows
+                    .with_plugin(token, &mut s.store, |m, d| m.learn_last_touched(d));
+                cx.notify();
+            });
+        });
+    }
     let learn = crate::sheet_host::with_help(learn, h.learn_help.clone());
-    let reason = h.reason.map(|r| {
+    // A waiting learn's banner takes the reason's place
+    // (`S/PluginWindows.swift:271-275`).
+    let text = |t: String, colour: u32, scope: &mut RegistryScope| {
         div()
             .relative()
             .min_w_0()
             .overflow_hidden()
             .whitespace_nowrap()
             .text_ellipsis()
-            .text_color(rgb(colors::dim()))
-            .child(r.clone())
-            .child(scope.control("text", &r, true))
-    });
+            .text_color(rgb(colour))
+            .child(t.clone())
+            .child(scope.control("text", &t, true))
+            .into_any_element()
+    };
+    let trailing: Vec<AnyElement> = match (h.banner, h.reason) {
+        (Some((doc, b)), _) => vec![
+            text(b, colors::text(), scope),
+            crate::learn_banner::cancel_button(doc, scope),
+        ],
+        (None, Some(r)) => vec![text(r, colors::dim(), scope)],
+        (None, None) => vec![],
+    };
     div()
         .flex_none()
         .w_full()
@@ -486,7 +517,7 @@ fn header_view(
         .border_color(rgb(colors::divider()))
         .child(bypass)
         .child(learn)
-        .children(reason)
+        .children(trailing)
         .into_any_element()
 }
 

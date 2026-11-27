@@ -16,6 +16,7 @@ pub mod format_panel;
 #[doc(hidden)]
 pub mod frame_stats;
 pub mod input_picker;
+pub mod learn_banner;
 pub mod list_editor;
 pub mod menu_bar;
 pub mod menus;
@@ -65,6 +66,8 @@ pub fn install(store: DocumentStore, cx: &mut App) -> gpui::Entity<AppState> {
     sheet_host::install(cx);
     // Alerts and questions show as prompts when the state changes.
     alerts::install(&state, cx);
+    // Esc cancels a waiting MIDI learn from any window.
+    learn_banner::install(cx);
     // Any quit closes every plug-in editor before a session drops.
     plugin_windows::install(cx);
     // The store's file reads (DAWproject and AAF opens) run off the UI
