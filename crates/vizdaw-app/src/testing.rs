@@ -677,6 +677,11 @@ impl FakeSession {
         self.st().lanes.insert(seq, rows);
     }
 
+    /// Sequence `seq`'s lanes as the session holds them now.
+    pub fn lanes_of(&self, seq: u64) -> Vec<LaneRow> {
+        self.st().lanes.get(&seq).cloned().unwrap_or_default()
+    }
+
     /// What `has_unsaved_changes` answers; `None` follows the snapshot.
     pub fn set_unsaved(&self, v: Option<Result<bool, VizError>>) {
         self.st().unsaved = v;
@@ -2684,8 +2689,39 @@ impl DocSession for FakeSession {
             .collect())
     }
     fn run_mixer(&self, id: &str, args: Vec<ControlArg>) -> Result<DocSnapshot, VizError> {
-        self.st().run_mixers.push((id.to_owned(), args));
-        self.mixer_edit("run_mixer", format!("run_mixer({id})"), |_| Ok(()))
+        self.st().run_mixers.push((id.to_owned(), args.clone()));
+        if id != "track.new_plugin_instrument" {
+            return self.mixer_edit("run_mixer", format!("run_mixer({id})"), |_| Ok(()));
+        }
+        // As the core's: an instrument track "Inst N" in `seq`, below
+        // `after` (else at the end).
+        let int = |name: &str| {
+            args.iter().find_map(|a| match &a.value {
+                vizdaw_ffi::control::ControlValue::Int { value } if a.name == name => {
+                    u64::try_from(*value).ok()
+                }
+                _ => None,
+            })
+        };
+        let mut s = self.st();
+        Self::scripted(&mut s, "run_mixer")?;
+        s.calls.push(format!("run_mixer({id})"));
+        let Some(seq) = int("seq") else {
+            return Err(VizError::Model {
+                message: "track.new_plugin_instrument: `seq` is a sequence ID".into(),
+            });
+        };
+        let lane = s.lanes.values().flatten().map(|l| l.id).max().unwrap_or(0) + 1;
+        let rows = s.lanes.entry(seq).or_default();
+        let mut row = lane_row(lane, &format!("Inst {}", rows.len() + 1), false);
+        row.kind = TrackKindRow::Instrument;
+        let at = int("after")
+            .and_then(|a| rows.iter().position(|l| l.id == a))
+            .map_or(rows.len(), |i| i + 1);
+        rows.insert(at, row);
+        let snap = Self::command_result(&mut s);
+        s.mixer.version = snap.version;
+        Ok(snap)
     }
     fn add_bus(&self, name: &str) -> Result<DocSnapshot, VizError> {
         let name = name.to_owned();

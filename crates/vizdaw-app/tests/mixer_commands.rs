@@ -458,3 +458,159 @@ fn suspend_toggles_the_global_switch_from_the_channel_and_the_menu() {
     assert!(!commands::is_on("automation.mode.read", &d));
     set_automation_suspended(false);
 }
+
+// The plug-in verbs (slice 10a Task 7; Swift `MixerCommands.edit`,
+// `M/MixerCommands.swift:103-141`).
+
+/// The six plug-in edits, as the channel passes them, and their titles.
+fn plugin_edits() -> Vec<(&'static str, Args, &'static str)> {
+    vec![
+        (
+            "mixer.add_insert",
+            vec![i("strip", 1), t("plugin", "multi-q")],
+            "Add Insert",
+        ),
+        ("mixer.remove_insert", vec![i("slot", 7)], "Remove Insert"),
+        (
+            "mixer.move_insert",
+            vec![i("slot", 7), i("index", 1)],
+            "Move Insert",
+        ),
+        (
+            "mixer.set_bypass",
+            vec![i("slot", 7), b("bypass", true)],
+            "Bypass Insert",
+        ),
+        (
+            "mixer.set_eq",
+            vec![i("strip", 1), t("plugin", "multi-q")],
+            "Set EQ",
+        ),
+        (
+            "mixer.set_param",
+            vec![i("slot", 7), i("param", 0), t("value", "0.5")],
+            "Set Plug-in Parameter",
+        ),
+    ]
+}
+
+#[test]
+fn add_insert_over_the_channel_runs_the_core_mixer_edit() {
+    let (f, mut d) = doc();
+    let args = vec![i("strip", 1), t("plugin", "multi-q"), i("index", 1)];
+    assert!(MIXER_COMMANDS.contains(&"mixer.add_insert"));
+    assert!(commands::enabled("mixer.add_insert", &d));
+    let before = d.snapshot().version;
+    let ran = run("mixer.add_insert", &args, &mut d).expect("ran");
+    assert_eq!(ran.status.as_deref(), Some("Add Insert"));
+    assert_eq!(
+        f.run_mixers(),
+        [("mixer.add_insert".to_owned(), control_args(&args))],
+        "one run_mixer call, the arguments as given"
+    );
+    assert!(d.snapshot().version > before, "the snapshot is applied");
+    assert!(d.alert.is_none());
+}
+
+#[test]
+fn each_plugin_verb_replies_with_its_registry_title() {
+    for (id, args, title) in plugin_edits() {
+        let (f, mut d) = doc();
+        assert!(MIXER_COMMANDS.contains(&id), "{id}");
+        assert_eq!(registry::find(id).unwrap().title, title, "{id}");
+        let ran = run(id, &args, &mut d).unwrap_or_else(|e| panic!("{id}: {e:?}"));
+        assert_eq!(ran.status.as_deref(), Some(title), "{id}");
+        assert_eq!(
+            f.run_mixers(),
+            [(id.to_owned(), control_args(&args))],
+            "{id}"
+        );
+        // An open gesture is `unavailable`, and nothing reaches the core.
+        let (f, mut d) = doc();
+        assert!(d.begin_gesture("Move", vec![]));
+        let e = err(run(id, &args, &mut d));
+        assert_eq!(e.code, ErrorCode::Unavailable, "{id}");
+        assert_eq!(e.message, "Finish the drag first.", "{id}");
+        assert!(f.run_mixers().is_empty(), "{id}");
+    }
+}
+
+#[test]
+fn an_unknown_plugin_is_the_cores_refusal() {
+    const NONE: &str = "No installed plug-in is clap:vizdaw.e2e.none.";
+    for (id, args, _) in plugin_edits().into_iter().chain([(
+        "track.new_plugin_instrument",
+        vec![t("plugin", "clap:vizdaw.e2e.none")],
+        "",
+    )]) {
+        let (f, mut d) = doc();
+        f.set_call_error("run_mixer", Some(model_err(NONE)));
+        let e = err(run(id, &args, &mut d));
+        assert_eq!(e.code, ErrorCode::Failed, "{id}");
+        assert_eq!(e.message, NONE, "{id}: the core's words, verbatim");
+        f.set_call_error("run_mixer", Some(busy("Finish the edit first.")));
+        let e = err(run(id, &args, &mut d));
+        assert_eq!(e.code, ErrorCode::Busy, "{id}");
+        assert_eq!(e.message, "Finish the edit first.", "{id}");
+        assert!(d.alert.is_none(), "{id}: no dialog");
+    }
+}
+
+/// `track.new_plugin_instrument` without `seq` and `after` gets the
+/// selected sequence and track, as New Track does; the new track is
+/// selected and named in the status (Swift
+/// `aPluginInstrumentTrackGoesBelowTheSelection`,
+/// `MixerCommandsTests.swift:164`).
+#[test]
+fn a_new_plugin_instrument_track_goes_below_the_selection() {
+    const ID: &str = "track.new_plugin_instrument";
+    let (f, mut d) = doc();
+    assert!(MIXER_COMMANDS.contains(&ID));
+    let seq = d.selected_seq().expect("a sequence");
+    let lane = d.lanes()[0].id;
+    d.select_track(lane, false);
+    let plugin = t("plugin", "built-in-synth");
+    let ran = run(ID, std::slice::from_ref(&plugin), &mut d).expect("ran");
+    let count = d.lanes().len();
+    assert_eq!(ran.status, Some(format!("Inst {count}")));
+    assert_eq!(
+        f.run_mixers(),
+        [(
+            ID.to_owned(),
+            control_args(&vec![
+                plugin.clone(),
+                i("seq", seq as i64),
+                i("after", lane as i64)
+            ])
+        )]
+    );
+    let made = d
+        .lanes()
+        .iter()
+        .find(|l| l.name == format!("Inst {count}"))
+        .expect("the new track")
+        .id;
+    assert_eq!(d.lanes()[1].id, made, "below the selected track");
+    assert_eq!(d.selected_lane(), Some(made), "the new track is selected");
+
+    // A `seq` given is kept, and no track of another sequence is `after`.
+    let other_seq = d
+        .snapshot()
+        .sequences
+        .iter()
+        .map(|q| q.id)
+        .find(|q| *q != seq)
+        .expect("another sequence");
+    let before = f.run_mixers().len();
+    let other = run(ID, &[plugin.clone(), i("seq", other_seq as i64)], &mut d).expect("ran");
+    let n = f.lanes_of(other_seq).len();
+    assert_eq!(other.status, Some(format!("Inst {n}")));
+    assert_eq!(
+        f.run_mixers()[before..],
+        [(
+            ID.to_owned(),
+            control_args(&vec![plugin, i("seq", other_seq as i64)])
+        )]
+    );
+    assert_eq!(d.selected_lane(), Some(made), "the selection stays");
+}

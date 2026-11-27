@@ -86,6 +86,7 @@ use vizdaw_ffi::control::{
 
 use crate::app_state::{AppState, WindowEntry, WindowKind};
 use crate::menus;
+use crate::registry::SharedRegistry;
 use crate::shell::DocumentWindow;
 use crate::transport_fields::NO_FIELDS;
 
@@ -568,10 +569,10 @@ fn answer(command: &Command, cx: &mut App) -> Result<Value, ControlError> {
             format!("{target:?}").to_lowercase()
         ))),
         Command::UiTree { window, .. } => {
-            let entry = target(window.as_ref(), cx)?;
-            fresh_frame(&entry, cx)?;
-            let mut tree = entry.registry(cx).ok_or_else(gone)?.borrow().tree();
-            tree["window"] = json!(number(entry.handle));
+            let (handle, registry) = ui_window(window.as_ref(), cx)?;
+            fresh_frame(handle, cx)?;
+            let mut tree = registry.borrow().tree();
+            tree["window"] = json!(number(handle));
             Ok(tree)
         }
         Command::UiClick {
@@ -581,8 +582,8 @@ fn answer(command: &Command, cx: &mut App) -> Result<Value, ControlError> {
             count,
             modifiers,
         } => {
-            let entry = target(window.as_ref(), cx)?;
-            click(&entry, &r.id, *button, *count, *modifiers, cx)
+            let (handle, registry) = ui_window(window.as_ref(), cx)?;
+            click(handle, &registry, &r.id, *button, *count, *modifiers, cx)
         }
         Command::UiClick {
             window,
@@ -591,10 +592,10 @@ fn answer(command: &Command, cx: &mut App) -> Result<Value, ControlError> {
             count,
             modifiers,
         } => {
-            let entry = target(window.as_ref(), cx)?;
-            fresh_frame(&entry, cx)?;
+            let (handle, _) = ui_window(window.as_ref(), cx)?;
+            fresh_frame(handle, cx)?;
             let at = gpui::point(gpui::px(*x as f32), gpui::px(*y as f32));
-            click_at(&entry, at, *button, *count, *modifiers, cx)
+            click_at(handle, at, *button, *count, *modifiers, cx)
         }
         Command::UiKey {
             window,
@@ -873,9 +874,13 @@ fn run_transport(
     Ok(ran_json(id, doc, entry, ran.undo, ran.status))
 }
 
-/// A command that needs no document window: `file.new` and the app-wide
-/// ones (`ui.set_transport_bar`, `ui.reset_transport_bar`, answered with
-/// no `doc` or `window`, as Swift's). `None` for any other.
+/// The app-wide verb that opens the Plugin Manager.
+const WINDOW_PLUGIN_MANAGER: &str = "window.plugin_manager";
+
+/// A command that needs no document window: `file.new`, the Plugin
+/// Manager and the app-wide ones (`ui.set_transport_bar`,
+/// `ui.reset_transport_bar`, answered with no `doc` or `window`, as
+/// Swift's). `None` for any other.
 fn app_wide(
     id: &str,
     args: &[(String, ArgValue)],
@@ -883,6 +888,18 @@ fn app_wide(
 ) -> Option<Result<Value, ControlError>> {
     if files::APP_IDS.contains(&id) {
         return Some(files::run_app(id, args, cx));
+    }
+    if id == WINDOW_PLUGIN_MANAGER {
+        // Opens the one Plugin Manager or fronts it (Swift
+        // `M/ControlCommands.swift:369-371`): answered with no document.
+        if !args.is_empty() {
+            return Some(Err(ControlError::params(id, "takes no parameters")));
+        }
+        crate::plugin_manager_window::open_plugin_manager(cx);
+        return Some(Ok(json!({
+            "command": id, "doc": Value::Null, "window": Value::Null,
+            "undo": Value::Null, "status": Value::Null,
+        })));
     }
     if !APP_COMMANDS.contains(&id)
         && !keys_prefs::KEYS_COMMANDS.contains(&id)
@@ -1217,6 +1234,35 @@ fn windows_state(cx: &mut App) -> Value {
         }
         rows.push(row);
     }
+    // The Plugin Manager is no document's (Swift tags it `.pluginManager`
+    // with no doc, `S/ControlChannel.swift:687`).
+    let manager = app.read(cx).plugin_manager_window;
+    if let Some(h) = manager {
+        let active = cx.active_window();
+        let shown = h.update(cx, |_, window, _| (window.bounds(), window.viewport_size()));
+        if let Ok((bounds, content)) = shown {
+            let key = active == Some(h.into());
+            rows.push(json!({
+                "number": number(h),
+                "title": vizdaw_app::plugin_manager::TITLE,
+                "kind": WindowKind::PluginManager.name(),
+                "doc": Value::Null,
+                "key": key,
+                "main": key,
+                "visible": true,
+                "frame": {
+                    "x": f32::from(bounds.origin.x),
+                    "y": f32::from(bounds.origin.y),
+                    "width": f32::from(bounds.size.width),
+                    "height": f32::from(bounds.size.height),
+                },
+                "content": {
+                    "width": f32::from(content.width),
+                    "height": f32::from(content.height),
+                },
+            }));
+        }
+    }
     let notes = cx
         .try_global::<Notes>()
         .map(|n| n.0.clone())
@@ -1237,16 +1283,16 @@ fn windows_state(cx: &mut App) -> Value {
 /// wholly scrolled out is refused (the click would land on whatever is
 /// drawn there).
 fn click(
-    entry: &WindowEntry,
+    handle: AnyWindowHandle,
+    registry: &SharedRegistry,
     id: &str,
     button: Button,
     count: u32,
     modifiers: keys::Modifiers,
     cx: &mut App,
 ) -> Result<Value, ControlError> {
-    fresh_frame(entry, cx)?;
+    fresh_frame(handle, cx)?;
     let at = {
-        let registry = entry.registry(cx).ok_or_else(gone)?;
         let registry = registry.borrow();
         let e = registry.resolve(id)?;
         // The centre of the part that shows: a block wider than the
@@ -1259,7 +1305,7 @@ fn click(
         };
         shown.center()
     };
-    click_at(entry, at, button, count, modifiers, cx)
+    click_at(handle, at, button, count, modifiers, cx)
 }
 
 /// A mouse down and up at window point `at` (top-left origin, in points),
@@ -1267,14 +1313,13 @@ fn click(
 /// it handles it, as a real press there would. `ui.click {point}` and
 /// `ui.click {element}` both end here.
 fn click_at(
-    entry: &WindowEntry,
+    any: AnyWindowHandle,
     at: gpui::Point<gpui::Pixels>,
     button: Button,
     count: u32,
     modifiers: keys::Modifiers,
     cx: &mut App,
 ) -> Result<Value, ControlError> {
-    let any: AnyWindowHandle = entry.handle;
     let count = count.max(1) as usize;
     let button = match button {
         Button::Left => MouseButton::Left,
@@ -1307,7 +1352,7 @@ fn click_at(
     })
     .map_err(|_| gone())?;
     Ok(json!({
-        "window": number(entry.handle),
+        "window": number(any),
         "events": 2,
         "x": f32::from(at.x),
         "y": f32::from(at.y),
@@ -1323,8 +1368,7 @@ fn click_at(
 /// that need it (`ui.tree`, `ui.click`, `ui.screenshot`, and `ui.key`
 /// before every stroke, so the document's keyboard focus is this
 /// moment's when the stroke is routed) are rare next to frames.
-fn fresh_frame(entry: &WindowEntry, cx: &mut App) -> Result<(), ControlError> {
-    let any: AnyWindowHandle = entry.handle;
+fn fresh_frame(any: AnyWindowHandle, cx: &mut App) -> Result<(), ControlError> {
     any.update(cx, |_, window, cx| {
         // Whole, reusing no cached view: what this tick changed may not
         // have reached the window's dirty views yet.
@@ -1363,7 +1407,9 @@ fn key_strokes(
     cx: &mut App,
 ) -> Result<Value, ControlError> {
     if let Some(id) = focus {
-        click(entry, id, Button::Left, 1, keys::Modifiers::default(), cx)?;
+        let registry = entry.registry(cx).ok_or_else(gone)?;
+        let mods = keys::Modifiers::default();
+        click(entry.handle, &registry, id, Button::Left, 1, mods, cx)?;
     }
     let mut sent: u32 = 0;
     for k in strokes {
@@ -1371,7 +1417,7 @@ fn key_strokes(
         // table, a field) is the document's before the stroke is routed:
         // a window that is not drawing frames (a background app on macOS)
         // would otherwise route it on a stale focus.
-        fresh_frame(entry, cx)?;
+        fresh_frame(entry.handle, cx)?;
         if let Some(id) = bound_command(entry, k, cx)
             && !closes_itself(entry, id)
         {
@@ -1548,7 +1594,7 @@ fn screenshot(
     }
     let entry = target(window, cx)?;
     let path = path.unwrap_or_else(temp_screenshot_path);
-    fresh_frame(&entry, cx)?;
+    fresh_frame(entry.handle, cx)?;
     let capture = crate::screenshot::capture_fn(cx);
     let any: AnyWindowHandle = entry.handle;
     let shot = any
@@ -1603,6 +1649,25 @@ fn target(window: Option<&WindowRef>, cx: &App) -> Result<WindowEntry, ControlEr
             .cloned()
             .ok_or_else(|| ControlError::new(ErrorCode::NoDocument, "no document is open")),
     }
+}
+
+/// The window `ui.tree` and `ui.click` act in, and its element registry:
+/// as [`target`], or the Plugin Manager, which is no document's window
+/// (so is not in [`AppState::windows`]), when `window` is its number.
+fn ui_window(
+    window: Option<&WindowRef>,
+    cx: &App,
+) -> Result<(AnyWindowHandle, SharedRegistry), ControlError> {
+    if let Some(WindowRef::Number(n)) = window
+        && let Some(h) = AppState::global(cx).read(cx).plugin_manager_window
+        && number(h) == *n
+    {
+        let registry = h.read(cx).map_err(|_| gone())?.registry().clone();
+        return Ok((h.into(), registry));
+    }
+    let entry = target(window, cx)?;
+    let registry = entry.registry(cx).ok_or_else(gone)?;
+    Ok((entry.handle, registry))
 }
 
 /// A window's number, as `state.get windows` lists it.
@@ -1668,7 +1733,9 @@ fn not_yet(what: &str) -> ControlError {
              automation.set_mode / automation.gesture / automation.release_all / \
              automation.mode.* / automation.suspend / mixer.new_bus / mixer.set_strip / \
              mixer.set_output / mixer.add_send / mixer.set_send / mixer.remove_send / \
-             mixer.remove_bus / mixer.set_colour / mixer.*group* / mixer.*vca* / window.mixer, \
+             mixer.remove_bus / mixer.add_insert / mixer.remove_insert / mixer.move_insert / \
+             mixer.set_bypass / mixer.set_eq / mixer.set_param / mixer.set_colour / \
+             mixer.*group* / mixer.*vca* / window.mixer / window.plugin_manager, \
              state.get transport / windows / document / editor / selection / \
              mixer / layout / automation / media / project / record / input, ui.tree, ui.click, ui.key, ui.screenshot and wait)"
         ),
