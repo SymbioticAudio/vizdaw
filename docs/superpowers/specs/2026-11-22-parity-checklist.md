@@ -200,7 +200,7 @@ item (false: keys, the Keys settings and the control channel only).
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
 | window.mixer | Window | Mixer | ⌥⌘M | true | S6a | S6a |
-| window.plugin_manager | Window | Plugin Manager | ⌥⌘P | true | | |
+| window.plugin_manager | Window | Plugin Manager | ⌥⌘P | true | S10a (`gpui_plugin_manager_lists_toggles_and_rescans`; on screen: M26) | |
 | window.media_pool | Window | Media Pool |  | true | | |
 | window.song_notes | Window | Song Notes |  | true | | |
 
@@ -224,7 +224,7 @@ item (false: keys, the Keys settings and the control channel only).
 | track.choose_take | Track | Choose Take |  | true | | |
 | track.rename_take | Track | Rename Take |  | true | | |
 | track.delete_take | Track | Delete Take |  | true | | |
-| track.new_plugin_instrument | Track | New Plug-in Instrument Track |  | false | | |
+| track.new_plugin_instrument | Track | New Plug-in Instrument Track |  | false | S10a | |
 
 ### Mixer
 
@@ -242,12 +242,12 @@ item (false: keys, the Keys settings and the control channel only).
 | mixer.add_send | Mixer | Add Send |  | false | S6b | S6b |
 | mixer.set_send | Mixer | Set Send |  | false | S6b | S6b |
 | mixer.remove_send | Mixer | Remove Send |  | false | S6b | S6b |
-| mixer.add_insert | Mixer | Add Insert |  | false | | |
-| mixer.remove_insert | Mixer | Remove Insert |  | false | | |
-| mixer.move_insert | Mixer | Move Insert |  | false | | |
-| mixer.set_bypass | Mixer | Bypass Insert |  | false | | |
-| mixer.set_eq | Mixer | Set EQ |  | false | | |
-| mixer.set_param | Mixer | Set Plug-in Parameter |  | false | | |
+| mixer.add_insert | Mixer | Add Insert |  | false | S10a (`gpui_plugin_inserts_and_eq_over_the_channel`) | |
+| mixer.remove_insert | Mixer | Remove Insert |  | false | S10a (`gpui_plugin_inserts_and_eq_over_the_channel`) | |
+| mixer.move_insert | Mixer | Move Insert |  | false | S10a (`gpui_plugin_inserts_and_eq_over_the_channel`) | |
+| mixer.set_bypass | Mixer | Bypass Insert |  | false | S10a (`gpui_plugin_inserts_and_eq_over_the_channel`) | |
+| mixer.set_eq | Mixer | Set EQ |  | false | S10a (`gpui_plugin_inserts_and_eq_over_the_channel`) | |
+| mixer.set_param | Mixer | Set Plug-in Parameter |  | false | S10a (`gpui_plugin_inserts_and_eq_over_the_channel`) | |
 | mixer.remove_bus | Mixer | Remove Bus |  | false | S6b | S6b |
 | mixer.new_group | Mixer | Group |  | true | S6b | S6b |
 | mixer.rename_group | Mixer | Rename Group |  | false | S6b | S6b |
@@ -387,9 +387,9 @@ editors). The record popover is a popover, not a window.
 | Plug-in editor window (one per insert or instrument slot) | `PluginWindows.show`, AppKit `NSWindow` (`PluginWindows.swift`) | H2 (CLAP editor and parameter list by e2e; AU and VST3 editors open in `manual-checks.md`) | H2 (CLAP and VST3 X11 editors, parameter list and Built-in Synth by CI e2e under Xvfb; real-session checks in `manual-checks.md`) |
 | Built-in Synth window | `BuiltinSynthWindow.swift`, AppKit `NSWindow` | H2 | H2 |
 | Modify panel (floating, one per document) | `ModifyPanels.show`, AppKit `NSPanel` (`ModifyPanel.swift`) | | |
-| Mixer | `mixer` | S6a + S6b (strips, master, buses, meters, sends, groups, VCAs, slots without editors, MIDI strips) | S6a + S6b (same) |
+| Mixer | `mixer` | S6a + S6b (strips, master, buses, meters, sends, groups, VCAs, slots without editors, MIDI strips), S10a (slots with the browser) | S6a + S6b (same) |
 | Media Pool | `media-pool` | | |
-| Plugin Manager | `plugins` | | |
+| Plugin Manager | `plugins` | S10a (`gpui_plugin_manager_lists_toggles_and_rescans`; on screen: M26) | |
 | Song Notes | `window.song_notes` (opens the notes file in the system's editor, not a window of its own) | | |
 | Licences | `licences` | | |
 | Settings: Appearance | Settings tab | S9b (user themes: later) | S9b (CI; on screen: L27) |
@@ -498,7 +498,7 @@ a group of by-eye steps the GPUI app must pass.
 
 | Heading | Mac | Linux |
 |---|---|---|
-| Plugins (plan 3c) | | |
+| Plugins (plan 3c) | S10a (browser, inserts, EQ, Manager, launch scan, control verbs) | |
 | Editors (plan 4a) | | |
 | Piano roll (plan 4b) | | |
 | List editor and Select and Modify (plan 4c) | partial S4 (List editor; Select and Modify later) | partial S4 |
@@ -596,7 +596,7 @@ unknown.
 |---|---|---|
 | The bundled default EQ is AU-only | A CLAP build of it, or a built-in EQ default on Linux | |
 | Co-Producer approvals are stored in the Mac Keychain | The Secret Service password store on Linux | |
-| AU inserts in Mac projects | Shown as placeholders that keep their settings (design section 10); no automatic swap | |
+| AU inserts in Mac projects | Shown as placeholders that keep their settings (design section 10); no automatic swap; the GPUI app keeps this: AU inserts stay placeholders (the core's behaviour) | |
 | `ui.screenshot` of a native Wayland window (the GPUI pin has no offscreen render off macOS) | X11 `GetImage` of the window (XWayland, Xvfb); a native Wayland window answers `unavailable` "Screenshots need an X11 window on Linux." until GPUI or the compositor gives a capture | |
 | Keypad − and + as Rewind and Fast Forward keys, and step entry's keypad twins (Keypad1–6 note values, Keypad. Dotted, Keypad/ Triplet, Keypad+ Tie, Keypad0 Rest) (GPUI at the pin does not tell keypad keys from main keys; Mac too) | The ⇧, and ⇧. keys and the buttons; the number row and `.`, `/`, `=` for step entry (with "reserve number row" on, the note values and Rest have no key: the Step menu and the channel); the control channel's `keypad_minus`/`keypad_plus` work. Closes when GPUI reports the keypad | |
 | Media import on Linux (only VizDAW CAF files import, with no resampler: `media.import` answers `failed` "… not a VizDAW CAF file" for WAV/AIFF and "… resampling needs the system importer" across rates; the e2e import steps assert those refusals on Linux) | Host track H4: Linux audio import reads WAV/AIFF and other formats (Symphonia) and adds a resampler | |
