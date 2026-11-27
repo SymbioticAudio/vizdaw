@@ -36,6 +36,7 @@ pub mod mixer;
 pub mod panels;
 pub mod piano_roll;
 pub mod plugin_browser;
+pub mod plugin_manager;
 pub mod plugin_prefs;
 pub mod plugin_window;
 pub mod plugins;

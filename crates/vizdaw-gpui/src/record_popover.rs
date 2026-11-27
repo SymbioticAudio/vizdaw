@@ -165,7 +165,10 @@ impl DocumentWindow {
             WindowKind::Mixer => PopoverHost::MixerWindow,
             // A document window; plug-in and Built-in Synth windows are
             // not `DocumentWindow`s and have no bar.
-            WindowKind::Document | WindowKind::Plugin | WindowKind::Other => PopoverHost::Document,
+            WindowKind::Document
+            | WindowKind::Plugin
+            | WindowKind::Other
+            | WindowKind::PluginManager => PopoverHost::Document,
         }
     }
 

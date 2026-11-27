@@ -31,6 +31,10 @@ pub enum WindowKind {
     /// Another window of a document: the Built-in Synth window, one per
     /// (document, destination).
     Other,
+    /// The Plugin Manager: one per app, of no document
+    /// ([`crate::plugin_manager_window`]). Like Settings, it is kept
+    /// apart from a document's windows.
+    PluginManager,
 }
 
 impl WindowKind {
@@ -41,6 +45,7 @@ impl WindowKind {
             WindowKind::Mixer => "mixer",
             WindowKind::Plugin => "plugin",
             WindowKind::Other => "other",
+            WindowKind::PluginManager => "plugin_manager",
         }
     }
 
@@ -124,6 +129,13 @@ pub struct AppState {
     /// The Plugin Manager window is open: the catalog's progress is
     /// polled while it is, scan or not.
     pub plugin_manager_open: bool,
+    /// The Plugin Manager window, while it is open (of no document, so
+    /// not one of `windows`).
+    pub plugin_manager_window:
+        Option<WindowHandle<crate::plugin_manager_window::PluginManagerWindow>>,
+    /// What the Plugin Manager's Reveal runs (the system's file manager,
+    /// off the UI thread; tests record).
+    pub plugin_revealer: std::sync::Arc<dyn vizdaw_app::plugin_manager::Revealer>,
 }
 
 /// The poll's interval while a retry waits on Busy (Swift's 60 Hz tick).
@@ -166,6 +178,8 @@ impl AppState {
             settings_window: None,
             app_plugins: Default::default(),
             plugin_manager_open: false,
+            plugin_manager_window: None,
+            plugin_revealer: std::sync::Arc::new(vizdaw_app::plugin_manager::SystemRevealer),
         }
     }
 
@@ -298,6 +312,7 @@ impl AppState {
             WindowKind::Document => self.title(w.doc),
             WindowKind::Mixer => self.store.document(w.doc).map(mixer_title),
             WindowKind::Plugin | WindowKind::Other => self.plugin_windows.title(w.token),
+            WindowKind::PluginManager => Some(vizdaw_app::plugin_manager::TITLE.to_owned()),
         }
     }
 

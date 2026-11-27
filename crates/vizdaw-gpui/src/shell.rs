@@ -392,7 +392,7 @@ impl DocumentWindow {
                     let host = match kind {
                         WindowKind::Document => Some(PopoverHost::Document),
                         WindowKind::Mixer => Some(PopoverHost::MixerWindow),
-                        WindowKind::Plugin | WindowKind::Other => None,
+                        WindowKind::Plugin | WindowKind::Other | WindowKind::PluginManager => None,
                     };
                     if host.is_some_and(|h| d.record().shows_popover_in(h)) {
                         d.set_record_popover(false);
@@ -406,9 +406,10 @@ impl DocumentWindow {
                     WindowKind::Document => s.close_document(doc),
                     // Only the window goes; its placement released its
                     // own drags as it went.
-                    WindowKind::Mixer | WindowKind::Plugin | WindowKind::Other => {
-                        s.remove_window(token)
-                    }
+                    WindowKind::Mixer
+                    | WindowKind::Plugin
+                    | WindowKind::Other
+                    | WindowKind::PluginManager => s.remove_window(token),
                 }
                 cx.notify();
             });

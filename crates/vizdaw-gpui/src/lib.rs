@@ -26,6 +26,7 @@ pub mod mixer_view;
 pub mod panes;
 pub mod piano_roll;
 pub mod plugin_browser;
+pub mod plugin_manager_window;
 pub mod plugin_windows;
 pub mod plugins_pane;
 pub mod record_popover;
@@ -53,8 +54,8 @@ use vizdaw_app::{DocId, DocumentStore};
 pub use app_state::{AppState, WindowKind};
 pub use appearance::current_theme;
 pub use menus::{
-    AppFileCommand, CloseWindow, FileCommand, NewDemo, NewDocument, OpenDocument, OpenSettings,
-    PlayStop, Quit, RunCommand, Save, SaveAs, StopAndReturn,
+    AppFileCommand, CloseWindow, FileCommand, NewDemo, NewDocument, OpenDocument,
+    OpenPluginManager, OpenSettings, PlayStop, Quit, RunCommand, Save, SaveAs, StopAndReturn,
 };
 pub use shell::DocumentWindow;
 
@@ -92,6 +93,9 @@ pub fn install(store: DocumentStore, cx: &mut App) -> gpui::Entity<AppState> {
     // On a later turn: never inside the key's or the menu's own dispatch.
     cx.on_action(|_: &OpenSettings, cx| {
         cx.defer(|cx| settings_window::open_settings(None, cx));
+    });
+    cx.on_action(|_: &OpenPluginManager, cx| {
+        cx.defer(plugin_manager_window::open_plugin_manager);
     });
     state
 }
