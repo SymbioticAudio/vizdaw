@@ -465,3 +465,61 @@ fn ui_tree_lists_the_panels_apply_button(cx: &mut TestAppContext) {
     assert_eq!(fake.filtered_edits().len(), before + 1);
     assert_eq!(cx.update(|cx| panel.read(cx).unwrap().doc()), doc);
 }
+
+/// Modify › Templates › ‹name› loads the template into the model while
+/// the panel is open: the field shows its name, and Save as Template
+/// saves under the name on screen.
+#[gpui::test]
+fn the_template_name_field_follows_a_template_run_from_the_menu(cx: &mut TestAppContext) {
+    let s = setup(cx);
+    let (h, doc) = new_document(cx);
+    run_in(&s, cx, "modify.transpose", h);
+    let n = control::number(panel_of(cx, doc).unwrap());
+    let type_name = |s: &Setup, cx: &mut TestAppContext, text: &str| {
+        let tree = ok(call(s, cx, "ui.tree", json!({"window": n})));
+        let field = node(&tree, "textfield", "Template name")["id"].clone();
+        ok(call(
+            s,
+            cx,
+            "ui.key",
+            json!({"window": n, "element": field, "text": text}),
+        ));
+    };
+    let save = |s: &Setup, cx: &mut TestAppContext| {
+        let tree = ok(call(s, cx, "ui.tree", json!({"window": n})));
+        let save = node(&tree, "button", "Save as Template")["id"].clone();
+        ok(call(
+            s,
+            cx,
+            "ui.click",
+            json!({"window": n, "element": save}),
+        ));
+    };
+    type_name(&s, cx, "Bass");
+    save(&s, cx);
+    // The field now says another name (the typing adds to it); the menu
+    // runs Bass.
+    type_name(&s, cx, "Lead");
+    let _ = call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "modify.template", "params": {"name": "Bass"}, "window": control::number(h)}),
+    );
+    assert_eq!(
+        with_doc(cx, doc, |d| d.select_modify().template_name.clone()),
+        "Bass"
+    );
+    let tree = ok(call(&s, cx, "ui.tree", json!({"window": n})));
+    assert_eq!(node(&tree, "textfield", "Template name")["value"], "Bass");
+    // Save as Template saves under the shown name.
+    let fake = s.made.lock().unwrap()[0].clone();
+    save(&s, cx);
+    let saved = fake.edits().into_iter().rev().find_map(|e| match e {
+        vizdaw_ffi::edit::EditCommand::Settings {
+            edit: vizdaw_ffi::modify::SettingsEdit::SaveTemplate { template },
+        } => Some(template.name),
+        _ => None,
+    });
+    assert_eq!(saved.as_deref(), Some("Bass"));
+}

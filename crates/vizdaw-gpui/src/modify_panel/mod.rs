@@ -170,12 +170,24 @@ impl ModifyPanel {
                     return;
                 }
                 this.listed |= listed;
+                let name = s
+                    .store
+                    .document(this.doc)
+                    .map(|d| d.select_modify().template_name.clone());
                 // The title follows renames and Save As.
                 if let Some(t) = s.store.document(this.doc).map(modify_panel_title)
                     && t != this.title
                 {
                     window.set_window_title(&t);
                     this.title = t;
+                }
+                // The model's template name changed elsewhere (Modify ›
+                // Templates › ‹name› loads one): the field shows it, so
+                // Save as Template saves under the name on screen.
+                if let Some(name) = name
+                    && name != this.template_name.read(cx).text()
+                {
+                    this.template_name.update(cx, |f, cx| f.set_text(&name, cx));
                 }
                 cx.notify();
             }),
