@@ -28,6 +28,7 @@ pub mod interchange_commands;
 pub mod jobs;
 pub mod key_prefs;
 pub mod lane_inputs;
+pub mod learn;
 pub mod list;
 pub mod marker_list;
 pub mod merge;
@@ -46,6 +47,9 @@ pub mod report_text;
 pub mod session;
 pub mod step_entry;
 pub mod store;
+pub mod surface_commands;
+pub mod surface_relay;
+pub mod surface_settings;
 #[cfg(feature = "test-support")]
 pub mod testing;
 pub mod theme;

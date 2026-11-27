@@ -1,8 +1,11 @@
 //! Settings › Keys (Swift `KeysSettingsView.swift`, 720×520): the number-
 //! row switch, the message line (with Replace / Cancel for a key another
 //! command has), every command by menu with its keys, a recorder and
-//! Reset, and Save… / Load… / Reset All. Learn MIDI is not part of this
-//! version.
+//! Learn MIDI (slice 9d Task 8, `:85-98`) and Reset, and Save… / Load… /
+//! Reset All. Learn MIDI learns into the front-most document still open
+//! (`:20-22`), whose banner sits under the switch (`:36-39`); a refusal is
+//! "MIDI Learn Failed" on this window (`:121-131`), and Esc cancels the
+//! waiting learn except while the recorder records ([`learn_banner`]).
 //!
 //! A change goes to the app's bindings ([`vizdaw_app::key_prefs`], saved in
 //! the preferences) and then [`menus::rebind`] binds the window keys and
@@ -13,8 +16,8 @@
 use core_control::bindings::{Chord, default_chords};
 use core_control::registry::KeyContext;
 use gpui::{
-    AnyElement, App, Context, InteractiveElement, IntoElement, Keystroke, ParentElement,
-    StatefulInteractiveElement, Styled, Window, div, px, rgb,
+    AnyElement, AnyWindowHandle, App, Context, InteractiveElement, IntoElement, Keystroke,
+    ParentElement, StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
 use vizdaw_app::Prefs;
 use vizdaw_app::key_prefs::KeyBindings;
@@ -24,8 +27,10 @@ use super::{SettingsWindow, caption, switch, text};
 use crate::app_state::AppState;
 use crate::controls::key_recorder::{self, Take, key_recorder};
 use crate::file_panels::{self, PanelPlace};
+use crate::learn_banner;
 use crate::menus;
 use crate::registry::RegistryScope;
+use crate::sheet_host::with_help;
 use crate::strip_palette::tokens;
 
 /// The Keys tab's content height (Swift's frame, 720×520).
@@ -73,6 +78,27 @@ struct Row {
     step_entry: bool,
     keys: Vec<String>,
     changed: bool,
+    /// A key can run it, so a MIDI control can learn it
+    /// (`BindingRow.learnable`).
+    learnable: bool,
+}
+
+/// The Learn MIDI button (`S/KeysSettingsView.swift:90`).
+pub const LEARN_MIDI: &str = "Learn MIDI";
+/// Its help with no document open (`:94`).
+pub const LEARN_NO_DOCUMENT: &str = "Open a project to learn MIDI";
+/// Its help for a command no key can run (`:97`).
+pub const LEARN_NOT_LEARNABLE: &str = "Only commands a key can run can be learned";
+
+/// The Learn MIDI button's help (`:92-97`).
+fn learn_help(document: bool, row: &Row) -> String {
+    if !document {
+        LEARN_NO_DOCUMENT.to_owned()
+    } else if row.learnable {
+        format!("Learn a MIDI control (a pad or button) for {}", row.title)
+    } else {
+        LEARN_NOT_LEARNABLE.to_owned()
+    }
 }
 
 /// The rows by menu, the menus in the order they first appear.
@@ -87,6 +113,7 @@ fn groups(keymap: &core_control::bindings::Keymap) -> Vec<(&'static str, Vec<Row
             step_entry: c.context == KeyContext::StepEntry,
             changed: keys != defaults,
             keys,
+            learnable: vizdaw_ffi::surfaces::learnable(c.id),
         };
         match out.iter_mut().find(|(m, _)| *m == c.menu) {
             Some((_, rows)) => rows.push(row),
@@ -138,6 +165,51 @@ pub(super) fn button(
         .into_any_element()
 }
 
+/// A row's Learn MIDI: `button` "Learn MIDI for <title>" in the tree, its
+/// help the value; off, it takes no clicks.
+fn learn_button(
+    row: &Row,
+    document: bool,
+    scope: &mut RegistryScope,
+    press: impl Fn(&mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let t = tokens();
+    let enabled = document && row.learnable;
+    let help = learn_help(document, row);
+    let mut face = with_help(
+        div()
+            .id(format!("keys-learn:{}", row.id))
+            .px_2()
+            .py(px(2.))
+            .rounded(px(t.radius))
+            .border_1()
+            .border_color(rgb(t.surface_separator))
+            .bg(rgb(t.surface_inset))
+            .text_color(rgb(t.text_primary))
+            .opacity(if enabled { 1. } else { 0.45 })
+            .whitespace_nowrap()
+            .child(LEARN_MIDI),
+        help.clone(),
+    );
+    if enabled {
+        face = face
+            .cursor_pointer()
+            .on_click(move |_, window, cx| press(window, cx));
+    }
+    div()
+        .relative()
+        .flex_none()
+        .child(face)
+        .child(scope.control_with(
+            "button",
+            &format!("{LEARN_MIDI} for {}", row.title),
+            enabled,
+            Some(&help),
+            false,
+        ))
+        .into_any_element()
+}
+
 /// A text line with a value in the tree and a colour of its own.
 fn tagged(line: &str, value: Option<&str>, colour: u32, scope: &mut RegistryScope) -> AnyElement {
     div()
@@ -173,6 +245,30 @@ impl SettingsWindow {
                 t.stop_recording(cx);
             }
         }));
+    }
+
+    /// The recorder awaits a key (its Esc then is the recorder's).
+    pub fn is_recording(&self) -> bool {
+        self.recording.is_some()
+    }
+
+    /// Learn MIDI: the front document learns the next control for
+    /// command `id`; a refusal is "MIDI Learn Failed" on this window
+    /// (`S/KeysSettingsView.swift:90,121-131`), not the document's.
+    fn learn_midi(&mut self, id: &'static str, window: AnyWindowHandle, cx: &mut Context<Self>) {
+        let refused = AppState::global(cx).update(cx, |s, cx| {
+            let front = s.store.front()?;
+            let core = s.store.core();
+            let d = s.store.document_mut(front)?;
+            // An alert of the document's own stays its own.
+            let held = d.alert.take();
+            d.learn_command(id, core.as_ref());
+            let refused = d.alert.take();
+            d.alert = held;
+            cx.notify();
+            refused
+        });
+        self.alert(refused, window, cx);
     }
 
     pub(super) fn stop_recording(&mut self, cx: &mut Context<Self>) {
@@ -259,13 +355,14 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = tokens();
-        let (groups, message, pending, reserve) = {
+        let (groups, message, pending, reserve, front) = {
             let s = AppState::global(cx).read(cx);
             (
                 groups(s.keys.keymap()),
                 s.keys.message().map(str::to_owned),
                 s.keys.pending().is_some(),
                 s.keys.reserve_number_row(&s.prefs),
+                s.store.front(),
             )
         };
         let me = cx.entity().downgrade();
@@ -285,6 +382,9 @@ impl SettingsWindow {
                 }
             },
         );
+
+        // The front document's banner, while its learn waits (`:37-39`).
+        let banner = front.and_then(|d| learn_banner::learn_banner(d, scope, cx));
 
         // The message line, with Replace and Cancel for a key another
         // command has.
@@ -330,6 +430,13 @@ impl SettingsWindow {
                         })
                         .ok();
                 });
+                let learner = me.clone();
+                let learn = learn_button(&row, front.is_some(), &mut list, move |window, cx| {
+                    let handle = window.window_handle();
+                    learner
+                        .update(cx, |t, cx| t.learn_midi(id, handle, cx))
+                        .ok();
+                });
                 let reset = button("Reset", row.changed, &mut list, move |_, cx| {
                     edit(cx, move |k, p| k.reset(id, p));
                 });
@@ -373,6 +480,7 @@ impl SettingsWindow {
                             &mut list,
                         ))
                         .child(recorder)
+                        .child(learn)
                         .child(reset)
                         .into_any_element(),
                 );
@@ -416,6 +524,7 @@ impl SettingsWindow {
             .gap(px(6.))
             .p_4()
             .child(toggle)
+            .children(banner)
             .children(message_line)
             .child(list_el)
             .child(bottom)

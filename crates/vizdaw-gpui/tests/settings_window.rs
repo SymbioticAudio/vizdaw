@@ -150,13 +150,13 @@ fn the_tabs_are_swifts_nine_in_order(cx: &mut TestAppContext) {
 #[gpui::test]
 fn an_unbuilt_tab_says_it_comes_later(cx: &mut TestAppContext) {
     let mut s = setup(cx, true);
+    // Surfaces has come (slice 9d): no placeholder.
     s.open(Some(SettingsTab::Surfaces));
-    let line = s
-        .elements()
-        .into_iter()
-        .find(|e| e.role == "text" && e.label.ends_with("later version."))
-        .expect("the placeholder");
-    assert_eq!(line.label, "Surfaces comes in a later version.");
+    assert!(
+        !s.elements()
+            .iter()
+            .any(|e| e.role == "text" && e.label.ends_with("later version."))
+    );
     s.click("tab", "Co-Producer");
     let all = s.elements();
     assert!(

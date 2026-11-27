@@ -12,8 +12,8 @@ profile="${1:-debug}"
 # `screenshot`: ui.screenshot draws the window offscreen (GPUI's
 # render_to_image, behind its test-support feature at this pin).
 case "$profile" in
-    debug) cargo build -p vizdaw-gpui --features screenshot ;;
-    release) cargo build -p vizdaw-gpui --release --features screenshot ;;
+    debug) cargo build -p vizdaw-gpui --features screenshot && cargo build -p vizdaw-scan ;;
+    release) cargo build -p vizdaw-gpui --release --features screenshot && cargo build -p vizdaw-scan --release ;;
     *) echo "usage: make-gpui-app.sh [debug|release]" >&2; exit 2 ;;
 esac
 
@@ -21,6 +21,9 @@ app="target/VizDAW-GPUI.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS"
 cp "target/$profile/vizdaw-gpui" "$app/Contents/MacOS/vizdaw-gpui"
+# The plug-in scanner the catalog runs, next to the app binary
+# (vizdaw-app session.rs `live_catalog`).
+cp "target/$profile/vizdaw-scan" "$app/Contents/MacOS/vizdaw-scan"
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -36,6 +39,8 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
     <string>APPL</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>VizDAW records audio from your audio interface or microphone into armed tracks.</string>
 </dict>
 </plist>
 PLIST
@@ -59,4 +64,7 @@ ditto "$multiq/Multi-Q.component" "$app/Contents/PlugIns/Multi-Q.component"
 ditto "$multiq/licences" "$licences"
 codesign --force -s - "$app/Contents/PlugIns/Multi-Q.clap"
 codesign --force -s - "$app/Contents/PlugIns/Multi-Q.component"
+# Seal the bundle last, after everything inside it is in place: an
+# unsealed bundle opened from Finder reads as "damaged".
+codesign --force -s - "$app"
 echo "$app"

@@ -8,6 +8,7 @@
 mod editing;
 mod keys;
 mod plugins;
+mod surfaces;
 
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -38,6 +39,7 @@ use crate::controls;
 use crate::controls::stepper::{Range, stepper_buttons};
 use crate::menus::{CloseWindow, SETTINGS_WINDOW_CONTEXT};
 use crate::registry::{RegistryScope, SharedRegistry};
+use crate::sheet_host::{Sheet, SheetHost, SheetKey, render_card};
 use crate::strip_palette::tokens;
 
 /// The window's width (Swift's Form width).
@@ -56,6 +58,11 @@ pub const APPEARANCE_HEIGHT: f32 = 300.;
 /// The Keys tab's content width and height (Swift's frame, 720×520).
 pub use editing::EDITOR_PANEL;
 pub use keys::{KEYS_HEIGHT, KEYS_WIDTH};
+/// Settings › Keys' Learn MIDI button and its help (`S/KeysSettingsView.swift:88-98`).
+pub use keys::{LEARN_MIDI, LEARN_NO_DOCUMENT, LEARN_NOT_LEARNABLE};
+/// The Surfaces tab's width (`S/SurfacesSettingsView.swift:69`) and
+/// content height.
+pub use surfaces::{SURFACES_HEIGHT, SURFACES_WIDTH};
 /// The Editing tab's content height: three sections, eleven rows.
 pub const EDITING_HEIGHT: f32 = 600.;
 /// The tab strip's room: two rows, for where the labels wrap (the body
@@ -114,6 +121,7 @@ impl SettingsTab {
         match self {
             SettingsTab::Keys => KEYS_WIDTH,
             SettingsTab::Editing => editing::EDITING_WIDTH,
+            SettingsTab::Surfaces => SURFACES_WIDTH,
             _ => WIDTH,
         }
     }
@@ -128,6 +136,7 @@ impl SettingsTab {
             SettingsTab::Automation => AUTOMATION_HEIGHT,
             SettingsTab::Keys => KEYS_HEIGHT,
             SettingsTab::Editing => EDITING_HEIGHT,
+            SettingsTab::Surfaces => SURFACES_HEIGHT,
             _ => DEFAULT_HEIGHT,
         }
     }
@@ -241,6 +250,15 @@ pub struct SettingsWindow {
     eq_gen: u64,
     eqs_read: bool,
     installing: bool,
+    /// The window's sheet (Add Surface).
+    pub(crate) sheet: SheetHost,
+    /// The Surfaces tab's 2 Hz poll, alive only while the tab shows.
+    surfaces_poll: Option<Task<()>>,
+    /// A surfaces read is out (its thread is still running): the poll
+    /// starts no second one.
+    surfaces_reading: bool,
+    /// Bumped when the poll stops, so a late read is dropped.
+    surfaces_gen: u64,
 }
 
 impl SettingsWindow {
@@ -250,7 +268,11 @@ impl SettingsWindow {
         window.focus(&focus, cx);
         cx.on_release(|_, cx| {
             let app = AppState::global(cx);
-            app.update(cx, |s, _| s.settings_window = None);
+            app.update(cx, |s, _| {
+                s.settings_window = None;
+                // A sheet the window took with it adds nothing.
+                s.surfaces.cancel_add();
+            });
         })
         .detach();
         // The tab shows the app's audio settings: it follows their changes.
@@ -273,6 +295,10 @@ impl SettingsWindow {
             eq_gen: 0,
             eqs_read: false,
             installing: false,
+            sheet: SheetHost::new(cx),
+            surfaces_poll: None,
+            surfaces_reading: false,
+            surfaces_gen: 0,
         };
         this.watch_keys(window, cx);
         this.shown(cx);
@@ -303,8 +329,13 @@ impl SettingsWindow {
     fn shown(&mut self, cx: &mut Context<Self>) {
         self.poll = None;
         self.round_gen += 1;
+        self.surfaces_poll = None;
+        self.surfaces_gen += 1;
         if self.tab == SettingsTab::Plugins {
             self.read_eqs(cx);
+        }
+        if self.tab == SettingsTab::Surfaces {
+            self.poll_surfaces(cx);
         }
         if self.tab != SettingsTab::Audio {
             return;
@@ -1117,10 +1148,6 @@ impl SettingsWindow {
         body.into_any_element()
     }
 
-    fn surfaces_tab(&mut self, scope: &mut RegistryScope) -> AnyElement {
-        placeholder_body(SettingsTab::Surfaces, scope)
-    }
-
     fn co_producer_tab(&mut self, scope: &mut RegistryScope) -> AnyElement {
         placeholder_body(SettingsTab::CoProducer, scope)
     }
@@ -1138,7 +1165,7 @@ impl SettingsWindow {
             SettingsTab::Audio => self.audio_tab(scope, window, cx),
             SettingsTab::Recording => self.recording_tab(scope, window, cx),
             SettingsTab::Automation => self.automation_tab(scope, window, cx),
-            SettingsTab::Surfaces => self.surfaces_tab(scope),
+            SettingsTab::Surfaces => self.surfaces_tab(scope, window, cx),
             SettingsTab::Plugins => self.plugins_tab(scope, window, cx),
             SettingsTab::CoProducer => self.co_producer_tab(scope),
         }
@@ -1328,6 +1355,14 @@ impl Render for SettingsWindow {
             );
         }
         let body = self.body(&mut scope, window, cx);
+        let sheet = render_card(
+            |v: &mut Self| &mut v.sheet,
+            self,
+            &mut scope.container(),
+            window,
+            cx,
+            |v, i, window, cx| v.press_sheet_button(i, window, cx),
+        );
         div()
             .id("settings-window")
             .track_focus(&self.focus)
@@ -1342,8 +1377,82 @@ impl Render for SettingsWindow {
             .bg(rgb(background()))
             .text_color(rgb(t.text_primary))
             .text_size(px(13.))
+            .relative()
             .child(tabs)
             .child(body)
+            .children(sheet)
+    }
+}
+
+/// The Settings window's sheet (Swift's `.sheet` on a Settings tab: Add
+/// Surface). It belongs to no document, so no transport keys wait on it.
+impl SettingsWindow {
+    /// Shows `sheet` over the window; refused (handed back) while another
+    /// is up or under the control channel (no sheet ever shows then).
+    pub fn show_sheet(
+        &mut self,
+        sheet: Box<dyn Sheet>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), Box<dyn Sheet>> {
+        if self.sheet.is_up() || crate::control::channel_on(cx) {
+            return Err(sheet);
+        }
+        self.menu = None;
+        self.stop_recording(cx);
+        self.sheet.put_up(sheet, window, cx);
+        cx.notify();
+        Ok(())
+    }
+
+    /// The label of the sheet showing.
+    pub fn sheet_label(&self) -> Option<String> {
+        self.sheet.label()
+    }
+
+    /// Presses the sheet's button `index` (an enabled one); the sheet
+    /// closes if it says so.
+    pub fn press_sheet_button(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sheet.press(index, window, cx) {
+            self.sheet_closed(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Takes the sheet down without a press.
+    pub fn close_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sheet.take_down() {
+            self.sheet_closed(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn sheet_closed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        cx.defer(crate::alerts::present);
+    }
+
+    /// A key while the sheet is up (the keystroke interceptor's call);
+    /// true: the key stops here.
+    pub(crate) fn sheet_key(
+        &mut self,
+        key: &gpui::Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match self.sheet.key(key, window, cx) {
+            SheetKey::Press(i) => {
+                self.press_sheet_button(i, window, cx);
+                true
+            }
+            SheetKey::Stop => true,
+            SheetKey::Pass => false,
+        }
     }
 }
 

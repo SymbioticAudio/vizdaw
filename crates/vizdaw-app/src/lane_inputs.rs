@@ -141,7 +141,7 @@ pub struct LaneInputs {
     /// The MIDI sources as the last refresh read them.
     midi_sources: Vec<String>,
     /// The surfaces' input ports, which reach no track (plan 5f-1 Ruling
-    /// 17). Empty until surfaces come to this app.
+    /// 17), from the store.
     claimed: Vec<String>,
     /// The last refresh started, and the newest one applied.
     started: u64,

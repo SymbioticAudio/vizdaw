@@ -17,6 +17,9 @@ use gpui::TestAppContext;
 use serde_json::{Map, Value, json};
 use vizdaw_app::testing::{FakeCore, FakeSession, JobRequest, JobScript, demo_fake, seq};
 use vizdaw_app::{CoreCalls, DocSession, DocumentStore};
+use vizdaw_ffi::surfaces::{
+    CommandMapRow, LearnStateRow, SurfaceKindRow, SurfacePortsRow, SurfaceRow, SurfaceStateRow,
+};
 use vizdaw_ffi::{
     AafInfoRow, BitDepthRow, BounceSettingsRow, DawprojectInfoRow, MediaOriginRow, MediaRow,
     MidiFileInfoRow, MidiFileKindRow, OpenOptions, ProjectFormatRow, RecoveryInfo, ReportRow,
@@ -1046,6 +1049,49 @@ impl CoreCalls for PanickyCore {
     fn bounce_settings(&self) -> BounceSettingsRow {
         self.0.bounce_settings()
     }
+    // The surfaces are the fake's: no CoreMIDI client, no `surfaces.json`.
+    fn surfaces_load(&self) -> Result<(), VizError> {
+        self.0.surfaces_load()
+    }
+    fn surface_list(&self) -> Vec<SurfaceRow> {
+        self.0.surface_list()
+    }
+    fn surface_ports(&self) -> SurfacePortsRow {
+        self.0.surface_ports()
+    }
+    fn kontrol_ports(&self) -> SurfacePortsRow {
+        self.0.kontrol_ports()
+    }
+    fn surface_add(
+        &self,
+        kind: SurfaceKindRow,
+        input: &str,
+        output: &str,
+        position: Option<u8>,
+    ) -> Result<u32, VizError> {
+        self.0.surface_add(kind, input, output, position)
+    }
+    fn surface_remove(&self, id: u32) -> Result<(), VizError> {
+        self.0.surface_remove(id)
+    }
+    fn surfaces_state(&self) -> SurfaceStateRow {
+        self.0.surfaces_state()
+    }
+    fn command_maps(&self) -> Vec<CommandMapRow> {
+        self.0.command_maps()
+    }
+    fn remove_command_map(&self, command: &str) -> Result<(), VizError> {
+        self.0.remove_command_map(command)
+    }
+    fn learn_command(&self, id: &str) -> Result<(), VizError> {
+        self.0.learn_command(id)
+    }
+    fn cancel_learn(&self) {
+        self.0.cancel_learn()
+    }
+    fn learn_state(&self) -> LearnStateRow {
+        self.0.learn_state()
+    }
 }
 
 #[gpui::test]
@@ -1128,7 +1174,7 @@ fn the_dawproject_return_prompt_is_answered_under_the_channel(cx: &mut TestAppCo
 #[gpui::test]
 fn the_file_commands_are_no_longer_unavailable(cx: &mut TestAppContext) {
     let s = setup(cx);
-    let e = call(&s, cx, "state.get", json!({"target": "surfaces"})).unwrap_err();
+    let e = call(&s, cx, "state.get", json!({"target": "audio_editor"})).unwrap_err();
     assert_eq!(e.code, ErrorCode::Unavailable);
     assert!(e.message.contains("slice 8a"), "{}", e.message);
     assert!(e.message.contains("file.import_*"), "{}", e.message);

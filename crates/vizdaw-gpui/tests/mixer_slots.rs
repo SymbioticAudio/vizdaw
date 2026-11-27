@@ -613,6 +613,7 @@ fn a_sends_menu_switches_pre_fader_and_on_and_removes_it(cx: &mut TestAppContext
         [
             ("Pre-Fader".into(), true, true),
             ("On".into(), true, true),
+            ("MIDI Learn".into(), true, false),
             ("Remove Send".into(), true, false),
         ]
     );

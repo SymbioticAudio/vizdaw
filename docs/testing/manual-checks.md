@@ -48,6 +48,9 @@ Media Pool. Their checks come with their slices.
 | M20 | Change I/O Buffer Size while playing | The new size is heard without a glitch or a stop | open |
 | M21 | Settings › Keys: record ⌘W for Go to Locator 2, then ⌘Q for another command | Each key is recorded on its row (no window closes, the app does not quit); the menus show the new keys; Reset All puts them back | open |
 | M22 | Settings › Plug-ins › Install Multi-Q for other apps, then install again | It lands in ~/Library/Audio/Plug-Ins/Components and another app sees it; the second time asks to replace | open |
+| M23 | Settings › Surfaces: add a real MCU-compatible unit, move fader 1 and press Mute 1, then unplug it | The strip follows, the LEDs light, and unplugging reads "Disconnected" within a second | open |
+| M24 | Plug in a host-integration keyboard and choose it in Add Surface | Both ports fill with its "DAW" port; its transport, knob and tempo work | open |
+| M25 | Learn a knob to a fader from the mixer's menu, and a pad to Undo from Settings › Keys | The banner shows, then goes; the knob rides the fader; the pad undoes; the MIDI Learn Maps sheet lists the knob, changes its mode, and Undo reverts it | open |
 
 ## Linux (your desktop)
 
@@ -82,3 +85,5 @@ Media Pool. Their checks come with their slices.
 | L27 | Settings › Appearance: try each of the six themes, then turn colour bars off | Every window changes at once; text stays readable with the system font; the colour bars go | open |
 | L28 | Settings › Keys: record a new key for a command, then Save… and Load… a keys file | The in-window menu shows the new key and it runs the command; the save and open panels appear; a loaded file's keys take effect | open |
 | L29 | View › Customize Transport Bar…: drag an item onto the bar, one along it, one off, then Done | The bar changes as dragged; Cancel instead leaves it as it was | open |
+| L30 | Settings › Surfaces on Linux | The empty lines draw; Add Surface… shows "No MIDI sources" and "No MIDI destinations", and Add is disabled | open |
+| L31 | The MIDI Learn banner and Maps sheet on Linux | They draw with the system font; Esc cancels | open |

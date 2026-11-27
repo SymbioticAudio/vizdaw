@@ -1053,6 +1053,45 @@ fn only_expected(s: &Spec, t: &Trip) {
     }
 }
 
+/// MIDI events of different kinds at one tick come back the same: the file
+/// keeps each kind in a lane of its own (a poly pressure on a sounding note
+/// in that note's expression), so the projection lists one tick's events
+/// by lane and, within a lane, in the order they play. The events are
+/// inserted against that order (poly pressure first), so the model's own
+/// order at each tick differs from the file's.
+#[test]
+fn same_tick_midi_of_different_kinds_round_trips() {
+    let mut b = Builder::new();
+    let (seq, keys, _, _) = song(&mut b, "Keys");
+    let at = 142_858;
+    let poly =
+        |tick: i64, pitch: u8, value: u32| spec_at(tick, EventBody::PolyPressure { pitch, value });
+    let cc = |tick: i64, index: u8, value: u32| spec_at(tick, EventBody::Cc { index, value });
+    b.events(
+        seq,
+        keys,
+        vec![
+            poly(at, 61, 0x4000_0000),
+            spec_at(at, EventBody::ChannelPressure { value: 0x2000_0000 }),
+            spec_at(at, EventBody::PitchBend { value: 0x9000_0000 }),
+            cc(at, 74, 0x6000_0000),
+            cc(at, 1, 0x1000_0000),
+            spec_at(at, EventBody::note(60, 0x8000, Tick(Q))),
+            poly(at + Q / 2, 62, 0x3000_0000),
+            spec_at(
+                at + Q / 2,
+                EventBody::ChannelPressure { value: 0x5000_0000 },
+            ),
+            poly(at + Q / 2, 60, 0x7000_0000),
+        ],
+    )
+    .unwrap();
+    let doc = b.finish();
+    let t = trips_equal(&doc, seq, RegionGain::Apply);
+    let (a, _) = projections(&doc, seq, &t);
+    assert_eq!(a.tracks[0].midi.len(), 8, "{:?}", a.tracks[0].midi);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(common::cases(64)))]
 

@@ -38,6 +38,7 @@ use vizdaw_app::editor::{MainView, PaneSide, PaneView, ViewLayouts};
 use vizdaw_app::marker_list::{MarkerList, MarkerListRow};
 use vizdaw_app::mixer::MixerPlacement;
 use vizdaw_app::record::PopoverHost;
+use vizdaw_app::surface_relay::RelayStep;
 use vizdaw_app::transport::Shuttle;
 use vizdaw_app::transport_bar::TransportItem;
 use vizdaw_app::transport_fields::{self as fields_model, TransportField};
@@ -357,6 +358,8 @@ impl DocumentWindow {
         let state = app.clone();
         subscriptions.push(cx.on_release(move |this: &mut Self, cx| {
             this._hold = None;
+            // The MIDI Learn Maps sheet goes with it: its polling stops.
+            let maps = this.sheet_label().as_deref() == Some(crate::sheets::learn_maps::TITLE);
             // A transport field's edit ends with its window: the keys come
             // back, and a bar punch draft does not stay to refuse Record.
             let field = this.transport_fields.editing();
@@ -372,6 +375,9 @@ impl DocumentWindow {
                 s.store.with_document(doc, |d, _| {
                     if let Some(owner) = &sheet_owner {
                         d.end_text_editing(owner);
+                    }
+                    if maps {
+                        d.learn.close_maps();
                     }
                     if field.is_some() {
                         d.end_text_editing(vizdaw_app::transport_fields::TEXT_OWNER);
@@ -417,7 +423,10 @@ impl DocumentWindow {
             // The Mixer window's transport is the document's: its own
             // window polls it.
             _poll: match kind {
-                WindowKind::Document => Self::start_polling(doc, window, cx),
+                WindowKind::Document => {
+                    Self::start_surface_tick(doc, window, cx);
+                    Self::start_polling(doc, window, cx)
+                }
                 _ => Task::ready(()),
             },
             app,
@@ -461,6 +470,41 @@ impl DocumentWindow {
         }
     }
 
+    /// The surface tick (slice 9d review I1): every [`FAST_POLL`] while a
+    /// surface is set up, the document's surface events are taken and run
+    /// in this window, as Swift's 60 Hz timer did, without speeding up the
+    /// transport poll. Ends with the window.
+    ///
+    /// [`FAST_POLL`]: crate::app_state::FAST_POLL
+    fn start_surface_tick(doc: DocId, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                let interval = this
+                    .update(cx, |this, cx| this.app.read(cx).surface_interval(doc))
+                    .ok()
+                    .flatten();
+                let Some(interval) = interval else { break };
+                cx.background_executor().timer(interval).await;
+                let ticked = this.update_in(cx, |this, window, cx| {
+                    let steps = this.app.update(cx, |s, cx| {
+                        let (steps, idled) = s.surface_tick(doc);
+                        if idled {
+                            cx.notify();
+                        }
+                        steps
+                    });
+                    if !steps.is_empty() {
+                        this.run_surface_steps(steps, window, cx);
+                    }
+                });
+                if ticked.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     /// Polls the transport every `poll_interval()` (read again each tick:
     /// fast while playing, or while a note-off or a drag's final edit
     /// waits on Busy), until the document closes.
@@ -473,12 +517,19 @@ impl DocumentWindow {
                     .flatten();
                 let Some(interval) = interval else { break };
                 cx.background_executor().timer(interval).await;
-                let polled = this.update(cx, |this, cx| {
-                    this.app.update(cx, |s, cx| {
+                let polled = this.update_in(cx, |this, window, cx| {
+                    let steps = this.app.update(cx, |s, cx| {
                         if s.poll(doc) {
                             cx.notify();
                         }
+                        s.store
+                            .document_mut(doc)
+                            .map(DocumentModel::take_surface_steps)
+                            .unwrap_or_default()
                     });
+                    // What this document's session took from the surfaces
+                    // runs here, in its own window, whichever is in front.
+                    this.run_surface_steps(steps, window, cx);
                     // A job the poll ended may close a project the store
                     // made (or open one): outside this window's update.
                     if this.app.read(cx).store.settling() {
@@ -490,6 +541,62 @@ impl DocumentWindow {
                 }
             }
         })
+    }
+
+    /// Applies the surfaces' steps to this window's document, in order
+    /// (slice 9d; `M/SurfaceRelay.swift:66-89`). A device's command runs
+    /// as its menu item, through this window; with `bypass` the document
+    /// takes it as a surface button, not a key (ruling T9-1), until the
+    /// dispatched action ran. A programmatic one runs as `command.run`
+    /// does and opens no dialog. The steps after a command wait for it.
+    pub fn run_surface_steps(
+        &mut self,
+        steps: Vec<RelayStep>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let doc = self.doc;
+        let mut steps = steps.into_iter();
+        while let Some(step) = steps.next() {
+            let command = self.app.update(cx, |s, cx| {
+                cx.notify();
+                s.store
+                    .with_document(doc, |d, _| d.apply_surface_step(step))
+                    .flatten()
+            });
+            let Some(c) = command else { continue };
+            let rest: Vec<RelayStep> = steps.collect();
+            if c.programmatic {
+                // Outside this window's update, as the channel runs it
+                // (the command may close or update the window); as a
+                // surface button too (`M/SurfaceRelay.swift:70`).
+                let app = self.app.clone();
+                let own = window.window_handle().downcast::<DocumentWindow>();
+                cx.defer(move |cx| {
+                    set_surface_acting(&app, doc, true, cx);
+                    crate::control::run_quietly(&c.id, doc, cx);
+                    set_surface_acting(&app, doc, false, cx);
+                    if let Some(own) = own {
+                        let _ = own.update(cx, |this, window, cx| {
+                            this.run_surface_steps(rest, window, cx);
+                        });
+                    }
+                });
+            } else {
+                if c.bypass {
+                    set_surface_acting(&self.app, doc, true, cx);
+                }
+                window.dispatch_action(menus::action_for(&c.id), cx);
+                // Queued after the dispatch, which runs deferred too.
+                cx.defer_in(window, move |this, window, cx| {
+                    if c.bypass {
+                        set_surface_acting(&this.app, doc, false, cx);
+                    }
+                    this.run_surface_steps(rest, window, cx);
+                });
+            }
+            return;
+        }
     }
 
     pub fn doc(&self) -> DocId {
@@ -1300,10 +1407,18 @@ impl DocumentWindow {
         if event.keystroke.key != "escape" {
             return;
         }
-        // A key held on the roll's keyboard strip is let go.
-        if self.release_roll_key(cx) {
+        if self.escape_menus(window, cx) {
             cx.stop_propagation();
-            return;
+        }
+    }
+
+    /// Escape's first work: a key held on the roll's keyboard strip is
+    /// let go, else every open menu list and popover closes. True when
+    /// there was something to do (the key goes no further; a waiting MIDI
+    /// learn is cancelled only by the next Esc).
+    pub(crate) fn escape_menus(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.release_roll_key(cx) {
+            return true;
         }
         let headers = std::mem::take(&mut self.track_headers.add_menu_open)
             | self.track_headers.input_picker.take().is_some()
@@ -1330,9 +1445,10 @@ impl DocumentWindow {
             || list
             || roll
         {
-            cx.stop_propagation();
             cx.notify();
+            return true;
         }
+        false
     }
 
     /// The held key is up: one landing if it stepped.
@@ -2370,4 +2486,13 @@ fn bar_state(
             })
             .collect(),
     })
+}
+
+/// Sets `doc`'s surface-acting flag (ruling T9-1).
+fn set_surface_acting(app: &Entity<AppState>, doc: DocId, on: bool, cx: &mut App) {
+    app.update(cx, |s, _| {
+        if let Some(d) = s.store.document_mut(doc) {
+            d.set_surface_acting(on);
+        }
+    });
 }

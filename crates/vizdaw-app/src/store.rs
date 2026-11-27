@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use vizdaw_ffi::VizError;
+use vizdaw_ffi::surfaces::{
+    CommandMapRow, LearnStateRow, SurfaceKindRow, SurfacePortsRow, SurfaceRow, SurfaceStateRow,
+};
 use vizdaw_ffi::{
     AafInfoRow, BounceSettingsRow, DawprojectInfoRow, OpenOptions, ProjectFormatRow, RecoveryInfo,
 };
@@ -92,6 +95,48 @@ impl CoreCalls for Makers {
     fn bounce_settings(&self) -> BounceSettingsRow {
         LiveCore.bounce_settings()
     }
+    // The surfaces are the fake's here, as Swift's `FakeSurfaceCore`: no
+    // CoreMIDI client and no `surfaces.json` (slice 9d).
+    fn surfaces_load(&self) -> Result<(), VizError> {
+        Ok(())
+    }
+    fn surface_list(&self) -> Vec<SurfaceRow> {
+        vec![]
+    }
+    fn surface_ports(&self) -> SurfacePortsRow {
+        SurfacePortsRow::default()
+    }
+    fn kontrol_ports(&self) -> SurfacePortsRow {
+        SurfacePortsRow::default()
+    }
+    fn surface_add(
+        &self,
+        _kind: SurfaceKindRow,
+        _input: &str,
+        _output: &str,
+        _position: Option<u8>,
+    ) -> Result<u32, VizError> {
+        Err(not_scripted("surface_add"))
+    }
+    fn surface_remove(&self, _id: u32) -> Result<(), VizError> {
+        Err(not_scripted("surface_remove"))
+    }
+    fn surfaces_state(&self) -> SurfaceStateRow {
+        SurfaceStateRow::default()
+    }
+    fn command_maps(&self) -> Vec<CommandMapRow> {
+        vec![]
+    }
+    fn remove_command_map(&self, _command: &str) -> Result<(), VizError> {
+        Err(not_scripted("remove_command_map"))
+    }
+    fn learn_command(&self, _id: &str) -> Result<(), VizError> {
+        Err(not_scripted("learn_command"))
+    }
+    fn cancel_learn(&self) {}
+    fn learn_state(&self) -> LearnStateRow {
+        LearnStateRow::default()
+    }
 }
 
 pub struct DocumentStore {
@@ -127,6 +172,18 @@ pub struct DocumentStore {
     /// The picker's sources as any document (or the launch warm-up) last
     /// read them: a new document's first picker lists them.
     input_sources: crate::lane_inputs::InputSources,
+    /// The surfaces' input ports, which reach no track (plan 5f-1 Ruling
+    /// 17): every document's picker marks them.
+    claimed_ports: Vec<String>,
+    /// The document the surfaces were last focused on, once the core
+    /// took it (`S/VizDAWApp.swift:590-603`).
+    surface_focus: Option<DocId>,
+    /// A surface is set up, as the core's list last said: the windows'
+    /// fast surface tick runs.
+    has_surfaces: bool,
+    /// The document whose learn the core waits on, shared by every
+    /// document's learn model (a newer learn replaces the older).
+    learn_owner: crate::learn::LearnOwner,
 }
 
 impl DocumentStore {
@@ -166,6 +223,10 @@ impl DocumentStore {
             shift_held: Box::new(|| false),
             disable_plugins: Box::new(move |p| disabling.disable_plugins(p).is_ok()),
             input_sources: crate::lane_inputs::InputSources::default(),
+            claimed_ports: vec![],
+            surface_focus: None,
+            has_surfaces: false,
+            learn_owner: Default::default(),
         }
     }
 
@@ -236,6 +297,34 @@ impl DocumentStore {
         self.record_defaults = d;
     }
 
+    /// Reads `surfaces.json` (at launch, before the first document, on
+    /// the UI thread as Swift did, `S/VizDAWApp.swift:518-521`): a damaged
+    /// file is kept aside by the core, which starts with no surfaces.
+    /// Then the pickers mark the surfaces' ports.
+    pub fn load_surfaces(&mut self) {
+        if let Err(e) = self.core.surfaces_load() {
+            eprintln!("surfaces.json not read: {}", error_message(&e));
+        }
+        self.refresh_claimed_ports();
+    }
+
+    /// The surfaces' input ports, read again from the core's list (after
+    /// a surface is added or removed), for every document's picker.
+    pub fn refresh_claimed_ports(&mut self) {
+        let list = self.core.surface_list();
+        self.has_surfaces = !list.is_empty();
+        let ports: Vec<String> = list.into_iter().map(|r| r.input).collect();
+        for d in self.documents.values_mut() {
+            d.inputs.set_claimed_ports(ports.clone());
+        }
+        self.claimed_ports = ports;
+    }
+
+    /// A surface is set up (read at launch and after each add or remove).
+    pub fn has_surfaces(&self) -> bool {
+        self.has_surfaces
+    }
+
     pub fn new_empty(&mut self) -> Option<DocId> {
         self.add("New Document Failed", |s| s.core.new_empty())
     }
@@ -254,6 +343,8 @@ impl DocumentStore {
             Ok(mut model) => {
                 model.apply_record_defaults(self.record_defaults);
                 model.inputs.attach(self.core.clone(), &self.input_sources);
+                model.inputs.set_claimed_ports(self.claimed_ports.clone());
+                model.learn.share_owner(self.learn_owner.clone());
                 let id = DocId(self.next_id);
                 self.next_id += 1;
                 self.documents.insert(id, model);
@@ -316,6 +407,36 @@ impl DocumentStore {
             .find(|d| self.documents.contains_key(d))
     }
 
+    /// The surfaces drive the front document (plan 5f-1 Ruling 11): its
+    /// session is focused when the front changes, not every tick, so a
+    /// `surface.inject` into another window keeps the focus it took. It is
+    /// remembered only once the core took it, so a refusal is retried at
+    /// the next call; with no document open it is forgotten.
+    pub fn follow_surface_focus(&mut self) {
+        let front = self.front();
+        if front == self.surface_focus {
+            return;
+        }
+        match front {
+            None => self.surface_focus = None,
+            Some(id) => {
+                if self.documents[&id].session().focus_surfaces().is_ok() {
+                    self.surface_focus = Some(id);
+                }
+            }
+        }
+    }
+
+    /// The document whose learn waits, for Esc (`S/KeyMonitor.swift:161`;
+    /// at most one: a newer learn replaces the older).
+    pub fn learning_document(&self) -> Option<DocId> {
+        self.documents
+            .iter()
+            .filter(|(_, d)| d.learn.is_learning())
+            .map(|(id, _)| *id)
+            .min()
+    }
+
     /// A window closed: its document goes. Closing twice is harmless.
     pub fn close(&mut self, id: DocId) {
         if self.key_window.map(|(d, _)| d) == Some(id) {
@@ -335,6 +456,10 @@ impl DocumentStore {
             }
         }
         if let Some(mut doc) = self.documents.remove(&id) {
+            // Review Focus 2: no learn lands in a closed session.
+            if doc.learn.is_learning() {
+                self.core.cancel_learn();
+            }
             if let Some(a) = doc.alert.take() {
                 self.alerts.push_back((None, a));
             }

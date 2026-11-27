@@ -5110,6 +5110,375 @@ fn gpui_themes_and_the_strip_over_the_channel() {
     app.quit();
 }
 
+/// The core's `surfaces.json` under the launch home (`vizctl` sets
+/// `HOME`; `core-ffi/src/recovery.rs:53-63`).
+fn surfaces_file(home: &std::path::Path) -> PathBuf {
+    let support = if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/VizDAW")
+    } else {
+        home.join(".local/share/vizdaw")
+    };
+    support.join("surfaces.json")
+}
+
+/// Review Focus 3: a damaged `surfaces.json` is kept aside at launch as
+/// `surfaces.json.bad`, the app starts with no surfaces and says why, and
+/// the next add saves a fresh file, which the next launch reads.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_a_damaged_surfaces_file_is_kept_aside() {
+    let home = temp_home();
+    let file = surfaces_file(home.path());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "{").unwrap();
+    let mut app = App::start(home.path(), false);
+    let st = app.call("state.get", json!({"target": "surfaces"}));
+    assert_eq!(st["surfaces"], json!([]), "{st}");
+    let problems = st["problems"].as_array().unwrap();
+    assert_eq!(problems.len(), 1, "{st}");
+    assert!(
+        problems[0].as_str().is_some_and(|p| p.starts_with(
+            "surfaces.json could not be read and was kept aside as surfaces.json.bad"
+        )),
+        "{st}"
+    );
+    assert!(
+        file.with_extension("json.bad").is_file(),
+        "the damaged file is kept"
+    );
+    assert!(!file.exists(), "and moved aside");
+    let r = app.command(
+        "surface.add",
+        json!({"type": "mcu", "input": "E2E In", "output": "E2E Out"}),
+    );
+    assert_eq!(r["status"], "surface 0", "{r}");
+    assert_eq!(
+        (&r["doc"], &r["window"]),
+        (&Value::Null, &Value::Null),
+        "{r}"
+    );
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap())
+        .expect("a fresh surfaces.json");
+    assert!(saved.is_object(), "{saved}");
+    app.quit();
+    // The next launch reads the saved MCU, with nothing to say.
+    let mut app = App::start(home.path(), false);
+    let st = app.call("state.get", json!({"target": "surfaces"}));
+    assert_eq!(st["surfaces"][0]["type"], "mcu", "{st}");
+    assert_eq!(st["problems"], json!([]), "{st}");
+    app.quit();
+}
+
+/// `surface.learn` and `surface.unlearn` over the channel, in the demo:
+/// the arguments are checked, the core refuses what it cannot learn, and
+/// a learn waits for its control (`state.get surfaces` `learning`).
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_midi_learn_over_the_channel() {
+    use core_control::ErrorCode;
+    let home = temp_home();
+    let (mut app, w) = start_demo(home.path());
+    let learn = |app: &mut App, params: Value| {
+        app.client.call(
+            "command.run",
+            json!({"id": "surface.learn", "params": params, "window": w}),
+            Duration::from_millis(WAIT_MS),
+        )
+    };
+    let code = |r: Result<Value, CallError>| match r {
+        Err(CallError::Reply(e)) => e.code,
+        other => panic!("expected a refusal, got {other:?}"),
+    };
+    assert_eq!(code(learn(&mut app, json!({}))), ErrorCode::InvalidParams);
+    assert_eq!(
+        code(learn(&mut app, json!({"command": "file.open"}))),
+        ErrorCode::Failed,
+        "the core refuses a command that asks for a dialog"
+    );
+    let r = learn(&mut app, json!({"command": "edit.undo"})).unwrap();
+    assert_eq!(r["command"], "surface.learn", "{r}");
+    let st = app.call("state.get", json!({"target": "surfaces", "window": w}));
+    assert_eq!(st["learning"], "edit.undo", "{st}");
+    let m = mixer_state(&mut app, &w);
+    let synth = m["strips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["kind_colour"] == "instrument")
+        .and_then(|s| s["id"].as_u64())
+        .unwrap_or_else(|| panic!("no instrument strip in {m}"));
+    learn(&mut app, json!({"target": format!("fader:{synth}")})).unwrap();
+    let st = app.call("state.get", json!({"target": "surfaces", "window": w}));
+    assert!(
+        st["learning"].is_string() && st["learning"] != "edit.undo",
+        "{st}"
+    );
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "surface.unlearn", "params": {"command": "edit.undo"}, "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::Failed, "nothing was learned: {e}");
+    app.quit();
+}
+
+/// Plan 5f-1 Task 11 (spec §12.3), ported from Swift `e2e.rs:1653-1795`:
+/// an MCU-compatible unit added and fed through the channel
+/// (`surface.inject`, no CoreMIDI port: the offline app uses the fake
+/// port transport) touches, moves and releases fader 1 as one "Set Fader"
+/// step, mutes strip 1, gets the ride's value back once after the release
+/// and the mute LED, ignores and counts a cut message.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_drives_a_fader_and_a_button_from_an_mcu() {
+    let home = temp_home();
+    let mut app = App::start(home.path(), false);
+    // Mac only: on Linux GPUI quits when the last window closes
+    // (`QuitMode::LastWindowClosed`), so closing the launch document
+    // there would quit the app. The no-document check runs on macOS.
+    if cfg!(target_os = "macos") {
+        // The launch window holds an empty document: close it first, so the
+        // call below has no document to answer for.
+        let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+        loop {
+            let ws = app.call("state.get", json!({"target": "windows"}));
+            if let Some(d) = ws["windows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|x| x["kind"] == "document")
+            {
+                let n = d["number"].clone();
+                app.call("command.run", json!({"id": "file.close", "window": n}));
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no launch document window in {ws}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // Pre-flight M29: surfaces are app-wide, so `state.get surfaces`
+        // answers without a document.
+        let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+        let st = loop {
+            let st = app.call("state.get", json!({"target": "surfaces"}));
+            if st["doc"].is_null() {
+                break st;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the launch document closes: {st}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        assert!(
+            st["feedback"].as_array().is_some_and(|f| f.is_empty()),
+            "{st}"
+        );
+    } else {
+        eprintln!("skipped on Linux: closing the last window quits the app there");
+    }
+    let w = app.call("app.new_demo", json!({}))["window"].clone();
+    app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+    let run = |app: &mut App, id: &str, params: Value| {
+        app.call(
+            "command.run",
+            json!({"id": id, "params": params, "window": w}),
+        )
+    };
+    for (params, code) in [
+        (
+            json!({"type": "mcu", "input": "", "output": "E2E Out"}),
+            core_control::ErrorCode::Failed,
+        ),
+        (
+            json!({"type": "nope", "input": "a", "output": "b"}),
+            core_control::ErrorCode::InvalidParams,
+        ),
+    ] {
+        let e = app.call_err(
+            "command.run",
+            json!({"id": "surface.add", "params": params, "window": w}),
+        );
+        assert_eq!(e.code, code, "{e}");
+    }
+    run(
+        &mut app,
+        "surface.add",
+        json!({"type": "mcu", "input": "E2E In", "output": "E2E Out"}),
+    );
+    let st = app.call("state.get", json!({"target": "surfaces", "window": w}));
+    assert_eq!(st["surfaces"][0]["connected"], true, "{st}");
+    let id = st["surfaces"][0]["id"].as_u64().unwrap();
+    let auto = app.call("state.get", json!({"target": "automation", "window": w}));
+    let synth = auto["modes"][0]["strip"].as_u64().unwrap();
+    // The synth is the demo's first strip: fader 1, mute 1.
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "90 68 7f e0 00 20"}),
+    );
+    let auto = app.call("state.get", json!({"target": "automation", "window": w}));
+    assert_eq!(auto["touched"][0], format!("fader:{synth}"), "{auto}");
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "90 68 00"}),
+    );
+    wait_for_state(&mut app, &w, "document", |d| d["undo"] == "Set Fader");
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "90 10 7f"}),
+    );
+    let st = wait_for_state(&mut app, &w, "surfaces", |s| {
+        s["feedback"][0]["messages"]
+            .as_array()
+            .is_some_and(|m| m.iter().any(|x| x == "90 10 7f"))
+    });
+    let messages = st["feedback"][0]["messages"].as_array().unwrap();
+    assert_eq!(
+        messages.iter().filter(|x| *x == "e0 00 20").count(),
+        1,
+        "the fader got the ride's value (0.25) once, after the release: {st}"
+    );
+    assert!(
+        messages
+            .iter()
+            .all(|x| x.as_str().is_some_and(|t| !t.starts_with("d0 "))),
+        "meters are counted, not listed"
+    );
+    let ignored = st["surfaces"][0]["ignored"].as_u64().unwrap();
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "90 68"}),
+    );
+    let st = app.call("state.get", json!({"target": "surfaces", "window": w}));
+    assert_eq!(
+        st["surfaces"][0]["ignored"].as_u64(),
+        Some(ignored + 1),
+        "a cut message is ignored and counted: {st}"
+    );
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "surface.inject", "params": {"surface": id, "bytes": "zz"}, "window": w}),
+    );
+    assert_eq!(e.code, core_control::ErrorCode::InvalidParams);
+    run(&mut app, "surface.remove", json!({"surface": id}));
+    app.quit();
+}
+
+/// Plan 5f-4 Task 8 (spec §8.4), ported from Swift `e2e.rs:1797-1900`: a
+/// host-integration keyboard (DAW mode) added and fed through the channel
+/// (offline: the fake port transport) answers the handshake and gets its
+/// display, rides fader 1 from knob 1 as one "Set Fader" step, starts and
+/// stops the transport through the relay, sets the tempo as one "Set
+/// Tempo" step (owner, 2026-11-03), and counts a cut SysEx. (`messages`
+/// keeps the last 64 sent, so the identity at the head of the first
+/// refresh may have scrolled out: the test waits for any of the
+/// keyboard's SysEx; `core-ffi/tests/kontrol.rs` pins the identity.)
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_drives_the_mixer_from_a_kontrol_mk3() {
+    let home = temp_home();
+    let (mut app, w) = start_demo(home.path());
+    let run = |app: &mut App, id: &str, params: Value| {
+        app.call(
+            "command.run",
+            json!({"id": id, "params": params, "window": w}),
+        )
+    };
+    let port = "KONTROL S88 MK3 DAW";
+    run(
+        &mut app,
+        "surface.add",
+        json!({"type": "kontrol_mk3", "input": port, "output": port}),
+    );
+    let st = app.call("state.get", json!({"target": "surfaces", "window": w}));
+    assert_eq!(st["surfaces"][0]["type"], "kontrol_mk3", "{st}");
+    assert_eq!(st["surfaces"][0]["online"], false, "{st}");
+    let id = st["surfaces"][0]["id"].as_u64().unwrap();
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "bf 01 04"}),
+    );
+    let identity = "f0 00 21 09 00 00 44 43 01 00";
+    let st = wait_for_state(&mut app, &w, "surfaces", |s| {
+        s["feedback"][0]["messages"].as_array().is_some_and(|m| {
+            m.iter()
+                .any(|x| x.as_str().is_some_and(|t| t.starts_with(identity)))
+        })
+    });
+    assert_eq!(st["surfaces"][0]["online"], true, "{st}");
+    let auto = app.call("state.get", json!({"target": "automation", "window": w}));
+    let synth = auto["modes"][0]["strip"].as_u64().unwrap();
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "bf 50 05"}),
+    );
+    wait_for_state(&mut app, &w, "automation", |a| {
+        a["touched"][0] == format!("fader:{synth}")
+    });
+    wait_for_state(&mut app, &w, "document", |d| d["undo"] == "Set Fader");
+    // The ride ends 500 ms after the last turn; the tempo is refused while
+    // its edit is open.
+    wait_for_state(&mut app, &w, "automation", |a| {
+        a["touched"].as_array().is_some_and(|t| t.is_empty())
+    });
+    // Play and Stop are events the relay runs in the document's window.
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "bf 10 01"}),
+    );
+    app.wait(&w, json!({"condition": "playing"}));
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "bf 14 01"}),
+    );
+    app.wait(&w, json!({"condition": "stopped"}));
+    // The keyboard's tempo control: 100 BPM is 60 000 000 × 10 ns, sent as
+    // 00 0e 4e 1c 00 (Ruling 5).
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "f0 00 21 09 00 00 44 43 01 00 19 00 00 00 0e 4e 1c 00 f7"}),
+    );
+    wait_for_state(&mut app, &w, "document", |d| d["undo"] == "Set Tempo");
+    // VizDAW plays 100 BPM: no state target carries the tempo, but the
+    // keyboard is sent VizDAW's own tempo after its turn (final review T8
+    // M1), so the last tempo in its log is 100's.
+    let tempo = format!("{identity} 19 ");
+    wait_for_state(&mut app, &w, "surfaces", |s| {
+        s["feedback"][0]["messages"].as_array().is_some_and(|m| {
+            m.iter()
+                .rev()
+                .filter_map(|x| x.as_str())
+                .find(|t| t.starts_with(&tempo))
+                == Some("f0 00 21 09 00 00 44 43 01 00 19 00 00 00 0e 4e 1c 00 f7")
+        })
+    });
+    let st = app.call("state.get", json!({"target": "surfaces", "window": w}));
+    let ignored = st["surfaces"][0]["ignored"].as_u64().unwrap();
+    run(
+        &mut app,
+        "surface.inject",
+        json!({"surface": id, "bytes": "f0 00 21 09 00 00 44 43 01 00 48"}),
+    );
+    let st = app.call("state.get", json!({"target": "surfaces", "window": w}));
+    assert_eq!(
+        st["surfaces"][0]["ignored"].as_u64(),
+        Some(ignored + 1),
+        "a cut SysEx is ignored and counted: {st}"
+    );
+    run(&mut app, "surface.remove", json!({"surface": id}));
+    app.quit();
+}
+
 /// The test VST3's `view` kind, drawing its X11 child (view flag `X11`).
 #[cfg(target_os = "linux")]
 #[test]

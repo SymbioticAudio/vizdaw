@@ -72,6 +72,7 @@ use vizdaw_app::mixer::{
 use vizdaw_app::view::StripFocus;
 use vizdaw_ffi::automation::AutomationModeRow;
 use vizdaw_ffi::edit::MonitorModeRow;
+use vizdaw_ffi::events::AutomationTargetRow as Target;
 use vizdaw_ffi::mixer::{DestRow, StripKindRow, StripRow, SwatchRow};
 use vizdaw_ffi::snapshot::{LaneRow, SlotRow};
 
@@ -159,6 +160,15 @@ pub enum StripMenu {
     VcaMode,
     /// The input picker of an audio path's input track.
     Input,
+    /// The fader's and its level box's menu: MIDI Learn
+    /// (`S/ChannelStrip.swift:929`).
+    Fader,
+    /// The pan knob's and its box's menu: MIDI Learn (`:882`).
+    Pan,
+    /// M's menu: MIDI Learn (`:1007`).
+    Mute,
+    /// S's menu: MIDI Learn (`:1013`); master has no S.
+    Solo,
 }
 
 impl StripMenu {
@@ -1463,6 +1473,10 @@ pub fn render(
     // The left pane's strip has no bar.
     let bar = (mixer.placement != MixerPlacement::Strip)
         .then(|| bar(&load, &mixer, &mut scope.container()));
+    // A waiting learn's banner, below the bar (`S/MixerView.swift:78`).
+    let banner = (mixer.placement != MixerPlacement::Strip)
+        .then(|| crate::learn_banner::learn_banner(doc, &mut scope.container(), cx))
+        .flatten();
     let area_scope = scope.container();
     let clip = area_scope.clip();
     let t = tokens();
@@ -1533,6 +1547,7 @@ pub fn render(
             d.child(bar)
                 .child(div().h(px(1.)).flex_none().bg(rgb(t.surface_separator)))
         })
+        .children(banner)
         .child(strips_area)
         .into_any_element()
 }
@@ -1897,6 +1912,8 @@ fn strip(
             cx,
         );
         let box_el = controls::number_box(&nb, text.clone(), scope, cx);
+        let target = Target::StripPan { strip: s.id };
+        let menu = learn_popup(view, s.id, StripMenu::Pan, target, scope, window, cx);
         out = out.child(
             at(side, y, inner, h)
                 .flex()
@@ -1904,13 +1921,25 @@ fn strip(
                 .items_center()
                 .gap(px(8.))
                 .child(knob_el)
-                .child(box_el),
+                .child(box_el)
+                .on_mouse_down(MouseButton::Right, learn_press(view, s.id, StripMenu::Pan))
+                .children(menu),
         );
     }
     // The fader, its scale and the meter, centred.
     let throw = g.throw;
     let fader_el = controls::fader(&s.fader, throw, s.cap, scope, window, cx);
     let meter_el = controls::meter(s.meter, throw + 2. * StripLayout::METER_OVERHANG, window);
+    let fader_target = Target::StripFader { strip: s.id };
+    let fader_menu = learn_popup(
+        view,
+        s.id,
+        StripMenu::Fader,
+        fader_target,
+        scope,
+        window,
+        cx,
+    );
     out = out.child(
         at(side, g.fader_top, inner, throw + StripLayout::FADER_CAP)
             .flex()
@@ -1918,12 +1947,16 @@ fn strip(
             .justify_center()
             .items_start()
             .gap(px(4.))
-            .child(fader_el)
+            .child(div().flex_none().child(fader_el).on_mouse_down(
+                MouseButton::Right,
+                learn_press(view, s.id, StripMenu::Fader),
+            ))
             .child(
                 div()
                     .pt(px((fader::CAP.1 / 2. - StripLayout::METER_OVERHANG) as f32))
                     .child(meter_el),
-            ),
+            )
+            .children(fader_menu),
     );
     // The level.
     let level_box = view.update(cx, |v, cx| {
@@ -1934,7 +1967,10 @@ fn strip(
         at(side, g.level_top, inner, StripLayout::LEVEL_BOX)
             .flex()
             .justify_center()
-            .child(level_el),
+            .child(div().flex_none().child(level_el).on_mouse_down(
+                MouseButton::Right,
+                learn_press(view, s.id, StripMenu::Fader),
+            )),
     );
     // The VCA offset and mark, while the mixer has a VCA.
     if let Some(o) = &s.offset {
@@ -1947,18 +1983,42 @@ fn strip(
         .flex()
         .flex_row()
         .justify_center()
-        .gap(px(4.))
-        .child(controls::toggle(
-            s.mute.clone(),
-            scope,
-            controls::toggle::toggle_mute(&mixer, strip_id),
-        ));
+        .gap(px(4.));
+    let mute = controls::toggle(
+        s.mute.clone(),
+        scope,
+        controls::toggle::toggle_mute(&mixer, strip_id),
+    );
+    let mute_target = Target::StripMute { strip: strip_id };
+    buttons = buttons.child(learn_holder(
+        view,
+        strip_id,
+        StripMenu::Mute,
+        mute_target,
+        mute,
+        scope,
+        window,
+        cx,
+    ));
     buttons = match &s.solo {
-        Some(solo) => buttons.child(controls::toggle(
-            solo.clone(),
-            scope,
-            controls::toggle::toggle_solo(&mixer, strip_id),
-        )),
+        Some(solo) => {
+            let el = controls::toggle(
+                solo.clone(),
+                scope,
+                controls::toggle::toggle_solo(&mixer, strip_id),
+            );
+            let target = Target::StripSolo { strip: strip_id };
+            buttons.child(learn_holder(
+                view,
+                strip_id,
+                StripMenu::Solo,
+                target,
+                el,
+                scope,
+                window,
+                cx,
+            ))
+        }
         None => buttons.child(
             div()
                 .flex_none()
@@ -2276,6 +2336,68 @@ fn slot_face(dot: Rgba, name: &str, bypass: bool, dim: bool) -> gpui::Div {
         .border_color(rgb(t.surface_separator))
         .child(div().flex_none().size(px(6.)).rounded_full().bg(dot))
         .child(text)
+}
+
+/// A right-click opens `strip`'s menu `which` (a control's MIDI Learn).
+fn learn_press(
+    view: &Entity<MixerView>,
+    strip: u64,
+    which: StripMenu,
+) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+    let menu = view.downgrade();
+    move |_, _, cx| {
+        menu.update(cx, |v, cx| v.open_menu(strip, which, cx)).ok();
+        cx.stop_propagation();
+    }
+}
+
+/// `strip`'s menu `which`, while open: one item, MIDI Learn for `target`
+/// (Swift `LearnItem`, `S/MixerView.swift:344-351`).
+fn learn_popup(
+    view: &Entity<MixerView>,
+    strip: u64,
+    which: StripMenu,
+    target: Target,
+    scope: &mut RegistryScope,
+    window: &Window,
+    cx: &App,
+) -> Vec<AnyElement> {
+    if view.read(cx).menu != Some((strip, which)) {
+        return vec![];
+    }
+    let mixer = view.read(cx).mixer.clone();
+    let items = vec![learn_entry(&mixer, target)];
+    popup(view, "mixer-learn-menu", items, scope, window, cx)
+}
+
+/// `el` (M or S) with its MIDI Learn menu on a right-click.
+#[allow(clippy::too_many_arguments)]
+fn learn_holder(
+    view: &Entity<MixerView>,
+    strip: u64,
+    which: StripMenu,
+    target: Target,
+    el: AnyElement,
+    scope: &mut RegistryScope,
+    window: &Window,
+    cx: &App,
+) -> AnyElement {
+    let menu = learn_popup(view, strip, which, target, scope, window, cx);
+    div()
+        .relative()
+        .flex_none()
+        .child(el)
+        .on_mouse_down(MouseButton::Right, learn_press(view, strip, which))
+        .children(menu)
+        .into_any_element()
+}
+
+/// "MIDI Learn" for `target`: the next control moved drives it.
+fn learn_entry(mixer: &MixerRef, target: Target) -> MenuEntry {
+    let mx = mixer.clone();
+    MenuEntry::item(crate::learn_banner::MIDI_LEARN, move |_, cx| {
+        mx.with(cx, |_, d| d.learn_target(target));
+    })
 }
 
 /// The open menu `which` of `strip`, if it is this one: its entries.
@@ -2903,8 +3025,8 @@ fn mixer_entries(
 /// `StripColourMenu`): Rename…, Set All Strips to ▸, Remove Bus (a bus),
 /// Colour ▸ (None and the eight colours), then, but on master, Group,
 /// Assign to VCA ▸ (each VCA, then New VCA) and Remove from VCA ▸, on
-/// the selection when it holds the strip, else on the strip. MIDI Learn
-/// Maps… comes with the surfaces.
+/// the selection when it holds the strip, else on the strip; then MIDI
+/// Learn Maps….
 fn strip_entries(
     view: &WeakEntity<MixerView>,
     mixer: &MixerRef,
@@ -2955,9 +3077,32 @@ fn strip_entries(
         .map(colour)
         .collect();
     out.push(MenuEntry::submenu("Colour", true, colours));
-    if s.kind == StripKindRow::Master {
-        return out;
+    if s.kind != StripKindRow::Master {
+        group_entries(mixer, m, d, strip, &mut out);
     }
+    // Swift `S/ChannelStrip.swift:401-402`: the sheet in the window that
+    // holds this mixer.
+    out.push(MenuEntry::Separator);
+    out.push(MenuEntry::item(
+        crate::sheets::learn_maps::ITEM,
+        |window, cx| {
+            if let Some(Some(root)) = window.root::<crate::shell::DocumentWindow>() {
+                root.update(cx, |v, cx| crate::sheets::learn_maps::show(v, window, cx));
+            }
+        },
+    ));
+    out
+}
+
+/// Group, Assign to VCA ▸ and Remove from VCA ▸ of `strip`'s name menu
+/// (not master's), after a divider.
+fn group_entries(
+    mixer: &MixerRef,
+    m: &MixerModel,
+    d: &DocumentModel,
+    strip: u64,
+    out: &mut Vec<MenuEntry>,
+) {
     let strips = m.menu_strips(d, strip);
     out.push(MenuEntry::Separator);
     let (mx, grouped) = (mixer.clone(), strips.clone());
@@ -3004,7 +3149,6 @@ fn strip_entries(
         .collect();
     let any = !holding.is_empty();
     out.push(MenuEntry::submenu("Remove from VCA", any, holding));
-    out
 }
 
 /// Slot `slot`'s menu (Swift `SlotView.menu`, `EqSlotView.menu`): Open
@@ -3058,8 +3202,8 @@ fn slot_entries(mixer: &MixerRef, m: &MixerModel, slot: u64) -> Vec<MenuEntry> {
         .collect()
 }
 
-/// Send `index`'s menu (Swift `SendKnob`'s): Pre-Fader and On, checked
-/// while on, then Remove Send. MIDI Learn comes with the surfaces.
+/// Send `index`'s menu (Swift `SendKnob`'s, `S/ChannelStrip.swift:831-836`):
+/// Pre-Fader and On, checked while on, MIDI Learn, then Remove Send.
 fn send_entries(mixer: &MixerRef, strip: u64, send: &SendPart) -> Vec<MenuEntry> {
     let index = send.index;
     let (pre, on) = (send.pre_fader, send.enabled);
@@ -3073,6 +3217,13 @@ fn send_entries(mixer: &MixerRef, strip: u64, send: &SendPart) -> Vec<MenuEntry>
             b.with(cx, |m, d| m.set_send_enabled(d, strip, index, !on));
         })
         .checked(on),
+        learn_entry(
+            mixer,
+            Target::SendLevel {
+                strip,
+                send: vizdaw_app::mixer::send_index(index),
+            },
+        ),
         MenuEntry::Separator,
         MenuEntry::item(SendLabels::REMOVE, move |_, cx| {
             c.with(cx, |m, d| m.remove_send(d, strip, index));

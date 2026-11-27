@@ -95,6 +95,9 @@ pub struct AppState {
     pub editing: vizdaw_app::editing_prefs::EditingPrefs,
     /// Settings › Plug-ins: the new-channel EQ, pushed to the core at launch.
     pub plugins: vizdaw_app::plugin_prefs::PluginPrefs,
+    /// Settings › Surfaces: the core's surfaces and learned commands as
+    /// the tab's poll last read them, and the Add Surface sheet's draft.
+    pub surfaces: vizdaw_app::surface_settings::SurfaceSettings,
     /// The keyboard layout id the windows use instead of the platform's
     /// (tests; `None`: `cx.keyboard_layout().id()`).
     pub keyboard_layout_override: Option<String>,
@@ -105,6 +108,10 @@ pub struct AppState {
     next_token: u64,
     /// When each document's session last had its idle tick.
     last_idle: HashMap<DocId, Instant>,
+    /// Whether each document's session listens for surface or learned
+    /// MIDI input (a learn map, a command map, a waiting learn), and when
+    /// that was last read: its surface tick then runs the idle fast.
+    listening: HashMap<DocId, (Instant, bool)>,
     /// The plug-in and Built-in Synth windows, with their models and
     /// native editor hosts.
     pub(crate) plugin_windows: PluginWindows,
@@ -115,6 +122,12 @@ pub struct AppState {
 
 /// The poll's interval while a retry waits on Busy (Swift's 60 Hz tick).
 pub const FAST_POLL: Duration = Duration::from_millis(16);
+
+/// How often a window's surface tick looks again while nothing listens
+/// for surface or learned input (it does nothing then but read whether
+/// something does; the transport poll still takes events). Also how often
+/// that is read again while something does.
+const SURFACE_IDLE: Duration = Duration::from_millis(250);
 
 /// The least time between two idle ticks of one document.
 const IDLE_EVERY: Duration = Duration::from_millis(50);
@@ -136,11 +149,13 @@ impl AppState {
             automation: Default::default(),
             editing: Default::default(),
             plugins: Default::default(),
+            surfaces: vizdaw_app::surface_settings::SurfaceSettings::new(),
             keyboard_layout_override: None,
             transports: HashMap::new(),
             windows: Vec::new(),
             next_token: 1,
             last_idle: HashMap::new(),
+            listening: HashMap::new(),
             plugin_windows: PluginWindows::default(),
             settings_window: None,
         }
@@ -408,6 +423,13 @@ impl AppState {
         }
     }
 
+    /// Reads `surfaces.json` at launch, on the UI thread as Swift did
+    /// (`surfaces_load`; Ruling 3), and marks the surfaces' ports in the
+    /// pickers.
+    pub fn load_surfaces(&mut self) {
+        self.store.load_surfaces();
+    }
+
     /// Reads the input picker's sources once, off the UI thread, for the
     /// documents opened from now on (the app at launch; Swift
     /// `warmSources`).
@@ -417,6 +439,9 @@ impl AppState {
 
     /// Polls `doc`'s transport; true when what the window shows changed.
     pub fn poll(&mut self, doc: DocId) -> bool {
+        // The surfaces drive the front document, refocused when it
+        // changes (`S/VizDAWApp.swift:590-603`).
+        self.store.follow_surface_focus();
         let idled = self.idle(doc);
         let Some(t) = self.transports.get_mut(&doc) else {
             return idled;
@@ -443,6 +468,14 @@ impl AppState {
     /// The session's idle tick, at most every 50 ms; true when a new
     /// snapshot arrived (the title may have changed).
     fn idle(&mut self, doc: DocId) -> bool {
+        self.idle_every(doc, IDLE_EVERY)
+    }
+
+    /// [`Self::idle`], at most every `every`: the transport poll waits
+    /// [`IDLE_EVERY`], the surface tick [`FAST_POLL`] (Swift's 60 Hz host
+    /// idle). Both share the last time, so the idle runs at most once per
+    /// fast interval across the two.
+    fn idle_every(&mut self, doc: DocId, every: Duration) -> bool {
         let now = Instant::now();
         // A retry waiting on Busy runs every poll.
         let fast = self
@@ -453,7 +486,7 @@ impl AppState {
             && self
                 .last_idle
                 .get(&doc)
-                .is_some_and(|t| now.duration_since(*t) < IDLE_EVERY)
+                .is_some_and(|t| now.duration_since(*t) < every)
         {
             return false;
         }
@@ -461,6 +494,64 @@ impl AppState {
         self.store
             .with_document(doc, |d, _| d.idle())
             .unwrap_or(false)
+    }
+
+    /// How long until `doc`'s next surface tick; `None` once it is closed.
+    /// [`FAST_POLL`] while something listens for surface or learned input
+    /// or steps or detents wait, else [`SURFACE_IDLE`].
+    pub fn surface_interval(&self, doc: DocId) -> Option<std::time::Duration> {
+        let d = self.store.document(doc)?;
+        Some(if self.surfaces_fast(doc) || d.surfaces_waiting() {
+            FAST_POLL
+        } else {
+            SURFACE_IDLE
+        })
+    }
+
+    /// A surface is set up, or `doc`'s session listens for learned input
+    /// (as last read).
+    fn surfaces_fast(&self, doc: DocId) -> bool {
+        self.store.has_surfaces() || self.listening.get(&doc).is_some_and(|(_, on)| *on)
+    }
+
+    /// `doc`'s surface tick (Swift's 60 Hz timer, `S/VizDAWApp.swift:
+    /// 587-603`). While something listens for surface or learned input:
+    /// the focus follows the front document, the session's idle runs (the
+    /// core routes surface input, learned maps and feedback only there,
+    /// `core-ffi/src/session.rs:2924`) at most every [`FAST_POLL`], and the
+    /// events are taken and the jog flushed. The steps are for `doc`'s
+    /// window to run; `true` when the idle brought news to draw. Otherwise
+    /// it only reads, every [`SURFACE_IDLE`], whether something listens.
+    pub fn surface_tick(
+        &mut self,
+        doc: DocId,
+    ) -> (Vec<vizdaw_app::surface_relay::RelayStep>, bool) {
+        let now = Instant::now();
+        let stale = self
+            .listening
+            .get(&doc)
+            .is_none_or(|(at, _)| now.duration_since(*at) >= SURFACE_IDLE);
+        if stale && let Some(d) = self.store.document(doc) {
+            let core = self.store.core();
+            let on = core.learn_state().waiting.is_some()
+                || !core.command_maps().is_empty()
+                || d.session().learn_maps().is_ok_and(|m| !m.is_empty());
+            self.listening.insert(doc, (now, on));
+        }
+        let waiting = self
+            .store
+            .document(doc)
+            .is_some_and(DocumentModel::surfaces_waiting);
+        if !self.surfaces_fast(doc) && !waiting {
+            return (vec![], false);
+        }
+        self.store.follow_surface_focus();
+        let idled = self.idle_every(doc, FAST_POLL);
+        let Some(d) = self.store.document_mut(doc) else {
+            return (vec![], idled);
+        };
+        d.surface_tick(now);
+        (d.take_surface_steps(), idled)
     }
 
     /// How long until `doc`'s next poll; `None` once it is closed. While

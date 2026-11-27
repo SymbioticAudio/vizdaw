@@ -63,7 +63,7 @@ item (false: keys, the Keys settings and the control channel only).
 | ui.theme | View | Theme |  | false | S9b | S9b |
 | ui.set_transport_bar | View | Set Transport Bar |  | false | S3 | S3 |
 | ui.reset_transport_bar | View | Reset Transport Bar |  | false | S3 | S3 |
-| ui.customize_transport | View | Customize Transport Bar… |  | true | S9c | |
+| ui.customize_transport | View | Customize Transport Bar… |  | true | S9c | S9c |
 
 ### Editors
 
@@ -343,19 +343,19 @@ item (false: keys, the Keys settings and the control channel only).
 
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
-| surface.add | Surfaces | Add Surface |  | false | | |
-| surface.remove | Surfaces | Remove Surface |  | false | | |
-| surface.inject | Surfaces | Inject Surface Bytes |  | false | | |
-| surface.learn | Surfaces | MIDI Learn |  | false | | |
-| surface.unlearn | Surfaces | Remove MIDI Learn |  | false | | |
+| surface.add | Surfaces | Add Surface |  | false | S9d | |
+| surface.remove | Surfaces | Remove Surface |  | false | S9d | |
+| surface.inject | Surfaces | Inject Surface Bytes |  | false | S9d | |
+| surface.learn | Surfaces | MIDI Learn |  | false | S9d | |
+| surface.unlearn | Surfaces | Remove MIDI Learn |  | false | S9d | |
 
 ### Settings
 
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
-| plugins.new_channel_eq | Settings | Put an EQ on New Channels |  | false | S9c | |
-| plugins.install_multiq | Settings | Install Multi-Q for Other Apps |  | false | S9c | |
-| plugins.default_eq | Settings | EQ for New Channels |  | false | S9c | |
+| plugins.new_channel_eq | Settings | Put an EQ on New Channels |  | false | S9c | S9c |
+| plugins.install_multiq | Settings | Install Multi-Q for Other Apps |  | false | S9c | S9c (unavailable: no bundled EQ on Linux) |
+| plugins.default_eq | Settings | EQ for New Channels |  | false | S9c | S9c |
 | settings.co_producer | Settings | Co-Producer |  | false | | |
 | settings.co_producer_answer | Settings | Answer Co-Producer Approval |  | false | | |
 | settings.co_producer_metrics | Settings | Count Where My Time Goes |  | false | | |
@@ -365,9 +365,9 @@ item (false: keys, the Keys settings and the control channel only).
 
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
-| keys.save | Key Bindings | Save Key Bindings… |  | false | S9c | |
-| keys.load | Key Bindings | Load Key Bindings… |  | false | S9c | |
-| keys.reset | Key Bindings | Reset Key Bindings |  | false | S9c | |
+| keys.save | Key Bindings | Save Key Bindings… |  | false | S9c | S9c |
+| keys.load | Key Bindings | Load Key Bindings… |  | false | S9c | S9c |
+| keys.reset | Key Bindings | Reset Key Bindings |  | false | S9c | S9c |
 
 ## Windows
 
@@ -393,13 +393,13 @@ editors). The record popover is a popover, not a window.
 | Song Notes | `window.song_notes` (opens the notes file in the system's editor, not a window of its own) | | |
 | Licences | `licences` | | |
 | Settings: Appearance | Settings tab | S9b (user themes: later) | S9b (CI; on screen: L27) |
-| Settings: Editing | Settings tab | S9c (no consumers yet: backlog) | |
-| Settings: Keys | Settings tab | S9c (Learn MIDI: Surfaces slice) | |
+| Settings: Editing | Settings tab | S9c (no consumers yet: backlog) | S9c (CI; on screen: owner check) |
+| Settings: Keys | Settings tab | S9c, S9d (Learn MIDI) | S9c (CI; on screen: L28) |
 | Settings: Audio | Settings tab | S9a | S9a (CI; on screen: L26) |
 | Settings: Recording | Settings tab | S9a | S9a (CI; on screen: L26) |
 | Settings: Automation | Settings tab | S9a | S9a (CI; on screen: L26) |
-| Settings: Surfaces | Settings tab | | |
-| Settings: Plug-ins | Settings tab | S9c | |
+| Settings: Surfaces | Settings tab | S9d (on screen: M23, M24) | |
+| Settings: Plug-ins | Settings tab | S9c | S9c (CI; no bundled EQ) |
 | Settings: Co-Producer | Settings tab | | |
 
 ## Sheets and dialogs
@@ -429,12 +429,12 @@ Maps is opened from two places.
 | Report: Export Report, Merge Report, Import Report (`ReportSheet`) | document | | |
 | Project Settings | document | | |
 | Merge DAWproject | document | | |
-| Customize Transport Bar | document and mixer windows | S9c (on screen: pending) | |
-| MIDI Learn Maps | mixer and panes (two `.sheet(` sites, one sheet) | | |
+| Customize Transport Bar | document and mixer windows | S9c (on screen: pending) | S9c (CI; on screen: L29) |
+| MIDI Learn Maps | mixer and panes (two `.sheet(` sites, one sheet) | S9d (on screen: M25) | |
 | Comment (`CommentSheet`) | sequence sidebar | | |
 | Key slot (`KeySlotSheet`) | sequence sidebar | | |
 | Remove Old Co-Producer Copies? | Media Pool | | |
-| Add Surface | Settings > Surfaces | | |
+| Add Surface | Settings > Surfaces | S9d (on screen: M23, M24) | |
 
 ### Alerts and confirmations
 
@@ -443,12 +443,12 @@ Maps is opened from two places.
 | Recovered Recordings | document | S7b, S8a (`record.recover`; never shown under the channel) | S7b, S8a (Move to Trash: gap H4) |
 | Document alert (its title is set per error) | document | | |
 | Replace question (MIDI import and export) | MidiSheets | | |
-| MIDI Learn alert (title set per error) | MIDI Learn Maps | | |
-| Surfaces alert (title set per error) | Settings > Surfaces | | |
+| MIDI Learn alert (title set per error) | MIDI Learn Maps | S9d (a red line in the sheet when it is open) | |
+| Surfaces alert (title set per error) | Settings > Surfaces | S9d | |
 | Delete notes and copies? | Settings > Co-Producer | | |
 | Delete all time records? | Settings > Co-Producer | | |
 | Delete this sequence and every reference to it? | sequence sidebar | | |
-| Replace the (EQ name) in your Components folder? | Settings > Plug-ins | S9c | |
+| Replace the (EQ name) in your Components folder? | Settings > Plug-ins | S9c | Linux gap (no bundled EQ) |
 
 ### File panels
 
@@ -513,10 +513,10 @@ a group of by-eye steps the GPUI app must pass.
 | Record UI and monitoring (plans 5d-1 and 5d-2) | | |
 | Automation recording, the engine (plan 5e-1) | | |
 | Automation recording, the UI (plan 5e-2) | | |
-| Control surfaces and MIDI learn (plan 5f-1) | | |
+| Control surfaces and MIDI learn (plan 5f-1) | complete (S9d) | |
 | Bounce and export (plan 5f-2) | | |
 | External sample editor (plan 5f-3) | | |
-| Host-integration keyboards (plan 5f-4) | | |
+| Host-integration keyboards (plan 5f-4) | S9d (the keyboard over the channel; on screen: M24) | |
 | Window, main views and panes (plan 7a) | | |
 | Themes and the channel strip (plan 7b) | | |
 | Audio editor (plan 7c) | | |
@@ -543,15 +543,17 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 | demo_play_screenshot_stop | S3, S4 (List step restored) | S3, S4 (List step restored) |
 | click_play_and_press_space | S3 | S3 |
 | drum_grid_paints_and_erases_by_element | | |
-| keys_drive_step_entry_locators_and_bindings | S4, S8a, S9c (bindings half: `gpui_keys_drive_step_entry_and_locators`) | partial S4, S8a |
+| keys_drive_step_entry_locators_and_bindings | S4, S8a, S9c (bindings half: `gpui_keys_drive_step_entry_and_locators`) | S4, S8a, S9c (CI run 45876230282) |
 | audio_import_plays_and_reports_media | | |
 | regions_normalize_relink_and_trash | | |
 | records_audio_loop_takes_and_midi | S8a (`gpui_records_audio_loop_takes_and_midi`; `record.recover`: `gpui_record_recover_trash_over_the_channel`) | S8a (offline device, fake input; Trash: gap H4) |
 | tracks_the_fake_synth | | |
 | arms_meters_counts_in_and_draws_the_take | S8c, S9a (`gpui_arms_meters_counts_in_and_draws_the_take`, with the `audio.set` steps) | S8c, S9a (offline device, fake input, with the `audio.set` steps; CI run 45743593726) |
 | touch_writes_a_fader_over_the_channel | S6a (mixer parts) | S6a (mixer parts) |
-| drives_a_fader_and_a_button_from_an_mcu | | |
-| drives_the_mixer_from_a_kontrol_mk3 | | |
+| drives_a_fader_and_a_button_from_an_mcu | S9d (`gpui_drives_a_fader_and_a_button_from_an_mcu`) | |
+| drives_the_mixer_from_a_kontrol_mk3 | S9d (`gpui_drives_the_mixer_from_a_kontrol_mk3`) | |
+| midi_learn_over_the_channel | S9d (`gpui_midi_learn_over_the_channel`) | |
+| a_damaged_surfaces_file_is_kept_aside | S9d (`gpui_a_damaged_surfaces_file_is_kept_aside`) | |
 | bounces_the_demo_and_checks_the_file | | |
 | edits_a_region_through_the_stub_editor | | |
 | window_views_and_panes_over_the_channel | S6a (views and panes; mixer-window step later), S8c (markers step) | S6a (views via ui.view_*; ⌃2 is ⌘2 on Linux), S8c (markers step) |
@@ -569,8 +571,8 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 | dawproject_round_trip_over_the_channel | | |
 | aaf_round_trip_over_the_channel | | |
 | dawproject_merge_over_the_channel | | |
-| multiq_install_and_switch_over_the_channel | S9c (`gpui_multiq_install_and_switch_over_the_channel`) | |
-| default_eq_and_new_bus_over_the_channel | S6b, S9c (default-EQ steps in `gpui_new_bus_and_sends_over_the_channel`) | S6b (New Bus part) |
+| multiq_install_and_switch_over_the_channel | S9c (`gpui_multiq_install_and_switch_over_the_channel`) | S9c (unavailable branch, CI run 45876230282) |
+| default_eq_and_new_bus_over_the_channel | S6b, S9c (default-EQ steps in `gpui_new_bus_and_sends_over_the_channel`) | S6b, S9c (CI run 45876230282) |
 | takes_and_layered_midi_loop_over_the_channel | | |
 | co_producer_over_mcp | | |
 | co_producer_librarian_over_mcp | | |
@@ -600,3 +602,4 @@ unknown.
 | Media import on Linux (only VizDAW CAF files import, with no resampler: `media.import` answers `failed` "… not a VizDAW CAF file" for WAV/AIFF and "… resampling needs the system importer" across rates; the e2e import steps assert those refusals on Linux) | Host track H4: Linux audio import reads WAV/AIFF and other formats (Symphonia) and adds a resampler | |
 | Live audio/MIDI input on Linux (input device list and channel names, duplex PipeWire input, ALSA MIDI input, step entry from a played keyboard) | Host track H3; until then recording on Linux uses the offline device (`VIZDAW_AUDIO=offline`, fake input `VIZDAW_AUDIO_INPUT=fake`) and MIDI by `midi.inject`; the picker offers two unnamed channels until H3 | |
 | Move to Trash for recovered recordings (`record.recover action: trash`, and Recovered Recordings' Move to Trash) | Host track H4: Linux Trash support. Until then the file stays where it is (kept for the next open) and the call answers `failed` with the problem line `<path>: not moved to the Trash (this platform has no Trash support yet)`; `gpui_record_recover_trash_over_the_channel` asserts it on Linux | |
+| Control-surface MIDI ports on Linux (Settings › Surfaces lists no ports; a unit added stays Disconnected) | Host track H3 (ALSA sequencer ports); until then `surface.inject` and the offline fake transport work, and the e2e run on them | |

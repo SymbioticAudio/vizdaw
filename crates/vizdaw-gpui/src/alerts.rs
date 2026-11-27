@@ -522,6 +522,12 @@ fn prompt_up(w: AnyWindowHandle, sheets: bool, cx: &mut App) -> bool {
     {
         return true;
     }
+    if sheets
+        && let Some(d) = w.downcast::<crate::settings_window::SettingsWindow>()
+        && d.read(cx).is_ok_and(|v| v.sheet_label().is_some())
+    {
+        return true;
+    }
     // A window being updated cannot be asked now.
     w.update(cx, |_, window, _| window.has_active_prompt())
         .unwrap_or(true)
