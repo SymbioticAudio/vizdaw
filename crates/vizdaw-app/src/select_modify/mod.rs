@@ -13,7 +13,14 @@ use vizdaw_ffi::strip::{LineOpRow, LineRow, LineShapeRow, LineTargetRow, SeriesR
 
 use crate::arrangement::PPQ;
 use crate::editing_prefs::ScaleKind;
-use crate::list::{DurationText, PitchName};
+
+mod fields;
+
+pub use fields::{
+    Edge, Field, FieldKind, GROOVE_HELP, GROOVE_LABEL, NOTE_MAP_PLACEHOLDER, condition_fields,
+    condition_numbers, condition_with, field_text, modify_fields, modify_numbers, modify_with,
+    note_map_text, offsets_text, parse_field, parse_note_map, parse_offsets,
+};
 
 /// The Modify Again help text (`M/SelectModifyModel.swift:59`).
 pub const MODIFY_AGAIN_HELP: &str = "Modify Again changes the selection in place.";
@@ -407,8 +414,12 @@ impl Comparison {
                 Comparison::Is
             };
         }
+        let f = condition_fields(&c.test);
+        let n = condition_numbers(&c.test);
         let one_step = choices.contains(&Comparison::Is)
-            && range_step(&c.test).is_some_and(|s| s.low_text == s.high_text);
+            && f.len() == 2
+            && n.len() == 2
+            && field_text(n[0], f[0].kind, &[]) == field_text(n[1], f[1].kind, &[]);
         match (one_step, c.negate) {
             (true, false) => Comparison::Is,
             (true, true) => Comparison::IsNot,
@@ -422,110 +433,23 @@ impl Comparison {
     pub fn applied(self, c: &ConditionRow) -> ConditionRow {
         let mut out = c.clone();
         out.negate = self.negates();
+        let f = condition_fields(&c.test);
+        let n = condition_numbers(&c.test);
         if matches!(self, Comparison::Is | Comparison::IsNot)
             && Self::choices(&c.test).contains(&Comparison::Inside)
-            && let Some(s) = range_step(&c.test)
+            && f.len() == 2
+            && n.len() == 2
         {
-            out.test = s.one_step;
+            // Swift reads both ends with an empty meter; ranges never show
+            // positions.
+            let low = field_text(n[0], f[0].kind, &[]);
+            let high = parse_field(&low, f[1].kind, &[]).unwrap_or(n[0]);
+            if let Some(t) = condition_with(&c.test, &[n[0], high]) {
+                out.test = t;
+            }
         }
         out
     }
-}
-
-/// A ranged test's two ends as the panel's fields show them, and the test
-/// with its high end set to the low end's step (Swift reads both through
-/// `FieldText` with an empty meter; the ranged kinds never show positions).
-struct RangeStep {
-    low_text: String,
-    high_text: String,
-    one_step: ConditionTest,
-}
-
-fn range_step(t: &ConditionTest) -> Option<RangeStep> {
-    let pitch = |n: u8| PitchName::name(n.min(127));
-    Some(match *t {
-        ConditionTest::Pitch { low, high } => RangeStep {
-            low_text: pitch(low),
-            high_text: pitch(high),
-            one_step: ConditionTest::Pitch {
-                low,
-                high: low.min(127),
-            },
-        },
-        ConditionTest::BracketedBy { low, high } => RangeStep {
-            low_text: pitch(low),
-            high_text: pitch(high),
-            one_step: ConditionTest::BracketedBy {
-                low,
-                high: low.min(127),
-            },
-        },
-        ConditionTest::Controller { low, high } => RangeStep {
-            low_text: low.to_string(),
-            high_text: high.to_string(),
-            one_step: ConditionTest::Controller { low, high: low },
-        },
-        ConditionTest::Velocity { low, high } => RangeStep {
-            low_text: (low >> 9).to_string(),
-            high_text: (high >> 9).to_string(),
-            one_step: ConditionTest::Velocity {
-                low,
-                high: velocity_top(low),
-            },
-        },
-        ConditionTest::ReleaseVelocity { low, high } => RangeStep {
-            low_text: (low >> 9).to_string(),
-            high_text: (high >> 9).to_string(),
-            one_step: ConditionTest::ReleaseVelocity {
-                low,
-                high: velocity_top(low),
-            },
-        },
-        ConditionTest::Value { low, high } => RangeStep {
-            low_text: (low >> 25).to_string(),
-            high_text: (high >> 25).to_string(),
-            one_step: ConditionTest::Value {
-                low,
-                high: ((low >> 25) << 25) | 0x1FF_FFFF,
-            },
-        },
-        ConditionTest::Duration { min, max } => {
-            let low_text = length_text(min);
-            let high = length_parse(&low_text).unwrap_or(min);
-            RangeStep {
-                high_text: length_text(max),
-                low_text,
-                one_step: ConditionTest::Duration { min, max: high },
-            }
-        }
-        _ => return None,
-    })
-}
-
-/// The last 16-bit velocity of `v`'s 7-bit step.
-fn velocity_top(v: u16) -> u16 {
-    ((v >> 9) << 9) | 0x1FF
-}
-
-/// A signed length as beats.units of a quarter note (Swift `FieldText`
-/// `.length`).
-fn length_text(n: i64) -> String {
-    let m = n.checked_abs().unwrap_or(i64::MAX);
-    format!(
-        "{}{}",
-        if n < 0 { "-" } else { "" },
-        DurationText::text(m, PPQ)
-    )
-}
-
-fn length_parse(s: &str) -> Option<i64> {
-    let t = s.trim();
-    let (negative, rest) = match t.strip_prefix('-') {
-        Some(r) => (true, r),
-        None => (false, t),
-    };
-    let d = DurationText::parse(rest, 0, PPQ)?;
-    Some(if negative { -d } else { d })
 }
 
 /// The panel's modify choices (`M/SelectModify.swift:228-298`).

@@ -8,6 +8,7 @@ mod model;
 mod rows;
 
 pub use edit::{ListChange, ListDelete, ListEdit, ListEditError, ListInsert};
+pub(crate) use format::trim_ws;
 pub use format::{
     Bbu, Bend14, DurationText, KeyName, PitchName, Smpte, UNITS_PER_BEAT, Value7, Velocity7,
     parse_position,
