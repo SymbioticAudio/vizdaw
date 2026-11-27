@@ -9,10 +9,13 @@ use std::time::Duration;
 use gpui::{Entity, TestAppContext, VisualTestContext, WindowHandle};
 use vizdaw_app::testing::{FakeCore, FakeSession, demo_fake};
 use vizdaw_app::{CoreCalls, DocId, DocumentStore};
-use vizdaw_ffi::surfaces::{SurfaceEventRow, SurfaceKindRow};
+use vizdaw_ffi::surfaces::{
+    CommandMapRow, LearnKindRow, LearnSourceRow, SurfaceEventRow, SurfaceKindRow,
+};
 use vizdaw_gpui::{AppState, DocumentWindow};
 
 struct Setup {
+    core: Arc<FakeCore>,
     app: Entity<AppState>,
     cx: VisualTestContext,
 }
@@ -40,7 +43,7 @@ fn setup_with(
     for f in fakes {
         core.hand_out("new_demo", f.clone());
     }
-    let store = DocumentStore::with_core(core);
+    let store = DocumentStore::with_core(core.clone());
     let (app, windows) = cx.update(|cx| {
         let app = vizdaw_gpui::install(store, cx);
         app.update(cx, |s, _| s.store.refresh_claimed_ports());
@@ -52,7 +55,7 @@ fn setup_with(
     });
     let vcx = VisualTestContext::from_window(windows[0].into(), cx);
     vcx.run_until_parked();
-    (Setup { app, cx: vcx }, windows)
+    (Setup { core, app, cx: vcx }, windows)
 }
 
 impl Setup {
@@ -256,4 +259,64 @@ fn without_a_surface_the_tick_takes_nothing(cx: &mut TestAppContext) {
     assert!(!played(&f), "no surface: no fast tick");
     s.poll();
     assert!(played(&f), "the transport poll still takes them");
+}
+
+fn staged_play(f: &FakeSession) {
+    f.push_surface_events_on_idle(vec![SurfaceEventRow::Command {
+        id: "transport.play".into(),
+        programmatic: false,
+    }]);
+}
+
+/// Final review I1: the core makes surface events only in the session's
+/// `idle` (`service_surfaces`), so the surface tick runs it: a stopped
+/// document's Play lands within one ~16 ms tick, not at the 250 ms poll.
+#[gpui::test]
+fn the_surface_tick_services_the_session(cx: &mut TestAppContext) {
+    let f = Arc::new(demo_fake());
+    let (mut s, _windows) = setup_with(cx, std::slice::from_ref(&f), true);
+    s.poll();
+    staged_play(&f);
+    // The idle runs at most every 16 ms of real time, across the tick and
+    // the transport poll.
+    std::thread::sleep(Duration::from_millis(20));
+    s.tick();
+    assert!(played(&f), "within one tick: {:?}", f.calls());
+}
+
+/// A learned command listens on any port with no surface set up: the
+/// tick services the session while command maps exist.
+#[gpui::test]
+fn a_learned_command_keeps_the_tick_fast(cx: &mut TestAppContext) {
+    let f = Arc::new(demo_fake());
+    let (mut s, _windows) = setup(cx, std::slice::from_ref(&f));
+    s.core.set_command_maps(vec![CommandMapRow {
+        source: LearnSourceRow {
+            port: "Pads".into(),
+            kind: LearnKindRow::Note,
+            channel: 9,
+            number: 36,
+        },
+        text: "Pads \u{00B7} Note C2 ch 10".into(),
+        command: "transport.play".into(),
+    }]);
+    // The maps are read again on a slow tick.
+    s.poll();
+    staged_play(&f);
+    std::thread::sleep(Duration::from_millis(20));
+    s.tick();
+    assert!(played(&f), "within one tick: {:?}", f.calls());
+}
+
+/// With nothing to listen for, the tick runs no idle: the transport poll
+/// alone does, at its own pace.
+#[gpui::test]
+fn with_nothing_to_listen_for_the_tick_runs_no_idle(cx: &mut TestAppContext) {
+    let f = Arc::new(demo_fake());
+    let (mut s, _windows) = setup(cx, std::slice::from_ref(&f));
+    s.poll();
+    let idles = f.idle_calls();
+    std::thread::sleep(Duration::from_millis(20));
+    s.tick();
+    assert_eq!(f.idle_calls(), idles);
 }

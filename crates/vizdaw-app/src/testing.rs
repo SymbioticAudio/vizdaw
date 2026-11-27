@@ -118,6 +118,8 @@ struct State {
     heard_calls: Vec<Vec<AutomationTargetRow>>,
     mode_calls: Vec<(Vec<u64>, AutomationModeRow)>,
     surface_selections: Vec<Vec<u64>>,
+    /// Every `idle`.
+    idle_calls: usize,
     run_mixers: Vec<(String, Vec<ControlArg>)>,
     /// The holder of each gesture phase taken, in order.
     holders: Vec<GestureHolderRow>,
@@ -162,6 +164,9 @@ struct Surfaces {
     state: SurfaceStateRow,
     /// What the next `take_surface_events` drains.
     events: Vec<SurfaceEventRow>,
+    /// Events the next `idle` services into `events`, as the core's
+    /// `service_surfaces` makes them only in `idle`.
+    on_idle: Vec<SurfaceEventRow>,
     /// The project's learn maps.
     maps: Vec<LearnMapRow>,
     learn_targets: Vec<AutomationTargetRow>,
@@ -581,6 +586,7 @@ impl FakeSession {
             heard_calls: vec![],
             mode_calls: vec![],
             surface_selections: vec![],
+            idle_calls: 0,
             run_mixers: vec![],
             holders: vec![],
             channel_touches: 0,
@@ -1304,6 +1310,17 @@ impl FakeSession {
     /// Events the next `take_surface_events` drains (appended).
     pub fn push_surface_events(&self, events: Vec<SurfaceEventRow>) {
         self.st().surfaces.events.extend(events);
+    }
+
+    /// Events the surfaces' input makes at the next `idle` (the core
+    /// routes surface input only in `idle`); drained after it.
+    pub fn push_surface_events_on_idle(&self, events: Vec<SurfaceEventRow>) {
+        self.st().surfaces.on_idle.extend(events);
+    }
+
+    /// How many times `idle` was called.
+    pub fn idle_calls(&self) -> usize {
+        self.st().idle_calls
     }
 
     /// The project's learn maps, as `learn_maps` answers.
@@ -2201,6 +2218,9 @@ impl DocSession for FakeSession {
     }
     fn idle(&self) -> Result<IdleNews, VizError> {
         let mut s = self.st();
+        s.idle_calls += 1;
+        let serviced = std::mem::take(&mut s.surfaces.on_idle);
+        s.surfaces.events.extend(serviced);
         let n = s.idle_snapshot.take();
         if let Some(n) = &n {
             s.snap = n.clone();

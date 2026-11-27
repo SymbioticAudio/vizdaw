@@ -486,7 +486,13 @@ impl DocumentWindow {
                 let Some(interval) = interval else { break };
                 cx.background_executor().timer(interval).await;
                 let ticked = this.update_in(cx, |this, window, cx| {
-                    let steps = this.app.update(cx, |s, _| s.surface_tick(doc));
+                    let steps = this.app.update(cx, |s, cx| {
+                        let (steps, idled) = s.surface_tick(doc);
+                        if idled {
+                            cx.notify();
+                        }
+                        steps
+                    });
                     if !steps.is_empty() {
                         this.run_surface_steps(steps, window, cx);
                     }
