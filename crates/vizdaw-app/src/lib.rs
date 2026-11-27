@@ -37,6 +37,7 @@ pub mod panels;
 pub mod piano_roll;
 pub mod plugin_prefs;
 pub mod plugin_window;
+pub mod plugins;
 pub mod position;
 pub mod prefs;
 pub mod project_settings;
