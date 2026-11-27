@@ -115,6 +115,11 @@ fn esc_cancels(key: &gpui::Keystroke, window: &Window, cx: &App) -> bool {
     if key.key != "escape" || key.modifiers.modified() || crate::file_panels::is_up(cx) {
         return false;
     }
+    // An alert or question up in the window has the key (review M1).
+    let handle = window.window_handle();
+    if window.has_active_prompt() || crate::alerts::showing(cx).iter().any(|(w, _)| *w == handle) {
+        return false;
+    }
     let free = if let Some(Some(root)) = window.root::<DocumentWindow>() {
         let v = root.read(cx);
         let doc = v.doc();
@@ -135,13 +140,22 @@ fn esc_cancels(key: &gpui::Keystroke, window: &Window, cx: &App) -> bool {
 }
 
 /// Esc cancels a waiting learn ([`esc_cancels`]), before any binding or
-/// key handler sees it; otherwise it goes on as before.
+/// key handler sees it, once no menu or popover is left for it to close;
+/// otherwise it goes on as before.
 pub fn install(cx: &mut App) {
     cx.intercept_keystrokes(|e, window, cx| {
-        if esc_cancels(&e.keystroke, window, cx) {
-            cancel(None, cx);
-            cx.stop_propagation();
+        if !esc_cancels(&e.keystroke, window, cx) {
+            return;
         }
+        cx.stop_propagation();
+        // An open menu or popover, or a held roll key, takes this Esc
+        // first (review M2); the next one cancels the learn.
+        if let Some(Some(root)) = window.root::<DocumentWindow>()
+            && root.update(cx, |v, cx| v.escape_menus(window, cx))
+        {
+            return;
+        }
+        cancel(None, cx);
     })
     .detach();
 }

@@ -11,12 +11,13 @@ use std::time::Duration;
 
 use gpui::{TestAppContext, VisualTestContext, WindowHandle};
 use mixer_support::Setup;
+use vizdaw_app::AlertItem;
 use vizdaw_app::DocumentStore;
 use vizdaw_app::learn::{self, FAILED_TITLE, WAITING_TEXT};
-use vizdaw_app::testing::{FakeCore, FakeSession, mixer_fake};
+use vizdaw_app::testing::{FakeCore, FakeSession, lane_row, mixer_fake, strip_row};
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::events::AutomationTargetRow as T;
-use vizdaw_ffi::mixer::SendRow;
+use vizdaw_ffi::mixer::{SendRow, StripKindRow};
 use vizdaw_ffi::surfaces::SurfaceStateRow;
 use vizdaw_gpui::{DocumentWindow, RunCommand};
 
@@ -267,4 +268,60 @@ fn the_banner_goes_when_the_map_lands(cx: &mut TestAppContext) {
     poll(&mut s);
     assert!(!learning(&mut s));
     assert_eq!(banner(&mut s), None);
+}
+
+/// Review M1: Esc while an alert is up in the window is the alert's; the
+/// learn still waits.
+#[gpui::test]
+fn escape_with_an_alert_up_cancels_nothing(cx: &mut TestAppContext) {
+    let f = fake();
+    waiting(&f, Some("Fader · Synth"));
+    let (mut s, core) = setup(cx, f);
+    learn(&mut s, "slider", "Fader of Synth");
+    s.app.update(&mut s.cx, |a, cx| {
+        a.store
+            .post_alert(AlertItem::new("Note", "Something happened."));
+        cx.notify();
+    });
+    s.cx.run_until_parked();
+    assert!(s.cx.has_pending_prompt());
+    s.cx.simulate_keystrokes("escape");
+    assert_eq!(core.learn_cancels(), 0);
+    assert!(learning(&mut s));
+    s.cx.simulate_prompt_answer("OK");
+    s.cx.run_until_parked();
+    s.cx.simulate_keystrokes("escape");
+    assert_eq!(core.learn_cancels(), 1);
+}
+
+/// Review M2: an open menu takes Esc first (it closes); the next Esc
+/// cancels the learn.
+#[gpui::test]
+fn an_open_menu_takes_escape_first(cx: &mut TestAppContext) {
+    let f = fake();
+    let mut groove = lane_row(30, "Groove", false);
+    groove.audio_out = Some(1);
+    f.set_lanes(3, vec![groove]);
+    f.edit_mixer(|m| {
+        m.strips.insert(
+            0,
+            strip_row(5, "Audio 1", StripKindRow::AudioPath { path: 1 }),
+        )
+    });
+    waiting(&f, Some("Fader · Synth"));
+    let (mut s, core) = setup(cx, f);
+    learn(&mut s, "slider", "Fader of Synth");
+    s.click("menu", "Input of Groove");
+    assert!(s.find("menuitem", "No Input").is_some());
+    s.cx.simulate_keystrokes("escape");
+    s.cx.run_until_parked();
+    assert!(
+        s.find("menuitem", "No Input").is_none(),
+        "the picker closed"
+    );
+    assert_eq!(core.learn_cancels(), 0);
+    assert!(learning(&mut s));
+    s.cx.simulate_keystrokes("escape");
+    assert_eq!(core.learn_cancels(), 1);
+    assert!(!learning(&mut s));
 }

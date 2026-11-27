@@ -1396,10 +1396,18 @@ impl DocumentWindow {
         if event.keystroke.key != "escape" {
             return;
         }
-        // A key held on the roll's keyboard strip is let go.
-        if self.release_roll_key(cx) {
+        if self.escape_menus(window, cx) {
             cx.stop_propagation();
-            return;
+        }
+    }
+
+    /// Escape's first work: a key held on the roll's keyboard strip is
+    /// let go, else every open menu list and popover closes. True when
+    /// there was something to do (the key goes no further; a waiting MIDI
+    /// learn is cancelled only by the next Esc).
+    pub(crate) fn escape_menus(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.release_roll_key(cx) {
+            return true;
         }
         let headers = std::mem::take(&mut self.track_headers.add_menu_open)
             | self.track_headers.input_picker.take().is_some()
@@ -1426,9 +1434,10 @@ impl DocumentWindow {
             || list
             || roll
         {
-            cx.stop_propagation();
             cx.notify();
+            return true;
         }
+        false
     }
 
     /// The held key is up: one landing if it stepped.
