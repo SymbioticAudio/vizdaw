@@ -58,6 +58,8 @@ pub const APPEARANCE_HEIGHT: f32 = 300.;
 /// The Keys tab's content width and height (Swift's frame, 720×520).
 pub use editing::EDITOR_PANEL;
 pub use keys::{KEYS_HEIGHT, KEYS_WIDTH};
+/// Settings › Keys' Learn MIDI button and its help (`S/KeysSettingsView.swift:88-98`).
+pub use keys::{LEARN_MIDI, LEARN_NO_DOCUMENT, LEARN_NOT_LEARNABLE};
 /// The Surfaces tab's width (`S/SurfacesSettingsView.swift:69`) and
 /// content height.
 pub use surfaces::{SURFACES_HEIGHT, SURFACES_WIDTH};

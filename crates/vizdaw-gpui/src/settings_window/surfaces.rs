@@ -173,7 +173,12 @@ impl SettingsWindow {
     }
 
     /// A refusal: its title, its message and OK, on this window.
-    fn alert(&mut self, alert: Option<AlertItem>, window: AnyWindowHandle, cx: &mut Context<Self>) {
+    pub(super) fn alert(
+        &mut self,
+        alert: Option<AlertItem>,
+        window: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) {
         cx.notify();
         let Some(a) = alert else { return };
         let answer = crate::alerts::ask(

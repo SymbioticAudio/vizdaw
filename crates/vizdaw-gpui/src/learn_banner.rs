@@ -1,8 +1,8 @@
 //! A waiting MIDI learn in the windows (Swift `LearnBanner`, `LearnItem`
 //! and `KeyMonitor`'s Esc; slice 9d Task 5): the banner with its Cancel
-//! at the top of the mixer, the "MIDI Learn" item of a control's menu,
-//! and Esc, which cancels the waiting learn from a document, mixer or
-//! plug-in window.
+//! at the top of the mixer (and in Settings › Keys), the "MIDI Learn" item
+//! of a control's menu, and Esc, which cancels the waiting learn from a
+//! document, mixer, plug-in or Settings window.
 
 use gpui::{
     AnyElement, App, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
@@ -14,6 +14,7 @@ use crate::app_state::AppState;
 use crate::arrangement::with_alpha;
 use crate::plugin_windows::PluginWindowView;
 use crate::registry::RegistryScope;
+use crate::settings_window::SettingsWindow;
 use crate::shell::DocumentWindow;
 use crate::strip_palette::tokens;
 
@@ -108,9 +109,10 @@ pub fn cancel(doc: Option<DocId>, cx: &mut App) {
 }
 
 /// Whether Esc in `window` cancels a waiting learn
-/// (`S/KeyMonitor.swift:155-164`): a bare Esc in a document, mixer or
-/// plug-in window with no sheet or file panel up and no text field typed
-/// in, while a learn waits.
+/// (`S/KeyMonitor.swift:155-164`): a bare Esc in a document, mixer,
+/// plug-in or Settings window with no sheet or file panel up, no text
+/// field typed in and the Keys recorder not recording, while a learn
+/// waits.
 fn esc_cancels(key: &gpui::Keystroke, window: &Window, cx: &App) -> bool {
     if key.key != "escape" || key.modifiers.modified() || crate::file_panels::is_up(cx) {
         return false;
@@ -129,6 +131,10 @@ fn esc_cancels(key: &gpui::Keystroke, window: &Window, cx: &App) -> bool {
                 .store
                 .document(doc)
                 .is_none_or(|d| d.transport_keys_enabled())
+    } else if let Some(Some(root)) = window.root::<SettingsWindow>() {
+        // The recorder's Esc is its own (it cancels recording).
+        let v = root.read(cx);
+        v.sheet_label().is_none() && !v.is_recording()
     } else {
         matches!(window.root::<PluginWindowView>(), Some(Some(_)))
     };

@@ -11,11 +11,14 @@ use core_control::bindings::{Chord, Keymap};
 use core_control::registry::{COMMANDS, KeyContext};
 use futures::channel::oneshot;
 use gpui::{
-    AnyWindowHandle, App, Keystroke, Modifiers, TestAppContext, VisualTestContext, WindowHandle,
+    AnyWindowHandle, App, Keystroke, Modifiers, ScrollDelta, ScrollEvent, TestAppContext,
+    VisualTestContext, WindowHandle, point, px,
 };
 use vizdaw_app::DocumentStore;
 use vizdaw_app::panels::PanelSpec;
 use vizdaw_app::testing::{FakeCore, FakeSession, demo_fake};
+use vizdaw_ffi::VizError;
+use vizdaw_ffi::surfaces::SurfaceStateRow;
 use vizdaw_gpui::controls::key_recorder::{Take, take_for};
 use vizdaw_gpui::file_panels::{Chosen, PanelBackend, PanelPlace, set_backend};
 use vizdaw_gpui::registry::Element;
@@ -32,7 +35,8 @@ const CMD: &str = if cfg!(target_os = "macos") {
 };
 
 struct Setup {
-    _fake: Arc<FakeSession>,
+    core: Arc<FakeCore>,
+    fake: Arc<FakeSession>,
     app: gpui::Entity<AppState>,
     doc: WindowHandle<DocumentWindow>,
     cx: VisualTestContext,
@@ -42,7 +46,7 @@ fn setup(cx: &mut TestAppContext) -> Setup {
     let core = Arc::new(FakeCore::new());
     let fake = Arc::new(demo_fake());
     core.hand_out("new_demo", fake.clone());
-    let store = DocumentStore::with_core(core);
+    let store = DocumentStore::with_core(core.clone());
     let (app, doc) = cx.update(|cx| {
         let app = vizdaw_gpui::install(store, cx);
         let doc = vizdaw_gpui::new_demo(cx).expect("a demo window");
@@ -51,7 +55,8 @@ fn setup(cx: &mut TestAppContext) -> Setup {
     let vcx = VisualTestContext::from_window(doc.into(), cx);
     vcx.run_until_parked();
     let mut s = Setup {
-        _fake: fake,
+        core,
+        fake,
         app,
         doc,
         cx: vcx,
@@ -567,4 +572,207 @@ fn the_reserve_toggle_saves_and_routes(cx: &mut TestAppContext) {
     assert_eq!(route(&mut s), Some("locator.go_2"));
     s.click("checkbox", RESERVE);
     assert_ne!(route(&mut s), Some("locator.go_2"));
+}
+
+// ---- Learn MIDI (slice 9d Task 8; `S/KeysSettingsView.swift:37-39,85-131`) ----
+
+use vizdaw_gpui::settings_window::{
+    LEARN_NO_DOCUMENT as NO_DOCUMENT, LEARN_NOT_LEARNABLE as NOT_LEARNABLE,
+};
+
+/// The core says a learn waits for `what`.
+fn waiting(f: &FakeSession, what: &str) {
+    f.set_surface_state(SurfaceStateRow {
+        learning: Some(what.to_owned()),
+        ..SurfaceStateRow::default()
+    });
+}
+
+impl Setup {
+    /// The Learn MIDI button of the command titled `title`.
+    fn learn_of(&mut self, title: &str) -> Element {
+        self.find("button", &format!("Learn MIDI for {title}"))
+            .unwrap_or_else(|| panic!("no Learn MIDI for {title}"))
+    }
+
+    /// Scrolls the list until `title`'s Learn MIDI shows, then returns it.
+    fn shown_learn_of(&mut self, title: &str) -> Element {
+        let e = self.learn_of(title);
+        let list = self.find("button", "Record Key for Save").unwrap();
+        let dy = f32::from(e.bounds.center().y) - f32::from(list.bounds.center().y);
+        let mut vcx = self.vcx();
+        vcx.simulate_event(ScrollEvent {
+            position: list.bounds.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-dy))),
+            ..ScrollEvent::default()
+        });
+        vcx.run_until_parked();
+        self.learn_of(title)
+    }
+
+    /// Presses `title`'s Learn MIDI.
+    fn learn(&mut self, title: &str) {
+        let e = self.shown_learn_of(title);
+        self.click_el(&e);
+    }
+
+    fn banner(&mut self) -> Option<Element> {
+        self.elements()
+            .into_iter()
+            .find(|e| e.role == "text" && e.label.starts_with("Waiting for MIDI"))
+    }
+
+    fn learning(&mut self) -> bool {
+        self.app
+            .read_with(&self.cx, |a, _| a.store.learning_document().is_some())
+    }
+
+    fn close_document(&mut self) {
+        self.doc
+            .update(&mut self.cx, |_, window, _| window.remove_window())
+            .unwrap();
+        self.cx.run_until_parked();
+    }
+}
+
+#[gpui::test]
+fn learn_midi_is_disabled_without_a_document(cx: &mut TestAppContext) {
+    let mut s = setup(cx);
+    s.close_document();
+    let undo = s.learn_of("Undo");
+    assert!(!undo.enabled);
+    assert_eq!(undo.value.as_deref(), Some(NO_DOCUMENT));
+    // Its place: after the recorder, before Reset.
+    let all = s.elements();
+    let rec = all
+        .iter()
+        .position(|e| e.label == "Record Key for Undo")
+        .unwrap();
+    assert_eq!(all[rec + 1].label, "Learn MIDI for Undo");
+    assert_eq!(all[rec + 2].label, "Reset");
+    // A press does nothing.
+    let undo = s.shown_learn_of("Undo");
+    s.click_el(&undo);
+    assert!(s.core.learned_commands().is_empty());
+}
+
+#[gpui::test]
+fn learn_midi_is_disabled_for_a_command_with_a_dialog(cx: &mut TestAppContext) {
+    let mut s = setup(cx);
+    let open = s.learn_of("Open…");
+    assert!(!open.enabled);
+    assert_eq!(open.value.as_deref(), Some(NOT_LEARNABLE));
+    let undo = s.learn_of("Undo");
+    assert!(undo.enabled);
+    assert_eq!(
+        undo.value.as_deref(),
+        Some("Learn a MIDI control (a pad or button) for Undo")
+    );
+}
+
+#[gpui::test]
+fn learn_midi_learns_into_the_front_document(cx: &mut TestAppContext) {
+    let mut s = setup(cx);
+    waiting(&s.fake, "Undo");
+    let front = s.app.read_with(&s.cx, |a, _| a.store.front());
+    let doc = s.doc.read_with(&s.cx, |v, _| v.doc()).unwrap();
+    assert_eq!(front, Some(doc));
+    s.learn("Undo");
+    assert_eq!(s.fake.focus_calls(), 1);
+    assert_eq!(s.core.learned_commands(), ["edit.undo"]);
+    let owner = s.app.read_with(&s.cx, |a, _| a.store.learning_document());
+    assert_eq!(owner, Some(doc));
+}
+
+#[gpui::test]
+fn the_keys_tab_shows_the_banner_and_cancel(cx: &mut TestAppContext) {
+    let mut s = setup(cx);
+    waiting(&s.fake, "Undo");
+    assert!(s.banner().is_none());
+    s.learn("Undo");
+    let banner = s.banner().expect("the banner");
+    assert_eq!(
+        banner.label,
+        "Waiting for MIDI for Undo\u{2026} move a control (Esc cancels)"
+    );
+    // Under the reserve toggle, above the list.
+    let all = s.elements();
+    let toggle = all
+        .iter()
+        .position(|e| e.role == "checkbox" && e.label == RESERVE)
+        .unwrap();
+    assert_eq!(all[toggle + 1].label, banner.label);
+    assert!(all[toggle].bounds.origin.y < banner.bounds.origin.y);
+    let save = s.find("button", "Save…").unwrap();
+    assert!(banner.bounds.origin.y < save.bounds.origin.y);
+    s.click("button", "Cancel");
+    assert_eq!(s.core.learn_cancels(), 1);
+    assert!(!s.learning());
+    assert!(s.banner().is_none());
+}
+
+#[gpui::test]
+fn escape_cancels_the_learn_but_not_while_recording(cx: &mut TestAppContext) {
+    let mut s = setup(cx);
+    waiting(&s.fake, "Undo");
+    s.learn("Undo");
+    assert!(s.learning());
+    // Recording: Esc cancels the recording, not the learn.
+    s.record("Undo");
+    assert_eq!(
+        s.find("button", "Record Key for Undo").unwrap().value,
+        Some("Press a key…".into())
+    );
+    s.keys("escape");
+    assert_eq!(
+        s.find("button", "Record Key for Undo").unwrap().value,
+        Some("Record".into())
+    );
+    assert_eq!(s.chords("edit.undo"), ["⌘Z"]);
+    assert_eq!(s.core.learn_cancels(), 0);
+    assert!(s.learning());
+    // Not recording: Esc cancels the learn.
+    s.keys("escape");
+    assert_eq!(s.core.learn_cancels(), 1);
+    assert!(!s.learning());
+    assert!(s.banner().is_none());
+    // And recording after it still records (and Esc still stops it).
+    s.record("Undo");
+    s.keys("escape");
+    assert_eq!(
+        s.find("button", "Record Key for Undo").unwrap().value,
+        Some("Record".into())
+    );
+    assert_eq!(s.core.learn_cancels(), 1);
+    assert!(s.open_windows());
+}
+
+#[gpui::test]
+fn a_refused_learn_is_midi_learn_failed(cx: &mut TestAppContext) {
+    let mut s = setup(cx);
+    s.core.fail_learn_command(VizError::Model {
+        message: "Undo cannot be learned now.".into(),
+    });
+    s.learn("Undo");
+    let vcx = s.vcx();
+    vcx.run_until_parked();
+    assert_eq!(
+        vcx.pending_prompt(),
+        Some((
+            "MIDI Learn Failed".to_owned(),
+            "Undo cannot be learned now.".to_owned()
+        ))
+    );
+    // On the Settings window, not the document's.
+    let settings: AnyWindowHandle = s.handle().unwrap().into();
+    let shown: Vec<AnyWindowHandle> =
+        s.cx.update(|_, cx| vizdaw_gpui::alerts::showing(cx))
+            .into_iter()
+            .map(|(w, _)| w)
+            .collect();
+    assert_eq!(shown, [settings], "the alert is the Settings window's");
+    vcx.simulate_prompt_answer("OK");
+    vcx.run_until_parked();
+    assert!(!s.learning());
+    assert!(s.banner().is_none());
 }
