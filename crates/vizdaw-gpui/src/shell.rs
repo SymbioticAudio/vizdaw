@@ -1123,7 +1123,8 @@ impl DocumentWindow {
         self.with_model(cx, |d| d.set_status(Some(text.to_owned())));
     }
 
-    /// Escape: closes a mixer strip's open input picker in this window.
+    /// Escape: closes a mixer strip's open input picker, instrument menu
+    /// or plug-in browser in this window.
     fn close_strip_input_pickers(&mut self, cx: &mut Context<Self>) -> bool {
         let views: Vec<_> = [
             &self.mix_view,
@@ -1137,7 +1138,7 @@ impl DocumentWindow {
         .collect();
         let mut closed = false;
         for v in views {
-            closed |= v.update(cx, |v, cx| v.close_input_picker(cx));
+            closed |= v.update(cx, |v, cx| v.escape(cx));
         }
         closed
     }

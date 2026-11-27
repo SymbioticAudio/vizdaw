@@ -3,7 +3,8 @@
 //! the Mix view, through GPUI's test platform with the scripted session:
 //! the Swift labels, the slot and send menus, the insert drag, the send
 //! knob and box, the gestures that open the plug-in and Built-in Synth
-//! windows, and the parts that wait for the catalogue (shown disabled).
+//! windows, the plug-in browser under "+", "EQ ＋" and "Replace…", and
+//! the instrument menu.
 
 use std::sync::Arc;
 
@@ -13,13 +14,17 @@ use gpui::{
 };
 use vizdaw_app::DocumentStore;
 use vizdaw_app::mixer::{MixerPlacement, StripEntry};
-use vizdaw_app::testing::{FakeSession, dest_row, mixer_fake, slot_row, strip_row};
+use vizdaw_app::plugin_browser::{NO_MATCH, NO_PLUGINS};
+use vizdaw_app::testing::{
+    FakeCatalog, FakeSession, catalog_row, dest_row, mixer_fake, slot_row, strip_row,
+};
 use vizdaw_ffi::BuiltinSound;
 use vizdaw_ffi::automation::GesturePhaseRow;
 use vizdaw_ffi::events::AutomationTargetRow as T;
 use vizdaw_ffi::mixer::{DestRow, SendRow, StripKindRow};
 use vizdaw_ffi::snapshot::SlotStatus;
 use vizdaw_gpui::mixer_view::MixerView;
+use vizdaw_gpui::plugin_browser::{PLUGIN_BROWSER, WIDTH};
 use vizdaw_gpui::plugin_windows::Subject;
 use vizdaw_gpui::registry::Element;
 use vizdaw_gpui::{AppState, DocumentWindow, RunCommand};
@@ -250,21 +255,21 @@ fn faders_line_up(s: &mut Setup) {
 fn slot_rows_show_the_swift_labels(cx: &mut TestAppContext) {
     let mut s = setup(cx, fake());
     // The EQ: loaded, its plugin as the value and its bypass; empty, the
-    // "EQ ＋" face, disabled until the catalogue comes.
+    // "EQ ＋" face.
     let eq = s.element("group", "EQ of Audio 1");
     assert_eq!(eq.value.as_deref(), Some("Q"));
     assert!(s.find("button", "Bypass EQ of Audio 1").is_some());
     let empty = s.element("button", "EQ of Audio 2");
     assert_eq!(empty.value.as_deref(), Some("empty"));
-    assert!(!empty.enabled);
-    // The inserts, in order, then the disabled "+".
+    assert!(empty.enabled);
+    // The inserts, in order, then "+".
     let comp = s.element("button", "Comp");
     let verb = s.element("button", "Verb");
     assert!(comp.bounds.origin.y < verb.bounds.origin.y);
     let add = s.element("button", "Add an effect to Audio 1");
-    assert!(!add.enabled);
+    assert!(add.enabled);
     assert!(add.bounds.origin.y > verb.bounds.origin.y);
-    assert!(!s.element("button", "Add an effect to Master").enabled);
+    assert!(s.element("button", "Add an effect to Master").enabled);
     // The instruments.
     assert!(s.find("button", "Pad, instrument").is_some());
     let synth = s.element("button", "Built-in Synth, instrument");
@@ -334,14 +339,14 @@ fn an_insert_menu_bypasses_sidechains_and_removes(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn the_eq_menu_offers_remove_eq_and_waits_for_replace(cx: &mut TestAppContext) {
+fn the_eq_menu_offers_replace_and_remove_eq(cx: &mut TestAppContext) {
     let mut s = setup(cx, fake());
     s.right_click("group", "EQ of Audio 1");
     assert_eq!(
         s.items(),
         [
             ("Open".into(), true, false),
-            ("Replace\u{2026}".into(), false, false),
+            ("Replace\u{2026}".into(), true, false),
             ("Bypass".into(), true, false),
             ("Remove EQ".into(), true, false),
         ]
@@ -367,14 +372,8 @@ fn the_instrument_slot_menu_bypasses_and_loads_a_held_slot(cx: &mut TestAppConte
     );
     s.click("menuitem", "Load");
     assert_eq!(s.fake.loaded(), [vec![53]]);
-    // A click on the slot or the Built-in Synth's (their instrument menu
-    // comes with the catalogue) does nothing.
-    s.click("button", "Pad, instrument");
-    s.click("button", "Built-in Synth, instrument");
+    // The Built-in Synth's slot has no right-click menu.
     s.right_click("button", "Built-in Synth, instrument");
-    assert!(s.titles().is_empty());
-    s.click("button", "Add an effect to Audio 1");
-    s.click("button", "EQ of Audio 2");
     assert!(s.titles().is_empty());
     assert_eq!(s.fake.calls().len(), 1, "{:?}", s.fake.calls());
 }
@@ -875,16 +874,18 @@ fn the_eq_slot_opens_on_a_single_click_and_its_bypass_does_not(cx: &mut TestAppC
     // On the name, left of the bypass button.
     s.click_at(point(eq.origin.x + px(8.), eq.center().y));
     assert!(s.is_open(Subject::Plugin(50)));
-    // The empty EQ's "EQ ＋" waits for the catalogue.
+    // The empty EQ's "EQ ＋" opens the browser, no window.
     s.click("button", "EQ of Audio 2");
+    assert!(s.find("group", PLUGIN_BROWSER).is_some());
     assert_eq!(s.open_windows(), 1);
 }
 
 #[gpui::test]
 fn a_double_click_on_the_builtin_synth_slot_opens_its_sounds(cx: &mut TestAppContext) {
     let mut s = setup(cx, fake());
-    // Its single click is the instrument menu: not yet.
+    // Its single click is the instrument menu, no window.
     s.click("button", "Built-in Synth, instrument");
+    assert!(s.titles().contains(&"Open Editor".to_owned()));
     assert_eq!(s.open_windows(), 0);
     s.double_click("button", "Built-in Synth, instrument");
     // Nothing focused: the first Built-in Synth.
@@ -893,4 +894,260 @@ fn a_double_click_on_the_builtin_synth_slot_opens_its_sounds(cx: &mut TestAppCon
     // Again: the same window.
     s.double_click("button", "Built-in Synth, instrument");
     assert_eq!(s.open_windows(), 1);
+}
+
+// The plug-in browser and the instrument menu (slice 10a).
+
+/// Effects Chorus (CLAP) and Delay (VST3) by Acme, the instrument Keys
+/// by Acme, the instrument Pad by V (the Pad strip's own plug-in), and a
+/// Disabled effect Off.
+fn catalog() -> Vec<vizdaw_ffi::CatalogRowFfi> {
+    use vizdaw_ffi::snapshot::PluginFormatTag as F;
+    use vizdaw_ffi::{PluginKindTag as K, PluginStatusRow as St};
+    vec![
+        catalog_row("Chorus", "Acme", F::Clap, K::Effect, St::Ok),
+        catalog_row("Delay", "Acme", F::Vst3, K::Effect, St::Ok),
+        catalog_row("Keys", "Acme", F::Clap, K::Instrument, St::Ok),
+        catalog_row("Pad", "V", F::Clap, K::Instrument, St::Ok),
+        catalog_row("Off", "Acme", F::Clap, K::Effect, St::Disabled),
+    ]
+}
+
+/// The app's catalog holds `rows` (no scan).
+fn with_catalog(s: &mut Setup, rows: Vec<vizdaw_ffi::CatalogRowFfi>) {
+    s.app.update(&mut s.cx, |a, cx| {
+        a.app_plugins =
+            vizdaw_app::plugins::AppPlugins::new(Arc::new(FakeCatalog::with_rows(rows)));
+        a.app_plugins.start(false);
+        cx.notify();
+    });
+    s.cx.run_until_parked();
+}
+
+fn browser_open(s: &mut Setup) -> bool {
+    s.model(|d| d.mixer().is_some_and(|m| m.browser().is_some()))
+}
+
+impl Setup {
+    fn model<R>(&mut self, f: impl FnOnce(&vizdaw_app::DocumentModel) -> R) -> R {
+        let doc = self.window.read_with(&self.cx, |v, _| v.doc()).unwrap();
+        self.app
+            .read_with(&self.cx, |a, _| f(a.store.document(doc).unwrap()))
+    }
+}
+
+#[gpui::test]
+fn the_plus_opens_the_effect_browser_and_a_pick_adds_the_insert(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    with_catalog(&mut s, catalog());
+    let add = s.element("button", "Add an effect to Audio 2");
+    assert!(add.enabled);
+    s.click("button", "Add an effect to Audio 2");
+    // The popover: 320 wide, the focused search, the effects by vendor
+    // with their formats (a VST3 reads "VST3").
+    // 320 wide: 318 inside its 1-point border.
+    let panel = s.element("group", PLUGIN_BROWSER);
+    assert_eq!(f32::from(panel.bounds.size.width), WIDTH - 2.);
+    let search = s.element("textfield", "Search");
+    assert!(search.focused, "the search takes the keyboard");
+    assert!(s.find("text", "Acme").is_some());
+    assert_eq!(s.value("button", "Chorus").as_deref(), Some("CLAP"));
+    assert_eq!(s.value("button", "Delay").as_deref(), Some("VST3"));
+    assert!(s.find("button", "Keys").is_none(), "effects only");
+    assert!(s.find("button", "Off").is_none(), "usable ones only");
+    assert!(s.fake.calls().is_empty());
+    s.click("button", "Chorus");
+    let added = s.fake.add_inserts();
+    assert_eq!(added.len(), 1, "{added:?}");
+    assert_eq!((added[0].0, added[0].1), (6, None), "the end of Audio 2");
+    assert_eq!(added[0].2.id, "x.Chorus");
+    assert!(
+        s.find("group", PLUGIN_BROWSER).is_none(),
+        "the pick closes it"
+    );
+    assert!(!browser_open(&mut s));
+    assert_eq!(s.open_windows(), 0, "a browser pick opens no window");
+    // Dropping an insert on "+" still moves it to the end, opening
+    // nothing.
+    let comp = s.element("button", "Comp").bounds.center();
+    let plus = s
+        .element("button", "Add an effect to Audio 1")
+        .bounds
+        .center();
+    s.down(comp, 1);
+    s.move_to(point(comp.x, comp.y + px(10.)), true);
+    s.move_to(plus, true);
+    s.up(plus, 1);
+    assert_eq!(s.calls_like("move_insert"), ["move_insert(51,5,1)"]);
+    assert!(s.find("group", PLUGIN_BROWSER).is_none());
+}
+
+#[gpui::test]
+fn the_eq_plus_opens_the_browser_for_the_eq(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    with_catalog(&mut s, catalog());
+    let eq = s.element("button", "EQ of Audio 2");
+    assert!(eq.enabled);
+    assert_eq!(eq.value.as_deref(), Some("empty"));
+    s.click("button", "EQ of Audio 2");
+    assert!(s.find("group", PLUGIN_BROWSER).is_some());
+    assert!(s.find("button", "Keys").is_none(), "the effect browser");
+    s.click("button", "Delay");
+    assert_eq!(s.calls_like("set_eq"), ["set_eq(6,Some(\"x.Delay\"))"]);
+    assert_eq!(s.value("group", "EQ of Audio 2").as_deref(), Some("Delay"));
+    assert!(s.find("group", PLUGIN_BROWSER).is_none());
+    assert_eq!(s.open_windows(), 0);
+}
+
+#[gpui::test]
+fn replace_reopens_the_eq_browser(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    with_catalog(&mut s, catalog());
+    s.right_click("group", "EQ of Audio 1");
+    assert!(s.items().contains(&("Replace\u{2026}".into(), true, false)));
+    s.click("menuitem", "Replace\u{2026}");
+    assert!(s.titles().is_empty(), "the menu closed");
+    assert!(s.element("textfield", "Search").focused);
+    // A search with one match: Return picks it.
+    s.cx.simulate_input("DEL");
+    s.cx.run_until_parked();
+    assert!(s.find("button", "Chorus").is_none());
+    assert!(s.find("button", "Delay").is_some());
+    s.cx.simulate_keystrokes("enter");
+    s.cx.run_until_parked();
+    assert_eq!(s.calls_like("set_eq"), ["set_eq(5,Some(\"x.Delay\"))"]);
+    assert!(s.find("group", PLUGIN_BROWSER).is_none());
+    // With two matches Return picks nothing.
+    s.right_click("group", "EQ of Audio 1");
+    s.click("menuitem", "Replace\u{2026}");
+    s.cx.simulate_input("acme");
+    s.cx.simulate_keystrokes("enter");
+    s.cx.run_until_parked();
+    assert_eq!(s.calls_like("set_eq").len(), 1);
+    assert!(s.find("group", PLUGIN_BROWSER).is_some());
+}
+
+#[gpui::test]
+fn clicking_the_instrument_slot_opens_the_instrument_menu(cx: &mut TestAppContext) {
+    use vizdaw_ffi::snapshot::PluginFormatTag as F;
+    let f = fake();
+    f.edit_destinations(|d| {
+        let mut pad = dest_row(4, "Pad");
+        pad.plugin = Some(vizdaw_ffi::snapshot::PluginRefRow {
+            format: F::Clap,
+            id: "x.Pad".into(),
+            name: "Pad".into(),
+            vendor: "V".into(),
+            version: "1".into(),
+        });
+        d.push(pad);
+    });
+    let mut s = setup(cx, f);
+    with_catalog(&mut s, catalog());
+    s.click("button", "Pad, instrument");
+    assert_eq!(
+        s.items(),
+        [
+            ("Open Editor".into(), true, false),
+            ("Acme".into(), true, false),
+            ("V".into(), true, false),
+        ]
+    );
+    assert!(!s.is_open(Subject::Plugin(53)), "a click opens no window");
+    // The loaded plug-in is checked; picking it sends nothing.
+    s.click("menuitem", "V");
+    assert!(s.items().contains(&("Pad".into(), true, true)));
+    s.click("menuitem", "Pad");
+    assert!(s.titles().is_empty(), "the menu closed");
+    assert!(s.fake.destination_plugins().is_empty());
+    // Another maker's instrument replaces it and opens its window.
+    s.click("button", "Pad, instrument");
+    s.click("menuitem", "Acme");
+    s.click("menuitem", "Keys");
+    let picked = s.fake.destination_plugins();
+    assert_eq!(picked.len(), 1);
+    assert_eq!((picked[0].0, picked[0].1.id.as_str()), (4, "x.Keys"));
+    assert!(s.is_open(Subject::Plugin(904)), "the new slot's window");
+    // Open Editor opens the slot's window; without an editor it is off.
+    s.click("button", "Keys, instrument");
+    s.click("menuitem", "Open Editor");
+    assert!(s.titles().is_empty());
+    s.fake
+        .edit_mixer(|m| m.strips[2].instrument.as_mut().unwrap().has_editor = false);
+    s.right_click("button", "Keys, instrument");
+    s.click("menuitem", "Bypass");
+    s.click("button", "Keys, instrument");
+    assert_eq!(s.items()[0], ("Open Editor".into(), false, false));
+    s.cx.simulate_keystrokes("escape");
+    s.cx.run_until_parked();
+    // The Built-in Synth's: no editor to open; a pick replaces the first
+    // Built-in Synth (none focused) and opens the new slot's window.
+    s.click("button", "Built-in Synth, instrument");
+    assert_eq!(s.items()[0], ("Open Editor".into(), false, false));
+    s.click("menuitem", "Acme");
+    s.click("menuitem", "Keys");
+    let picked = s.fake.destination_plugins();
+    assert_eq!(picked.len(), 2);
+    assert_eq!(picked[1].0, 8);
+    assert!(s.is_open(Subject::Plugin(908)));
+}
+
+#[gpui::test]
+fn the_instrument_menu_says_when_there_are_no_instruments(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    s.click("button", "Built-in Synth, instrument");
+    assert_eq!(
+        s.items(),
+        [
+            ("Open Editor".into(), false, false),
+            ("No Plugin Instruments".into(), false, false),
+        ]
+    );
+    // A click outside closes it.
+    let area = s.element("group", "Mixer").bounds;
+    s.click_at(point(area.origin.x + px(4.), area.origin.y + px(4.)));
+    assert!(s.titles().is_empty());
+    assert!(s.fake.calls().is_empty());
+}
+
+#[gpui::test]
+fn escape_closes_the_browser_without_a_pick(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    with_catalog(&mut s, catalog());
+    s.click("button", "Add an effect to Audio 2");
+    assert!(browser_open(&mut s));
+    s.cx.simulate_keystrokes("escape");
+    s.cx.run_until_parked();
+    assert!(s.find("group", PLUGIN_BROWSER).is_none());
+    assert!(!browser_open(&mut s));
+    // A click outside closes it too; the "+" toggles it.
+    s.click("button", "Add an effect to Audio 2");
+    s.click("button", "Add an effect to Audio 2");
+    assert!(!browser_open(&mut s), "its button closes it");
+    s.click("button", "Add an effect to Audio 2");
+    let area = s.element("group", "Mixer").bounds;
+    s.click_at(point(area.origin.x + px(4.), area.origin.y + px(4.)));
+    assert!(s.find("group", PLUGIN_BROWSER).is_none());
+    assert!(!browser_open(&mut s));
+    assert!(s.fake.calls().is_empty(), "{:?}", s.fake.calls());
+}
+
+#[gpui::test]
+fn the_browser_says_no_plugins_found_when_empty(cx: &mut TestAppContext) {
+    let mut s = setup(cx, fake());
+    s.click("button", "Add an effect to Audio 2");
+    assert!(s.find("text", NO_PLUGINS).is_some());
+    s.cx.simulate_input("x");
+    s.cx.run_until_parked();
+    assert!(s.find("text", NO_PLUGINS).is_none());
+    assert!(s.find("text", NO_MATCH).is_some());
+    with_catalog(&mut s, catalog());
+    s.cx.simulate_keystrokes("escape");
+    s.cx.run_until_parked();
+    // Opened again, it reads the catalog again.
+    s.click("button", "Add an effect to Audio 2");
+    assert!(s.find("button", "Chorus").is_some());
+    s.cx.simulate_input("zzz");
+    s.cx.run_until_parked();
+    assert!(s.find("text", NO_MATCH).is_some());
 }

@@ -24,6 +24,7 @@ mod midi_strip;
 pub mod mixer_view;
 pub mod panes;
 pub mod piano_roll;
+pub mod plugin_browser;
 pub mod plugin_windows;
 pub mod record_popover;
 pub mod region_drawing;

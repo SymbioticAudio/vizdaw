@@ -14,9 +14,14 @@
 //! blank keeps the row). A strip silent because others solo dims to
 //! half; the selected strip's edge is the accent. "Open" and a slot's
 //! double-click (the EQ slot's click) open its plug-in window, and the
-//! Built-in Synth slot's double-click its sound window. What needs the
-//! plugin catalogue (the instrument menu, "+", "EQ ＋", "Replace…") shows
-//! disabled.
+//! Built-in Synth slot's double-click its sound window. "+" and "EQ ＋"
+//! open the plug-in browser (`plugin_browser`, the effects) under them
+//! for the end of the inserts or the EQ, as does the EQ menu's
+//! "Replace…"; a pick goes there and opens no window. A click on an
+//! instrument strip's own slot, or on the Built-in Synth's, opens the
+//! instrument menu at the pointer; its pick replaces the instrument and
+//! opens the new slot's plug-in window. Esc or a press outside closes the
+//! browser and the menu.
 //!
 //! A grouped strip shows its group tag under its kind (its menu: Link
 //! Mutes, Link Solos, Remove from Group, Ungroup); a drag of its fader is
@@ -65,22 +70,26 @@ use vizdaw_app::mixer::layout::{
 };
 use vizdaw_app::mixer::meters::{METER_PERIOD, POLL_INTERVAL};
 use vizdaw_app::mixer::{
-    AutomationModes, GroupLabels, InstrumentRow, MeterLevel, MidiControl, MidiStripLabels,
-    MidiStripMath, MixerColumn, MixerModel, MixerPlacement, SendLabels, SlotLabels, SlotMenuItem,
-    SlotPlace, SlotState, StripPalette, VcaStripLabels,
+    AutomationModes, BrowserTarget, GroupLabels, InstrumentMenu, InstrumentMenuItem, InstrumentRow,
+    MeterLevel, MidiControl, MidiStripLabels, MidiStripMath, MixerColumn, MixerModel,
+    MixerPlacement, SendLabels, SlotLabels, SlotMenuItem, SlotPlace, SlotState, StripPalette,
+    VcaStripLabels,
 };
+use vizdaw_app::plugin_browser::SEARCH;
 use vizdaw_app::view::StripFocus;
+use vizdaw_ffi::PluginKindTag;
 use vizdaw_ffi::automation::AutomationModeRow;
 use vizdaw_ffi::edit::MonitorModeRow;
 use vizdaw_ffi::events::AutomationTargetRow as Target;
 use vizdaw_ffi::mixer::{DestRow, StripKindRow, StripRow, SwatchRow};
-use vizdaw_ffi::snapshot::{LaneRow, SlotRow};
+use vizdaw_ffi::snapshot::{LaneRow, PluginRefRow, SlotRow};
 
 use crate::controls::{
     self, ControlBinding, Entry, Grip, KnobSize, MixerRef, NumberBinding, NumberBox, Toggle, fader,
 };
 use crate::frame_stats;
 use crate::input_picker;
+use crate::plugin_browser;
 use crate::plugin_windows::{self, Subject};
 use crate::registry::RegistryScope;
 use crate::strip_palette::{KnobFunction, tokens};
@@ -151,6 +160,9 @@ pub enum StripMenu {
     Send(usize),
     /// A slot's menu (the slot's ID).
     Slot(u64),
+    /// An instrument strip's (or the Built-in Synth's) instrument menu,
+    /// at the pointer (Swift `InstrumentMenu`).
+    Instrument,
     /// A grouped strip's group tag: Link Mutes, Link Solos, Remove from
     /// Group, Ungroup.
     GroupTag,
@@ -270,8 +282,29 @@ pub(crate) struct RenameField {
     _subscriptions: Vec<Subscription>,
 }
 
+/// The open plug-in browser's search field (one per placement).
+pub(crate) struct BrowserField {
+    target: BrowserTarget,
+    field: Entity<TextInput>,
+    /// The field's text as last drawn for.
+    search: String,
+    _subscriptions: Vec<Subscription>,
+}
+
+/// The instrument menu, opened at the pointer: what it was made with.
+struct PointerMenu {
+    /// Where the click went down (window).
+    at: gpui::Point<Pixels>,
+    menu: InstrumentMenu,
+    /// The slot "Open Editor" opens.
+    slot: Option<u64>,
+    /// What the click's second press opens (the double-click's window:
+    /// the slot's, or the Built-in Synth's sounds).
+    double: Option<Subject>,
+}
+
 /// One placement of a document's mixer: its scroll, its typed boxes, its
-/// open menu and rename field.
+/// open menu, plug-in browser and rename field.
 pub struct MixerView {
     pub(crate) mixer: MixerRef,
     /// The strips' scroll (x, y), in points.
@@ -286,6 +319,13 @@ pub struct MixerView {
     submenu: Option<usize>,
     insert_drag: Option<InsertDrag>,
     pub(crate) rename: Option<RenameField>,
+    /// The instrument menu's state while it is the open menu.
+    pointer_menu: Option<PointerMenu>,
+    /// The open plug-in browser's field.
+    browser: Option<BrowserField>,
+    /// Where the open browser's opener was drawn: a press on it is its
+    /// own toggle, not a press outside.
+    browser_opener: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The placement told the mixer it shows.
     appeared: bool,
     /// The mixer was asked for (to show, or to be read again) less than
@@ -331,6 +371,14 @@ impl MixerView {
                 gone.with(cx, |m, d| target.end(m, d, p, text, commit));
                 drop(r);
             }
+            if v.browser.take().is_some() {
+                gone.with(cx, |m, d| {
+                    d.end_text_editing(&browser_owner(p));
+                    if m.shows_browser(p) {
+                        m.close_browser();
+                    }
+                });
+            }
             if v.appeared {
                 gone.with(cx, |m, d| m.disappeared(d, p, Instant::now()));
             }
@@ -358,6 +406,9 @@ impl MixerView {
             submenu: None,
             insert_drag: None,
             rename: None,
+            pointer_menu: None,
+            browser: None,
+            browser_opener: Rc::default(),
             appeared: false,
             hold: None,
             drawn: vec![],
@@ -438,6 +489,7 @@ impl MixerView {
         if !self.appeared {
             return;
         }
+        self.drop_lost_browser(cx);
         let now = cx.background_executor().now();
         let (doc, started) = (self.mixer.doc, self.started);
         let shown = self.mixer.app.update(cx, |s, cx| {
@@ -630,6 +682,7 @@ impl MixerView {
             Some((strip, which))
         };
         self.submenu = None;
+        self.pointer_menu = None;
         cx.notify();
     }
 
@@ -637,22 +690,268 @@ impl MixerView {
     pub(crate) fn open_menu(&mut self, strip: u64, which: StripMenu, cx: &mut Context<Self>) {
         self.menu = Some((strip, which));
         self.submenu = None;
+        self.pointer_menu = None;
         cx.notify();
     }
 
     fn close_menu(&mut self, cx: &mut Context<Self>) {
         self.menu = None;
         self.submenu = None;
+        self.pointer_menu = None;
         cx.notify();
     }
 
-    /// Escape: closes an open input picker. True when one was open.
-    pub(crate) fn close_input_picker(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.menu.is_some_and(|(_, m)| m == StripMenu::Input) {
+    /// A press on an open menu's backdrop: the menu closes. The second
+    /// press of a double-click on the slot whose click opened the
+    /// instrument menu opens what the double-click opens (Swift held the
+    /// click back until the double-click failed).
+    fn backdrop_press(&mut self, clicks: usize, cx: &mut Context<Self>) {
+        let double = self
+            .pointer_menu
+            .as_ref()
+            .and_then(|p| p.double)
+            .filter(|_| clicks >= 2);
+        self.close_menu(cx);
+        if let Some(subject) = double {
+            plugin_windows::show_later(self.mixer.doc, subject, cx);
+        }
+    }
+
+    /// Escape: closes an open input picker, the instrument menu or the
+    /// plug-in browser. True when one was open.
+    pub(crate) fn escape(&mut self, cx: &mut Context<Self>) -> bool {
+        if self
+            .menu
+            .is_some_and(|(_, m)| matches!(m, StripMenu::Input | StripMenu::Instrument))
+        {
             self.close_menu(cx);
             return true;
         }
+        if self.browser.is_some() {
+            self.close_browser(cx);
+            return true;
+        }
         false
+    }
+
+    /// A click on `strip`'s own instrument slot, or on the Built-in
+    /// Synth's, at `at`: the instrument menu there (Swift
+    /// `InstrumentMenu.popUp`, `S/MixerView.swift:356-391`). "Open
+    /// Editor" opens the slot's window (disabled for the Built-in Synth
+    /// and a plug-in with no editor); each maker's submenu lists the
+    /// usable plug-in instruments, the loaded one checked. For the
+    /// Built-in Synth strip the destination is the focused track's when it
+    /// plays a Built-in Synth (Swift's `synthFocus`), else the first.
+    fn open_instrument_menu(
+        &mut self,
+        strip: u64,
+        at: gpui::Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let rows = self
+            .mixer
+            .app
+            .read(cx)
+            .app_plugins
+            .browser(PluginKindTag::Instrument);
+        let made = self
+            .mixer
+            .with(cx, |m, d| {
+                let s = m.strip(strip)?.clone();
+                match s.kind {
+                    StripKindRow::Instrument { .. } => {
+                        let x = s.instrument.as_ref()?;
+                        let mut menu = MixerModel::instrument_menu(&rows, Some(&x.plugin));
+                        menu.open_editor &= x.has_editor;
+                        Some((menu, Some(x.id), Some(Subject::Plugin(x.id))))
+                    }
+                    StripKindRow::BuiltinSynth => {
+                        m.synth_focus = d.focus_lanes().first().and_then(|l| l.midi_dest);
+                        let dest = m.instrument_destination(&s);
+                        let menu = MixerModel::instrument_menu(&rows, None);
+                        Some((menu, None, dest.map(Subject::BuiltinSynth)))
+                    }
+                    _ => None,
+                }
+            })
+            .flatten();
+        let Some((menu, slot, double)) = made else {
+            return;
+        };
+        self.menu = Some((strip, StripMenu::Instrument));
+        self.submenu = None;
+        self.pointer_menu = Some(PointerMenu {
+            at,
+            menu,
+            slot,
+            double,
+        });
+        cx.notify();
+    }
+
+    /// Where the open plug-in browser's pick goes, if it is open here.
+    pub fn browser_target(&self) -> Option<BrowserTarget> {
+        self.browser.as_ref().map(|b| b.target)
+    }
+
+    /// Opens the plug-in browser for `target` under its button (Swift
+    /// `openBrowser`), its search field taking the keyboard. Its list is
+    /// the catalog's usable plug-ins of the target's kind, read now.
+    pub fn open_browser(
+        &mut self,
+        target: BrowserTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_menu(cx);
+        let (doc, p) = (self.mixer.doc, self.mixer.placement);
+        let opened = self.mixer.app.update(cx, |s, cx| {
+            cx.notify();
+            let plugins = &s.app_plugins;
+            s.store
+                .with_document(doc, |d, _| {
+                    let opened = d
+                        .with_mixer(|m, _| m.open_browser(target, p, plugins))
+                        .is_some();
+                    if opened {
+                        d.begin_text_editing(&browser_owner(p));
+                    }
+                    opened
+                })
+                .unwrap_or(false)
+        });
+        if !opened {
+            return;
+        }
+        let field = cx.new(|cx| TextInput::new(SEARCH, cx));
+        let focus = field.focus_handle(cx);
+        let subscriptions = vec![
+            cx.subscribe_in(
+                &field,
+                window,
+                |this, _, e: &TextInputEvent, _, cx| match e {
+                    TextInputEvent::Confirm => this.confirm_browser(cx),
+                    TextInputEvent::Cancel => this.close_browser(cx),
+                    TextInputEvent::Tab | TextInputEvent::BackTab => {}
+                },
+            ),
+            // The list follows the search (not the caret's blink).
+            cx.observe(&field, |this, field, cx| {
+                let text = field.read(cx).text().to_owned();
+                if let Some(b) = this.browser.as_mut()
+                    && b.search != text
+                {
+                    b.search = text;
+                    cx.notify();
+                }
+            }),
+        ];
+        window.focus(&focus, cx);
+        self.browser = Some(BrowserField {
+            target,
+            field,
+            search: String::new(),
+            _subscriptions: subscriptions,
+        });
+        cx.notify();
+    }
+
+    /// The browser's button: it opens the browser for `target`, or closes
+    /// it when it is open for it.
+    fn toggle_browser(
+        &mut self,
+        target: BrowserTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.browser_target() == Some(target) {
+            self.close_browser(cx);
+        } else {
+            self.open_browser(target, window, cx);
+        }
+    }
+
+    /// Closes the plug-in browser with no pick.
+    pub fn close_browser(&mut self, cx: &mut Context<Self>) {
+        if self.browser.take().is_none() {
+            return;
+        }
+        let p = self.mixer.placement;
+        self.mixer.with(cx, |m, d| {
+            d.end_text_editing(&browser_owner(p));
+            if m.shows_browser(p) {
+                m.close_browser();
+            }
+        });
+        cx.notify();
+    }
+
+    /// A press at `at` outside the browser: it closes, unless the press is
+    /// on its button (which toggles it).
+    fn press_outside_browser(&mut self, at: gpui::Point<Pixels>, cx: &mut Context<Self>) {
+        if self.browser_opener.get().is_some_and(|b| b.contains(&at)) {
+            return;
+        }
+        self.close_browser(cx);
+    }
+
+    /// `plugin` picked in the browser: it goes where the browser was
+    /// opened (the end of the inserts, or the EQ slot) and the browser
+    /// closes. Swift's browser pick opened no window, so none opens.
+    fn pick_browser(&mut self, plugin: &PluginRefRow, cx: &mut Context<Self>) {
+        let Some(b) = self.browser.take() else {
+            return;
+        };
+        let p = self.mixer.placement;
+        self.mixer.with(cx, |m, d| {
+            d.end_text_editing(&browser_owner(p));
+            // Not another placement's browser.
+            if m.shows_browser(p) && m.browser_target() == Some(b.target) {
+                m.pick(d, plugin);
+            }
+        });
+        cx.notify();
+    }
+
+    /// The browser open here went elsewhere (another placement opened
+    /// one) or lost its strip (an undo): its field goes, so the transport
+    /// keys work again.
+    fn drop_lost_browser(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.browser_target() else {
+            return;
+        };
+        let strip = match target {
+            BrowserTarget::Insert { strip } | BrowserTarget::Eq { strip } => Some(strip),
+            BrowserTarget::Instrument | BrowserTarget::Destination(_) => None,
+        };
+        let p = self.mixer.placement;
+        let kept = self
+            .mixer
+            .read(cx, |m, _| {
+                m.shows_browser(p)
+                    && m.browser_target() == Some(target)
+                    && strip.is_none_or(|s| m.strip(s).is_some())
+            })
+            .unwrap_or(false);
+        if !kept {
+            self.close_browser(cx);
+        }
+    }
+
+    /// Return in the search: picks the one plug-in it leaves.
+    fn confirm_browser(&mut self, cx: &mut Context<Self>) {
+        let Some(b) = &self.browser else { return };
+        let text = b.field.read(cx).text().to_owned();
+        let only = self
+            .mixer
+            .read(cx, |m, _| {
+                m.browser()
+                    .and_then(|x| plugin_browser::only_match(x, &text))
+            })
+            .flatten();
+        if let Some(plugin) = only {
+            self.pick_browser(&plugin, cx);
+        }
     }
 
     fn open_submenu(&mut self, row: usize, cx: &mut Context<Self>) {
@@ -761,6 +1060,10 @@ impl MixerView {
 
 fn rename_owner(p: MixerPlacement) -> String {
     format!("mixer rename {p:?}")
+}
+
+fn browser_owner(p: MixerPlacement) -> String {
+    format!("mixer plug-in browser {p:?}")
 }
 
 /// An output menu choice: its title and its bus (`None`: master).
@@ -1852,7 +2155,7 @@ fn strip(
     if let (Some(part), (Some(y), Some(_))) = (&s.instrument, row(StripRowKind::Instrument)) {
         let el = match part {
             InstrumentPart::Plugin(x) => slot_holder(view, s.id, x, None, scope, window, cx),
-            InstrumentPart::BuiltinSynth => builtin_synth_slot(view, scope, cx),
+            InstrumentPart::BuiltinSynth => builtin_synth_slot(view, s.id, scope, window, cx),
         };
         out = out.child(at(side, y, inner, RowHeights::SLOT).child(el));
     }
@@ -2415,8 +2718,9 @@ fn open_entries(
 /// `button` in the tree, its label the plugin ("<plugin>, instrument" for
 /// an instrument). A right-click opens its menu; a double-click opens its
 /// plug-in window (an insert's arms no drag); an insert's single press is
-/// pressed to be dragged. An instrument's single click (the instrument
-/// menu) comes with the catalogue.
+/// pressed to be dragged. An instrument strip's own slot's single click
+/// opens the instrument menu at the pointer (its second press, a
+/// double-click, goes to the menu's backdrop, which opens the window).
 fn slot_holder(
     view: &Entity<MixerView>,
     strip: u64,
@@ -2454,25 +2758,122 @@ fn slot_holder(
                 })
                 .ok();
             cx.stop_propagation();
+        } else {
+            pressed
+                .update(cx, |v, cx| v.open_instrument_menu(strip, e.position, cx))
+                .ok();
+            cx.stop_propagation();
         }
     });
     let mut holder = div().relative().size_full().child(el);
+    let weak = view.downgrade();
     if let Some(items) = open_entries(view, strip, StripMenu::Slot(slot), cx, |mx, m, _| {
-        slot_entries(mx, m, slot)
+        slot_entries(&weak, mx, m, slot)
     }) {
         holder = holder.children(popup(view, "mixer-slot-menu", items, scope, window, cx));
+    }
+    if insert.is_none() {
+        holder = holder.children(instrument_menu(view, strip, scope, window, cx));
     }
     holder.into_any_element()
 }
 
-/// The Built-in Synth's slot (Swift `BuiltinSynthSlotView`): a
-/// double-click opens the sound window of the Built-in Synth the focused
-/// track plays (else the first). Its click (the instrument menu) comes
-/// with the catalogue.
-fn builtin_synth_slot(view: &Entity<MixerView>, scope: &mut RegistryScope, cx: &App) -> AnyElement {
+/// `strip`'s instrument menu, if it is the open menu: its backdrop and
+/// list at the pointer.
+fn instrument_menu(
+    view: &Entity<MixerView>,
+    strip: u64,
+    scope: &mut RegistryScope,
+    window: &Window,
+    cx: &App,
+) -> Vec<AnyElement> {
+    let v = view.read(cx);
+    if v.menu != Some((strip, StripMenu::Instrument)) {
+        return vec![];
+    }
+    let Some(pm) = v.pointer_menu.as_ref() else {
+        return vec![];
+    };
+    let items = instrument_entries(&v.mixer, strip, pm);
+    let at = pm.at;
+    popup_at(
+        view,
+        "mixer-instrument-menu",
+        items,
+        Some(at),
+        scope,
+        window,
+        cx,
+    )
+}
+
+/// The instrument menu's entries: Open Editor, a separator, then a
+/// submenu per maker (the loaded plug-in checked) or the disabled "No
+/// Plugin Instruments". A pick replaces the strip's instrument and opens
+/// the new slot's plug-in window (`S/MixerView.swift:379`).
+fn instrument_entries(mixer: &MixerRef, strip: u64, pm: &PointerMenu) -> Vec<MenuEntry> {
+    let doc = mixer.doc;
+    pm.menu
+        .items()
+        .into_iter()
+        .map(|item| match item {
+            InstrumentMenuItem::OpenEditor { enabled } => {
+                let slot = pm.slot;
+                MenuEntry::item(item.title(), move |_, cx| {
+                    if let Some(slot) = slot {
+                        plugin_windows::show_later(doc, Subject::Plugin(slot), cx);
+                    }
+                })
+                .enabled(enabled && slot.is_some())
+            }
+            InstrumentMenuItem::Separator => MenuEntry::Separator,
+            InstrumentMenuItem::NoInstruments => {
+                MenuEntry::item(item.title(), |_, _| {}).enabled(false)
+            }
+            InstrumentMenuItem::Maker(ref maker) => {
+                let choices = maker
+                    .choices
+                    .iter()
+                    .map(|c| {
+                        let (mx, plugin) = (mixer.clone(), c.plugin.clone());
+                        MenuEntry::item(c.plugin.name.clone(), move |_, cx| {
+                            let slot = mx
+                                .with(cx, |m, d| {
+                                    let s = m.strip(strip)?.clone();
+                                    m.pick_instrument(d, &plugin, &s)
+                                })
+                                .flatten();
+                            if let Some(slot) = slot {
+                                plugin_windows::show_later(doc, Subject::Plugin(slot), cx);
+                            }
+                        })
+                        .checked(c.checked)
+                    })
+                    .collect();
+                MenuEntry::submenu(item.title(), true, choices)
+            }
+        })
+        .collect()
+}
+
+/// The Built-in Synth's slot (Swift `BuiltinSynthSlotView`): a click
+/// opens the instrument menu at the pointer; a double-click opens the
+/// sound window of the Built-in Synth the focused track plays (else the
+/// first).
+fn builtin_synth_slot(
+    view: &Entity<MixerView>,
+    strip: u64,
+    scope: &mut RegistryScope,
+    window: &Window,
+    cx: &App,
+) -> AnyElement {
     let t = tokens();
     let mixer = view.read(cx).mixer.clone();
-    div()
+    let menu = view.downgrade();
+    let face = div()
+        .id(gpui::ElementId::Name(
+            format!("mixer-builtin-synth:{strip}").into(),
+        ))
         .relative()
         .size_full()
         .child(slot_face(
@@ -2484,6 +2885,9 @@ fn builtin_synth_slot(view: &Entity<MixerView>, scope: &mut RegistryScope, cx: &
         .child(scope.control("button", SlotLabels::BUILTIN_SYNTH_LABEL, true))
         .on_mouse_down(MouseButton::Left, move |e: &MouseDownEvent, _, cx| {
             if e.click_count < 2 {
+                menu.update(cx, |v, cx| v.open_instrument_menu(strip, e.position, cx))
+                    .ok();
+                cx.stop_propagation();
                 return;
             }
             let dest = mixer
@@ -2496,15 +2900,41 @@ fn builtin_synth_slot(view: &Entity<MixerView>, scope: &mut RegistryScope, cx: &
                 plugin_windows::show_later(mixer.doc, Subject::BuiltinSynth(dest), cx);
             }
             cx.stop_propagation();
-        })
+        });
+    let face = crate::sheet_host::with_help(face, SlotLabels::BUILTIN_SYNTH_HELP);
+    div()
+        .relative()
+        .size_full()
+        .child(face)
+        .children(instrument_menu(view, strip, scope, window, cx))
         .into_any_element()
 }
 
-/// A dashed add face ("EQ ＋", the inserts' "+"), disabled: the plugin
-/// catalogue comes later.
-fn add_face(text: &str, label: &str, value: Option<&str>, scope: &mut RegistryScope) -> AnyElement {
+/// What an add face shows and opens.
+struct AddFace<'a> {
+    text: &'a str,
+    label: &'a str,
+    value: Option<&'a str>,
+    help: &'a str,
+    target: BrowserTarget,
+}
+
+/// A dashed add face (Swift `StripAddFace`: "EQ ＋", the inserts' "+"): a
+/// click opens the effect browser for its target under it, or closes it.
+fn add_face(
+    view: &Entity<MixerView>,
+    f: AddFace<'_>,
+    scope: &mut RegistryScope,
+    window: &Window,
+    cx: &App,
+) -> AnyElement {
     let t = tokens();
-    div()
+    let target = f.target;
+    let weak = view.downgrade();
+    let face = div()
+        .id(gpui::ElementId::Name(
+            format!("mixer-add:{target:?}").into(),
+        ))
         .relative()
         .size_full()
         .flex()
@@ -2514,20 +2944,80 @@ fn add_face(text: &str, label: &str, value: Option<&str>, scope: &mut RegistrySc
         .border_1()
         .border_dashed()
         .border_color(rgb(t.surface_separator))
-        .opacity(0.45)
+        .cursor_pointer()
         .text_size(px(10.))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(rgb(t.text_secondary))
-        .child(text.to_owned())
-        .child(scope.control_with("button", label, false, value, false))
+        .child(f.text.to_owned())
+        .child(scope.control_with("button", f.label, true, f.value, false))
+        .on_click(move |_, window, cx| {
+            weak.update(cx, |v, cx| v.toggle_browser(target, window, cx))
+                .ok();
+            cx.stop_propagation();
+        });
+    let face = crate::sheet_host::with_help(face, f.help.to_owned());
+    div()
+        .relative()
+        .size_full()
+        .child(face)
+        .children(browser_popover(view, target, scope, window, cx))
         .into_any_element()
 }
 
-/// The EQ slot (Swift `EqSlotView`): empty, the disabled "EQ ＋" (`EQ of
-/// <strip>`, value `empty`); loaded, a `group` `EQ of <strip>` valued
-/// with its plugin: the dot, the name and the bypass button. A click on
-/// it (not its bypass) opens its plug-in window; a right-click opens its
-/// menu.
+/// The plug-in browser, if it is open here for `target`: hung under the
+/// element it is a child of (its opener, whose bounds it records).
+fn browser_popover(
+    view: &Entity<MixerView>,
+    target: BrowserTarget,
+    scope: &mut RegistryScope,
+    window: &Window,
+    cx: &App,
+) -> Vec<AnyElement> {
+    let v = view.read(cx);
+    let Some(b) = v.browser.as_ref().filter(|b| b.target == target) else {
+        return vec![];
+    };
+    let p = v.mixer.placement;
+    let (picking, outside) = (view.downgrade(), view.downgrade());
+    let on_pick: plugin_browser::OnPick = Rc::new(move |plugin, _, cx| {
+        picking.update(cx, |v, cx| v.pick_browser(plugin, cx)).ok();
+    });
+    let on_outside: plugin_browser::OnOutside = Rc::new(move |e, _, cx| {
+        outside
+            .update(cx, |v, cx| v.press_outside_browser(e.position, cx))
+            .ok();
+    });
+    let panel = v
+        .mixer
+        .read(cx, |m, _| {
+            let shown = m.shows_browser(p) && m.browser_target() == Some(target);
+            let model = m.browser().filter(|_| shown)?;
+            Some(plugin_browser::view(
+                model, &b.field, on_pick, on_outside, scope, window, cx,
+            ))
+        })
+        .flatten();
+    let Some(panel) = panel else {
+        return vec![];
+    };
+    let opener = v.browser_opener.clone();
+    vec![
+        canvas(move |b, _, _| opener.set(Some(b)), |_, _, _, _| {})
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .into_any_element(),
+        plugin_browser::hang_below(panel),
+    ]
+}
+
+/// The EQ slot (Swift `EqSlotView`): empty, "EQ ＋" (`EQ of <strip>`,
+/// value `empty`), whose click opens the effect browser for the EQ;
+/// loaded, a `group` `EQ of <strip>` valued with its plugin: the dot, the
+/// name and the bypass button. A click on it (not its bypass) opens its
+/// plug-in window; a right-click opens its menu, whose "Replace…" opens
+/// the browser for the EQ under it.
 fn eq_slot(
     view: &Entity<MixerView>,
     s: &StripParts,
@@ -2536,13 +3026,16 @@ fn eq_slot(
     cx: &App,
 ) -> AnyElement {
     let label = SlotLabels::eq(&s.name);
+    let target = BrowserTarget::Eq { strip: s.id };
     let Some(eq) = &s.eq else {
-        return add_face(
-            SlotLabels::EQ_ADD_FACE,
-            &label,
-            Some(SlotLabels::EQ_EMPTY),
-            scope,
-        );
+        let face = AddFace {
+            text: SlotLabels::EQ_ADD_FACE,
+            label: &label,
+            value: Some(SlotLabels::EQ_EMPTY),
+            help: SlotLabels::EQ_ADD_HELP,
+            target,
+        };
+        return add_face(view, face, scope, window, cx);
     };
     let t = tokens();
     let (strip, slot) = (s.id, eq.id);
@@ -2607,17 +3100,21 @@ fn eq_slot(
                 .ok();
             cx.stop_propagation();
         });
+    let weak = view.downgrade();
     if let Some(items) = open_entries(view, strip, StripMenu::Slot(slot), cx, |mx, m, _| {
-        slot_entries(mx, m, slot)
+        slot_entries(&weak, mx, m, slot)
     }) {
         holder = holder.children(popup(view, "mixer-slot-menu", items, scope, window, cx));
     }
-    holder.into_any_element()
+    holder
+        .children(browser_popover(view, target, scope, window, cx))
+        .into_any_element()
 }
 
 /// The inserts (Swift `StripInserts`): the heading, each slot (dragged
-/// to reorder: the place it would drop at is marked), then the disabled
-/// "+".
+/// to reorder: the place it would drop at is marked; dropped on "+" it
+/// goes last), then "+", whose click opens the effect browser for the
+/// end of the chain.
 fn inserts(
     view: &Entity<MixerView>,
     s: &StripParts,
@@ -2655,13 +3152,17 @@ fn inserts(
                 .bg(rgb(t.accent)),
         );
     }
+    let label = SlotLabels::add_effect(&s.name);
+    let face = AddFace {
+        text: SlotLabels::ADD_FACE,
+        label: &label,
+        value: None,
+        help: SlotLabels::ADD_HELP,
+        target: BrowserTarget::Insert { strip: s.id },
+    };
     out.child(
-        at(0., top(count), StripLayout::inner(), RowHeights::ADD).child(add_face(
-            SlotLabels::ADD_FACE,
-            &SlotLabels::add_effect(&s.name),
-            None,
-            scope,
-        )),
+        at(0., top(count), StripLayout::inner(), RowHeights::ADD)
+            .child(add_face(view, face, scope, window, cx)),
     )
     .into_any_element()
 }
@@ -2975,11 +3476,6 @@ impl MenuEntry {
         }
     }
 
-    /// An item that waits for a later slice: shown, disabled.
-    fn waiting(title: impl Into<String>) -> Self {
-        Self::item(title, |_, _| {}).enabled(false)
-    }
-
     fn submenu(title: impl Into<String>, enabled: bool, items: Vec<MenuEntry>) -> Self {
         MenuEntry::Submenu {
             title: title.into(),
@@ -3152,10 +3648,15 @@ fn group_entries(
 }
 
 /// Slot `slot`'s menu (Swift `SlotView.menu`, `EqSlotView.menu`): Open
-/// (its plug-in window), Load (held), Replace… (the EQ; disabled: the
-/// catalogue comes later), Bypass or Turn On, Sidechain ▸, Remove (an
-/// insert) or Remove EQ.
-fn slot_entries(mixer: &MixerRef, m: &MixerModel, slot: u64) -> Vec<MenuEntry> {
+/// (its plug-in window), Load (held), Replace… (the EQ: the effect browser
+/// for the EQ again, `S/ChannelStrip.swift:657-677`), Bypass or Turn On,
+/// Sidechain ▸, Remove (an insert) or Remove EQ.
+fn slot_entries(
+    view: &WeakEntity<MixerView>,
+    mixer: &MixerRef,
+    m: &MixerModel,
+    slot: u64,
+) -> Vec<MenuEntry> {
     let Some((s, x, place)) = m.slot(slot) else {
         return vec![];
     };
@@ -3172,7 +3673,14 @@ fn slot_entries(mixer: &MixerRef, m: &MixerModel, slot: u64) -> Vec<MenuEntry> {
                         plugin_windows::show_later(doc, Subject::Plugin(slot), cx);
                     })
                 }
-                SlotMenuItem::Replace => MenuEntry::waiting(item.title()),
+                SlotMenuItem::Replace => {
+                    let view = view.clone();
+                    MenuEntry::item(item.title(), move |window, cx| {
+                        let target = BrowserTarget::Eq { strip };
+                        view.update(cx, |v, cx| v.open_browser(target, window, cx))
+                            .ok();
+                    })
+                }
                 SlotMenuItem::Sidechain(ref choices) => {
                     let items = choices
                         .iter()
@@ -3265,6 +3773,20 @@ pub(crate) fn popup(
     window: &Window,
     cx: &App,
 ) -> Vec<AnyElement> {
+    popup_at(view, id, items, None, scope, window, cx)
+}
+
+/// As [`popup`], the list at `at` (window) when given (a menu popped up
+/// at the pointer), else under the face.
+fn popup_at(
+    view: &Entity<MixerView>,
+    id: &'static str,
+    items: Vec<MenuEntry>,
+    at: Option<gpui::Point<Pixels>>,
+    scope: &mut RegistryScope,
+    window: &Window,
+    cx: &App,
+) -> Vec<AnyElement> {
     let size = window.viewport_size();
     let closing = view.downgrade();
     let backdrop = deferred(
@@ -3274,8 +3796,10 @@ pub(crate) fn popup(
                 .w(size.width)
                 .h(size.height)
                 .occlude()
-                .on_any_mouse_down(move |_, _, cx| {
-                    closing.update(cx, |v, cx| v.close_menu(cx)).ok();
+                .on_any_mouse_down(move |e: &MouseDownEvent, _, cx| {
+                    closing
+                        .update(cx, |v, cx| v.backdrop_press(e.click_count, cx))
+                        .ok();
                 }),
         ),
     )
@@ -3283,12 +3807,45 @@ pub(crate) fn popup(
     .into_any_element();
     let submenu = view.read(cx).submenu;
     let list = menu_rows(view, id, items, Some(submenu), scope);
-    let list = div()
-        .absolute()
-        .top_full()
-        .left_0()
-        .child(deferred(anchored().snap_to_window().child(list)).with_priority(2))
-        .into_any_element();
+    let list = match at {
+        // The list's corner is under the pointer: a double-click's second
+        // press lands on it (and ends there, as on the backdrop).
+        Some(at) => {
+            let double = view.downgrade();
+            let watch = canvas(
+                |_, _, _| {},
+                move |bounds, _, window, _| {
+                    let double = double.clone();
+                    window.on_mouse_event(move |e: &MouseDownEvent, phase, _, cx| {
+                        if phase == DispatchPhase::Capture
+                            && e.button == MouseButton::Left
+                            && e.click_count >= 2
+                            && bounds.contains(&e.position)
+                        {
+                            double
+                                .update(cx, |v, cx| v.backdrop_press(e.click_count, cx))
+                                .ok();
+                            cx.stop_propagation();
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full();
+            let list = div().relative().child(list).child(watch);
+            deferred(anchored().position(at).snap_to_window().child(list))
+                .with_priority(2)
+                .into_any_element()
+        }
+        None => div()
+            .absolute()
+            .top_full()
+            .left_0()
+            .child(deferred(anchored().snap_to_window().child(list)).with_priority(2))
+            .into_any_element(),
+    };
     vec![backdrop, list]
 }
 
