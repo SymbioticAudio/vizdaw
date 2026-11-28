@@ -12,12 +12,10 @@ use std::sync::{Arc, Mutex};
 
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::events::AutomationTargetRow;
-use vizdaw_ffi::mixer::{MixerSnapshot, StripRow};
 use vizdaw_ffi::surfaces::{LearnMapRow, LearnModeRow};
 
 use crate::alerts::{AlertItem, error_message};
 use crate::document::DocumentModel;
-use crate::mixer::{MixerModel, VcaStripLabels};
 use crate::session::{CoreCalls, DocSession};
 
 /// The banner while a learn waits (`M/LearnModel.swift:16`).
@@ -62,65 +60,12 @@ pub fn mode_title(m: LearnModeRow) -> &'static str {
     }
 }
 
-/// What `t` is called, from the document's mixer (`M/StripLane.swift:155-173`):
-/// "Fader · Synth", "Send 1 to Bus 1 · Synth", "Time · Echo"; a strip,
-/// slot or parameter not found is named by its ID.
+/// What `t` is called, from the document's automation targets
+/// (`M/StripLane.swift:155-173`): "Fader · Synth", "Send 1 to Bus 1 ·
+/// Synth", "Time · Echo"; a strip, slot or parameter not found is named by
+/// its ID.
 pub fn target_title(t: &AutomationTargetRow, doc: &DocumentModel) -> String {
-    let session = doc.session();
-    let mixer = session.mixer().ok();
-    let strips: &[StripRow] = mixer.as_ref().map_or(&[], |m: &MixerSnapshot| &m.strips);
-    let name = |id: u64| strips.iter().find(|s| s.id == id).map(|s| s.name.clone());
-    let strip = |id: u64| name(id).unwrap_or_else(|| format!("Strip {id}"));
-    match *t {
-        AutomationTargetRow::StripFader { strip: s } => format!("Fader · {}", strip(s)),
-        AutomationTargetRow::StripPan { strip: s } => format!("Pan · {}", strip(s)),
-        AutomationTargetRow::StripMute { strip: s } => format!("Mute · {}", strip(s)),
-        AutomationTargetRow::StripSolo { strip: s } => format!("Solo · {}", strip(s)),
-        AutomationTargetRow::SendLevel { strip: s, send } => {
-            let to = strips
-                .iter()
-                .find(|r| r.id == s)
-                .and_then(|r| r.sends.get(usize::from(send)))
-                .map(|x| {
-                    let bus = name(x.target).unwrap_or_else(|| format!("Bus {}", x.target));
-                    format!(" to {bus}")
-                })
-                .unwrap_or_default();
-            format!("Send {}{to} · {}", u32::from(send) + 1, strip(s))
-        }
-        AutomationTargetRow::PluginParam { slot, param } => {
-            let plugin = strips
-                .iter()
-                .flat_map(MixerModel::slots)
-                .find(|x| x.id == slot)
-                .map(|x| x.plugin.name.clone());
-            let p = plugin
-                .as_ref()
-                .and_then(|_| session.params(slot).ok())
-                .and_then(|ps| {
-                    ps.into_iter()
-                        .find(|p| p.id == param && p.automatable && !p.hidden)
-                })
-                .map_or_else(|| format!("Parameter {param}"), |p| p.name);
-            let plugin = plugin.unwrap_or_else(|| format!("Plugin {slot}"));
-            format!("{p} · {plugin}")
-        }
-        AutomationTargetRow::VelocityScale { dest } => {
-            let d = session
-                .destinations()
-                .ok()
-                .and_then(|ds| ds.into_iter().find(|d| d.id == dest))
-                .map_or_else(|| format!("Destination {dest}"), |d| d.name);
-            format!("Velocity Scale · {d}")
-        }
-        AutomationTargetRow::VcaFader { vca } => {
-            let v = mixer
-                .as_ref()
-                .and_then(|m| m.vcas.iter().find(|v| v.id == vca))
-                .map_or_else(|| vca.to_string(), |v| v.name.clone());
-            format!("{} Fader", VcaStripLabels::title(&v))
-        }
-    }
+    doc.automation_targets().names.title(t)
 }
 
 /// Which document's learn the core waits on, shared by every document

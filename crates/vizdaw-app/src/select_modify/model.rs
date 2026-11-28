@@ -8,12 +8,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 use vizdaw_ffi::edit::{EditCommand, LaneRef, ViewFilterRow};
+use vizdaw_ffi::events::AutomationTargetRow;
 use vizdaw_ffi::events::{EventKindRow, MeterEntryRow};
 use vizdaw_ffi::modify::{
-    AmountRow, ConditionRow, CurveRow, ModifyRow, ModifyTemplateRow, SelectModeRow, SettingsEdit,
-    SubstituteRow, ValueTargetRow, WaveRow,
+    AmountRow, ConditionRow, ConditionTest, CurveRow, ModifyRow, ModifyTemplateRow, SelectModeRow,
+    SettingsEdit, SubstituteRow, ValueTargetRow, WaveRow,
 };
 use vizdaw_ffi::selection::{SelectionRow, TickRange};
+use vizdaw_ffi::strip::{LineOpRow, LinePointRow, LineShapeRow, LineTargetRow};
 
 use super::{
     AmountKind, ChangeOpKind, Comparison, ConditionKind, ModifyConfig, ModifyKind, PanelTask,
@@ -23,6 +25,7 @@ use super::{
 use crate::DocumentModel;
 use crate::editing_prefs::ScaleKind;
 use crate::editor::{MainView, PaneView};
+use crate::strip_chart::{PeriodKind, ShapeKind, StripLane};
 
 pub use crate::editor::GESTURE_OPEN;
 
@@ -132,6 +135,8 @@ pub struct SelectModifyModel {
     wants_present: bool,
     /// Applies so far; mixed into each Random seed.
     seeds: u64,
+    /// Every seed is this one (tests set it).
+    seed_override: Option<u64>,
     reads: ReadCache,
 }
 
@@ -151,6 +156,7 @@ impl Default for SelectModifyModel {
             is_key: false,
             wants_present: false,
             seeds: 0,
+            seed_override: None,
             reads: ReadCache::default(),
         }
     }
@@ -192,6 +198,9 @@ impl SelectModifyModel {
     /// a counter, so two Applies always differ.
     fn next_seed(&mut self) -> u64 {
         self.seeds += 1;
+        if let Some(seed) = self.seed_override {
+            return seed;
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos() as u64);
@@ -275,6 +284,13 @@ impl DocumentModel {
     #[doc(hidden)]
     pub fn set_modify_request_for_test(&mut self, r: ModifyRequest) {
         self.hold_modify_request(r);
+    }
+
+    /// Every later random seed of the panel is `seed` (Swift's
+    /// `nextSeed = { seed }`).
+    #[doc(hidden)]
+    pub fn set_modify_seed_for_test(&mut self, seed: u64) {
+        self.select_modify.seed_override = Some(seed);
     }
 
     /// Exact Mode (Swift `EditorModel.requestExact`): the request's range,
@@ -762,6 +778,15 @@ impl DocumentModel {
         }
     }
 
+    /// Automation Target: condition `i` tests target `t`; its names and
+    /// menus are [`DocumentModel::automation_targets`]
+    /// (`M/SelectModifyModel.swift:459-462`).
+    pub fn set_modify_condition_target(&mut self, i: usize, t: AutomationTargetRow) {
+        if let Some(cond) = self.select_modify.config.select.conditions.get_mut(i) {
+            cond.test = ConditionTest::Automation { target: t };
+        }
+    }
+
     // MARK: The modify half (`M/SelectModifyModel.swift:327-433`)
 
     /// A new operation of kind `k`, with Modify on.
@@ -866,5 +891,124 @@ impl DocumentModel {
         let s = &mut self.select_modify;
         s.config.modify.op = ModifyRow::Substitute { to };
         s.drafts.clear();
+    }
+
+    // MARK: The Strip Chart line (`M/SelectModifyModel.swift:464-528`)
+
+    /// The line being edited, when the operation is one.
+    fn modify_line(&self) -> Option<(LineTargetRow, LineOpRow, vizdaw_ffi::strip::LineRow)> {
+        match &self.select_modify.config.modify.op {
+            ModifyRow::Line { target, op, line } => Some((*target, *op, line.clone())),
+            _ => None,
+        }
+    }
+
+    /// The line edited, with its drafts and invalid fields cleared.
+    fn set_modify_line(
+        &mut self,
+        target: LineTargetRow,
+        op: LineOpRow,
+        line: vizdaw_ffi::strip::LineRow,
+    ) {
+        let s = &mut self.select_modify;
+        s.config.modify.op = ModifyRow::Line { target, op, line };
+        s.clear_fields();
+    }
+
+    /// Legato is for lengths only: any other target makes it Set.
+    fn line_op_for(target: LineTargetRow, op: LineOpRow) -> LineOpRow {
+        let lengths = target
+            == LineTargetRow::Value {
+                target: ValueTargetRow::Duration,
+            };
+        if op == LineOpRow::Legato && !lengths {
+            LineOpRow::Set
+        } else {
+            op
+        }
+    }
+
+    /// The line's target; Legato stays only on lengths.
+    pub fn set_modify_line_target(&mut self, lane: StripLane) {
+        let Some((_, op, line)) = self.modify_line() else {
+            return;
+        };
+        let target = lane.line_target();
+        self.set_modify_line(target, Self::line_op_for(target, op), line);
+    }
+
+    /// The line's operation; Legato on anything but lengths is Set.
+    pub fn set_modify_line_op(&mut self, op: LineOpRow) {
+        let Some((target, _, line)) = self.modify_line() else {
+            return;
+        };
+        self.set_modify_line(target, Self::line_op_for(target, op), line);
+    }
+
+    /// A new shape with its defaults, the Strip Chart bar's settings
+    /// (parked T15); Free is a two-point line from Start to End, and a
+    /// Free line keeps its points.
+    pub fn set_modify_line_shape(&mut self, k: ShapeKind) {
+        let Some((target, op, mut line)) = self.modify_line() else {
+            return;
+        };
+        if k == ShapeKind::Free {
+            if matches!(line.shape, LineShapeRow::Free { .. }) {
+                return;
+            }
+            line.shape = LineShapeRow::Free {
+                points: vec![
+                    LinePointRow {
+                        tick: line.from,
+                        value: line.start,
+                    },
+                    LinePointRow {
+                        tick: line.to,
+                        value: line.end,
+                    },
+                ],
+            };
+        } else {
+            let mut set = *self.strip_settings();
+            set.shape = k;
+            line.shape = set.shape_row(self.select_modify.next_seed());
+        }
+        self.set_modify_line(target, op, line);
+    }
+
+    /// A curved line's curve.
+    pub fn set_modify_line_curve(&mut self, c: CurveRow) {
+        if let ModifyRow::Line { line, .. } = &mut self.select_modify.config.modify.op
+            && let LineShapeRow::Curved { curve } = &mut line.shape
+        {
+            *curve = c;
+        }
+    }
+
+    /// An oscillating line's wave.
+    pub fn set_modify_line_wave(&mut self, w: WaveRow) {
+        if let ModifyRow::Line { line, .. } = &mut self.select_modify.config.modify.op
+            && let LineShapeRow::Oscillator { wave, .. } = &mut line.shape
+        {
+            *wave = w;
+        }
+    }
+
+    /// An oscillating line's period kind, at the bar's period of that kind.
+    pub fn set_modify_line_period_kind(&mut self, k: PeriodKind) {
+        let Some((target, op, mut line)) = self.modify_line() else {
+            return;
+        };
+        let LineShapeRow::Oscillator { wave, phase, .. } = line.shape else {
+            return;
+        };
+        let mut set = *self.strip_settings();
+        set.period = k;
+        line.shape = LineShapeRow::Oscillator {
+            wave,
+            period: set.period_row(),
+            phase,
+        };
+        self.set_modify_line(target, op, line);
     }
 }

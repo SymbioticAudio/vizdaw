@@ -32,12 +32,18 @@ pub const CENTRE_MINIMUM: (f64, f64) = (240., 160.);
 pub const BOTTOM_MINIMUM_WIDTH: f64 = 240.;
 /// A divider's hit area across its line (Swift `PaneDivider.grip`).
 const GRIP: f64 = 7.;
+/// The Controllers view with no track to chart (`S/PaneViews.swift:233`).
+pub const CONTROLLERS_NOTE: &str = "Select a track to see its controllers.";
 /// The mixer's group in the tree: the Mix view's centre and the bottom
 /// pane's Mixer view.
 pub const MIXER: &str = "Mixer";
 /// The editor kinds the bottom pane's picker lists, in Swift's order (the
 /// others come with their editors).
-const KINDS: [DetailEditorKind; 2] = [DetailEditorKind::PianoRoll, DetailEditorKind::List];
+const KINDS: [DetailEditorKind; 3] = [
+    DetailEditorKind::PianoRoll,
+    DetailEditorKind::List,
+    DetailEditorKind::StripChart,
+];
 
 /// A region's rectangle in the area under the transport bar (top-left
 /// origin).
@@ -768,12 +774,13 @@ fn choice_menu(
 }
 
 /// The note a view whose content comes in a later version shows (Swift
-/// `PaneNote`); the strip and controllers views with no track to follow
-/// say so, as Swift's do.
+/// `PaneNote`); the strip view with no track to follow says so, and the
+/// Controllers view whenever it has no chart to show
+/// (`S/PaneViews.swift:223-235`), as Swift's do.
 pub fn note(view: PaneView, nothing_focused: bool) -> String {
     match view {
         PaneView::Strip if nothing_focused => "Select a track to see its channel strip.".into(),
-        PaneView::Controllers if nothing_focused => "Select a track to see its controllers.".into(),
+        PaneView::Controllers => CONTROLLERS_NOTE.into(),
         v => format!("{} comes in a later version.", view_title(v)),
     }
 }

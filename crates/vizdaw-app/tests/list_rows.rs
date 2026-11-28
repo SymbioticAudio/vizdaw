@@ -319,11 +319,21 @@ fn cells_show_every_kind() {
         "the first tempo stays at 0"
     );
     assert!(!ListText::editable(&row(&sysex), ListColumn::Data2));
-    // References, regions and automation are shown, not edited, here.
-    for e in [&reference, &region, &ev(9, 0, EventKindRow::Automation)] {
+    // References and regions are shown, not edited, here.
+    for e in [&reference, &region] {
         for col in ListColumn::ALL {
             assert!(!ListText::editable(&row(e), col), "{:?} {col:?}", e.kind);
         }
+    }
+    // An automation point takes its position, mute and value (Swift
+    // `ListRows.swift:399-420`).
+    let automation = ev(9, 0, EventKindRow::Automation);
+    for col in ListColumn::ALL {
+        let want = matches!(
+            col,
+            ListColumn::Position | ListColumn::Smpte | ListColumn::Mute | ListColumn::Data2
+        );
+        assert_eq!(ListText::editable(&row(&automation), col), want, "{col:?}");
     }
 }
 

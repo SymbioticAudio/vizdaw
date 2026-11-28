@@ -13,15 +13,17 @@ use vizdaw_ffi::modify::{
 use super::model::{DroppedAxis, ModifyRequest};
 use super::{ModifyConfig, PanelTask};
 use crate::arrangement::PPQ;
+use crate::strip_chart::after;
 
-/// Which gesture a drag came from; only note and block drags go exact
-/// (`M/ExactMode.swift:6-11`). The Strip Chart origin is not ported.
+/// Which gesture a drag came from; note and block drags and Strip Chart
+/// strokes go exact (`M/ExactMode.swift:6-11`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum GestureOrigin {
     Notes,
     Blocks,
     RegionStrip,
     Expression,
+    StripChart,
     #[default]
     Other,
 }
@@ -36,6 +38,9 @@ pub fn exact_request(
     origin: GestureOrigin,
 ) -> Option<ModifyRequest> {
     let lanes: Vec<(u64, u64)> = lanes.iter().copied().collect();
+    if origin == GestureOrigin::StripChart {
+        return line_request(cmd, lanes);
+    }
     // The piano roll's scale-time drag acts on the selection.
     if origin == GestureOrigin::Notes
         && let EditCommand::SelectAndModify {
@@ -142,6 +147,39 @@ pub fn exact_request(
         )),
         _ => None,
     }
+}
+
+/// A Strip Chart line or rectangle as the panel set to Change Values with
+/// the line and its Position condition (Plan 4d Ruling 23,
+/// `M/ExactMode.swift:107-120`); `None` for any other command.
+fn line_request(cmd: &EditCommand, lanes: Vec<(u64, u64)>) -> Option<ModifyRequest> {
+    let EditCommand::SelectAndModify {
+        rule,
+        mode,
+        modify: Some(op @ ModifyRow::Line { line, .. }),
+        ..
+    } = cmd
+    else {
+        return None;
+    };
+    let mut c = ModifyConfig::preset(PanelTask::Change, None);
+    c.select.enabled = rule.is_some();
+    c.select.mode = *mode;
+    c.select.conditions = rule
+        .as_ref()
+        .map(|r| r.conditions.clone())
+        .unwrap_or_default();
+    c.modify.enabled = true;
+    c.modify.op = op.clone();
+    c.modify.to_copy = false;
+    Some(ModifyRequest {
+        task: PanelTask::Change,
+        config: c,
+        events: None,
+        lanes,
+        range: Some((line.from, after(line.to))),
+        dropped: None,
+    })
 }
 
 /// A rubber band as Select by Rule: notes starting in `range` with pitches

@@ -38,6 +38,7 @@ use vizdaw_app::editor::{MainView, PaneSide, PaneView, ViewLayouts};
 use vizdaw_app::marker_list::{MarkerList, MarkerListRow};
 use vizdaw_app::mixer::MixerPlacement;
 use vizdaw_app::record::PopoverHost;
+use vizdaw_app::strip_chart::ChartSlot;
 use vizdaw_app::surface_relay::RelayStep;
 use vizdaw_app::transport::Shuttle;
 use vizdaw_app::transport_bar::TransportItem;
@@ -63,6 +64,7 @@ use crate::panes::{self, HostState, PaneDrag};
 use crate::piano_roll::{PianoRoll, RollState};
 use crate::record_popover::{PopoverState, RecordPopover};
 use crate::registry::{RegistryScope, SharedRegistry};
+use crate::strip_chart::{StripChart, StripChartState};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::track_headers::{self, HeaderInput, HeadersState, Rename, TrackHeaders};
 use crate::transport_bar::{self, BarState, FaultsState, Plan, RecordBar, colors};
@@ -133,6 +135,10 @@ pub struct DocumentWindow {
     pub(crate) list_editor: ListEditor,
     /// The Piano Roll (its axes, scroll and bar menus).
     pub(crate) piano_roll: PianoRoll,
+    /// The bottom pane's Strip Chart, and the right pane's Controllers
+    /// chart.
+    pub(crate) strip_chart: StripChart,
+    pub(crate) controllers_chart: StripChart,
     /// The size of the pane host's area (under the transport bar, above
     /// the status line), at the last draw (zero before the first).
     regions: Rc<Cell<gpui::Size<gpui::Pixels>>>,
@@ -346,6 +352,8 @@ impl DocumentWindow {
                     }
                     // A held note or key stops sounding.
                     this.roll_deactivated(cx);
+                    // A Strip Chart stroke goes without an undo step.
+                    this.charts_deactivated(cx);
                 }
             }),
         ];
@@ -367,6 +375,8 @@ impl DocumentWindow {
             let field = this.transport_fields.editing();
             let shuttle = &mut this.shuttle;
             let roll = &mut this.piano_roll;
+            let (pane_chart, controllers_chart) =
+                (&mut this.strip_chart, &mut this.controllers_chart);
             // A sheet's field edit ends with its window: the document's
             // keys come back.
             let sheet_owner = this
@@ -402,6 +412,7 @@ impl DocumentWindow {
                     }
                     if kind == WindowKind::Document {
                         DocumentWindow::roll_closing(roll, d);
+                        DocumentWindow::charts_closing(pane_chart, controllers_chart, d);
                     }
                 });
                 match kind {
@@ -467,6 +478,8 @@ impl DocumentWindow {
             views_seen,
             list_editor,
             piano_roll: PianoRoll::new(cx),
+            strip_chart: StripChart::new(ChartSlot::Pane, cx),
+            controllers_chart: StripChart::new(ChartSlot::Controllers, cx),
             regions: Rc::default(),
             fit_log: Rc::default(),
             mix_view: None,
@@ -1489,6 +1502,7 @@ impl DocumentWindow {
         let detail = self.pane_menu.take().is_some();
         let list = self.list_editor.close_menu();
         let roll = self.piano_roll.close_menu();
+        let charts = self.strip_chart.close_menu() | self.controllers_chart.close_menu();
         if self.menu_bar.as_mut().is_some_and(MenuBar::close)
             || headers
             || more
@@ -1500,6 +1514,7 @@ impl DocumentWindow {
             || detail
             || list
             || roll
+            || charts
         {
             cx.notify();
             return true;
@@ -1753,6 +1768,9 @@ struct RegionParts<'a> {
     pane: &'a DetailPaneState,
     listed: Option<&'a ListState>,
     rolled: Option<RollState>,
+    /// The bottom pane's Strip Chart, and the Controllers chart.
+    charted: Option<StripChartState>,
+    controlled: Option<StripChartState>,
 }
 
 impl DocumentWindow {
@@ -1854,6 +1872,7 @@ impl DocumentWindow {
             window,
             cx,
         );
+        let mut controlled = parts.controlled;
         let mut sides = vec![];
         for side in [PaneSide::Left, PaneSide::Right] {
             let Some(rect) = frames.of(side) else {
@@ -1871,6 +1890,18 @@ impl DocumentWindow {
                 )
             } else if view == PaneView::Plugins {
                 crate::plugins_pane::render(self, &mut scope.container(), window, cx)
+            } else if side == PaneSide::Right
+                && view == PaneView::Controllers
+                && let Some(chart) = controlled.take()
+            {
+                // The focused track's chart (`S/PaneViews.swift:223-235`).
+                crate::strip_chart::render(
+                    &self.controllers_chart,
+                    chart,
+                    &mut scope.container(),
+                    window,
+                    cx,
+                )
             } else {
                 panes::content(view, host, &mut scope.container(), cx)
             };
@@ -1913,6 +1944,7 @@ impl DocumentWindow {
                     parts.pane,
                     parts.listed.map(|l| (&self.list_editor, l)),
                     parts.rolled.map(|r| (&self.piano_roll, r)),
+                    parts.charted.map(|c| (&self.strip_chart, c)),
                     &mut scope,
                     window,
                     cx,
@@ -2212,6 +2244,8 @@ impl Render for DocumentWindow {
             list_after,
             listed,
             rolled,
+            charted,
+            controlled,
             banners,
         ) = {
             let s = self.app.read(cx);
@@ -2265,6 +2299,26 @@ impl Render for DocumentWindow {
                 // The roll's axes first: the notes drawn follow them.
                 d.filter(|d| self.piano_roll.prepare(d))
                     .and_then(|d| RollState::of(d, s.transport(doc), Instant::now())),
+                // The charts' axes first, likewise.
+                d.filter(|d| self.strip_chart.prepare(d)).and_then(|d| {
+                    StripChartState::of(
+                        d,
+                        ChartSlot::Pane,
+                        s.transport(doc),
+                        Instant::now(),
+                        self.strip_chart.row_menu_open(),
+                    )
+                }),
+                d.filter(|d| self.controllers_chart.prepare(d))
+                    .and_then(|d| {
+                        StripChartState::of(
+                            d,
+                            ChartSlot::Controllers,
+                            s.transport(doc),
+                            Instant::now(),
+                            self.controllers_chart.row_menu_open(),
+                        )
+                    }),
                 d.map(banners::bars).unwrap_or_default(),
             )
         };
@@ -2281,6 +2335,20 @@ impl Render for DocumentWindow {
             }
         }
         let roll_mounted = rolled.is_some();
+        for (slot, chart) in [
+            (ChartSlot::Pane, &charted),
+            (ChartSlot::Controllers, &controlled),
+        ] {
+            match chart {
+                Some(c) => {
+                    self.chart_mut(slot).follow(c);
+                    if c.playing() {
+                        window.request_animation_frame();
+                    }
+                }
+                None => self.chart_detach(slot, window, cx),
+            }
+        }
         // The picker's track went: so does the picker.
         if picker.is_none() {
             self.track_headers.input_picker = None;
@@ -2314,6 +2382,19 @@ impl Render for DocumentWindow {
         self.sync_roll_focus(roll_mounted && editor_shown, window, cx);
         if !editor_shown {
             self.piano_roll.menu = None;
+            self.strip_chart.close_menu();
+        }
+        if frames.right.is_none() || controlled.is_none() {
+            self.controllers_chart.close_menu();
+        }
+        // A chart mounted but out of sight (the bottom pane hidden or on
+        // another view, a window too small for the right pane) keeps no
+        // stroke (Review Focus 1).
+        if charted.is_some() && !editor_shown {
+            self.chart_hidden(ChartSlot::Pane, window, cx);
+        }
+        if controlled.is_some() && frames.right.is_none() {
+            self.chart_hidden(ChartSlot::Controllers, window, cx);
         }
         if self.pane_menu.is_some_and(|side| frames.of(side).is_none()) {
             self.pane_menu = None;
@@ -2395,6 +2476,8 @@ impl Render for DocumentWindow {
                 pane: &pane,
                 listed: listed.as_ref(),
                 rolled,
+                charted,
+                controlled,
             },
             &mut root,
             window,

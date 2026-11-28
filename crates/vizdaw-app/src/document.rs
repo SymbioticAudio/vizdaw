@@ -174,6 +174,9 @@ pub struct DocumentModel {
     /// The app's nudge steps, as the UI last handed them before a command
     /// (the nudges' arm reads them; Swift passes `host.nudge`).
     pub(crate) nudge_settings: crate::editing_prefs::NudgeSettings,
+    /// The bottom pane's and the Controllers' Strip Charts, and the
+    /// automation targets they share (slice 10c).
+    pub(crate) strip_charts: crate::strip_chart::StripCharts,
 }
 
 /// What the arrangement reads of one track, read when first asked for.
@@ -310,6 +313,7 @@ impl DocumentModel {
             learn,
             select_modify: Default::default(),
             nudge_settings: Default::default(),
+            strip_charts: Default::default(),
         };
         model.refresh_project_info();
         // The time left reads the core's free space from the start.

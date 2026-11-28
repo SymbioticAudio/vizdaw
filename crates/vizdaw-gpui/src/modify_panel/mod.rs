@@ -16,6 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -27,11 +28,13 @@ use gpui::{
 use vizdaw_app::alerts::AlertItem;
 use vizdaw_app::commands;
 use vizdaw_app::select_modify::{MODIFY_AGAIN_HELP, ModifyConfig, PanelTask};
+use vizdaw_app::strip_chart::AutomationTargets;
 use vizdaw_app::{DocId, DocumentModel, WindowToken};
 use vizdaw_ffi::mixer::DestRow;
 use vizdaw_ffi::modify::{ConditionTest, ModifyRow};
 
 use crate::app_state::{AppState, WindowKind, modify_panel_title};
+use crate::cascade_menu::{CascadeEntry, cascade};
 use crate::menus::{
     CloseWindow, FileCommand, MODIFY_PANEL_CONTEXT, MixerMenuItem, PlayStop, RunCommand,
     RunModifyTemplate, Save, SaveAs, StepKey, StopAndReturn,
@@ -112,6 +115,15 @@ enum PanelMenu {
     Wave,
     Destination,
     Substitute,
+    /// The Strip Chart line's (`S/LineModifyEditor.swift`).
+    LineTarget,
+    LineOp,
+    LineShape,
+    LineCurve,
+    LineWave,
+    LinePeriodKind,
+    /// Condition `i`'s Automation Target.
+    AutomationTarget(usize),
 }
 
 /// A field of the halves: its input and what it was made with.
@@ -164,6 +176,8 @@ pub struct ModifyPanel {
     drawn: BTreeSet<String>,
     /// The open menu.
     menu: Option<PanelMenu>,
+    /// A cascading picker's open submenus (each depth's open row).
+    menu_path: Vec<usize>,
     /// The element id paths of the pickers drawn last frame.
     #[cfg(test)]
     picker_ids: Vec<String>,
@@ -273,6 +287,7 @@ impl ModifyPanel {
             fields: BTreeMap::new(),
             drawn: BTreeSet::new(),
             menu: None,
+            menu_path: Vec::new(),
             #[cfg(test)]
             picker_ids: Vec::new(),
             title,
@@ -396,6 +411,7 @@ impl ModifyPanel {
     }
 
     fn toggle_menu(&mut self, menu: PanelMenu, cx: &mut Context<Self>) {
+        self.menu_path.clear();
         self.menu = if self.menu == Some(menu) {
             None
         } else {
@@ -605,6 +621,93 @@ impl ModifyPanel {
                 d.children(self.popup(id, rows, scope, window, cx))
             })
             .into_any_element()
+    }
+
+    /// The face of cascading picker `menu` (a menu with submenus, as the
+    /// Line Target and Automation Target pickers are), `width` wide,
+    /// labelled `label` and showing `text`; open, `entries` under it
+    /// (built only while it is open: see [`Self::menu_open`]).
+    /// Its wrapper's id is by picker, as [`Self::picker`]'s.
+    #[allow(clippy::too_many_arguments)]
+    fn cascade_picker(
+        &mut self,
+        menu: PanelMenu,
+        label: &str,
+        width: f32,
+        text: &str,
+        entries: Vec<CascadeEntry>,
+        scope: &mut RegistryScope,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let wrapper = format!("modify-picker:{menu:?}");
+        #[cfg(test)]
+        self.picker_ids
+            .push(format!("{wrapper}/mixer-menu:{label}"));
+        let me = cx.entity().downgrade();
+        let toggle = me.clone();
+        let face =
+            crate::controls::menu_face::menu_face(label, text, None, true, scope, move |_, cx| {
+                toggle
+                    .update(cx, |this, cx| this.toggle_menu(menu, cx))
+                    .ok();
+            });
+        let popup = (self.menu == Some(menu)).then(|| {
+            let (opened, closed) = (me.clone(), me);
+            cascade(
+                "modify-cascade-menu",
+                entries,
+                &self.menu_path,
+                None,
+                Rc::new(move |path, _, cx: &mut App| {
+                    opened
+                        .update(cx, |this, cx| {
+                            this.menu_path = path;
+                            cx.notify();
+                        })
+                        .ok();
+                }),
+                Rc::new(move |_, cx: &mut App| {
+                    closed
+                        .update(cx, |this, cx| {
+                            this.menu = None;
+                            this.menu_path.clear();
+                            cx.notify();
+                        })
+                        .ok();
+                }),
+                scope,
+            )
+        });
+        div()
+            .id(gpui::ElementId::Name(wrapper.into()))
+            .relative()
+            .flex_none()
+            .w(px(width))
+            .child(face)
+            .children(popup.into_iter().flatten())
+            .into_any_element()
+    }
+
+    /// Picker `menu` is open.
+    fn menu_open(&self, menu: PanelMenu) -> bool {
+        self.menu == Some(menu)
+    }
+
+    /// A cascading picker's item `title`: a pick runs `pick` on the
+    /// document (the menu then closes).
+    fn cascade_item(
+        &self,
+        title: impl Into<String>,
+        pick: impl Fn(&mut DocumentModel) + 'static,
+        cx: &Context<Self>,
+    ) -> CascadeEntry {
+        let me = cx.entity().downgrade();
+        CascadeEntry::item(title, move |_, cx| {
+            me.update(cx, |this, cx| {
+                this.with_doc(cx, &pick);
+            })
+            .ok();
+        })
     }
 
     /// A picker's rows: one per item, the current one checked; a pick
@@ -924,6 +1027,10 @@ struct Shown {
     config: ModifyConfig,
     /// The session's destinations, read only while a picker shows them.
     dests: Vec<DestRow>,
+    /// The automation targets' names and menus (the document's cache,
+    /// plan Ruling 4), read only while a line or an Automation Target
+    /// condition shows them.
+    targets: Arc<AutomationTargets>,
     templates: Vec<String>,
     notice: Option<String>,
     caption: &'static str,
@@ -946,10 +1053,22 @@ impl Shown {
         } else {
             Vec::new()
         };
+        let wants_targets = matches!(config.modify.op, ModifyRow::Line { .. })
+            || config
+                .select
+                .conditions
+                .iter()
+                .any(|c| matches!(c.test, ConditionTest::Automation { .. }));
+        let targets = if wants_targets {
+            d.automation_targets()
+        } else {
+            Arc::default()
+        };
         Shown {
             task: d.select_modify().task,
             config,
             dests,
+            targets,
             templates: d
                 .modify_templates()
                 .iter()
@@ -1037,8 +1156,16 @@ impl Render for ModifyPanel {
             cx,
             move |d| d.select_modify_mut().config.select.enabled = !select_on,
         );
-        let select = select_on
-            .then(|| self.select_half(&c.select, &shown.dests, &mut body_scope, window, cx));
+        let select = select_on.then(|| {
+            self.select_half(
+                &c.select,
+                &shown.dests,
+                &shown.targets,
+                &mut body_scope,
+                window,
+                cx,
+            )
+        });
         let modify_on = c.modify.enabled;
         let modify_toggle = Self::checkbox(
             "modify-modify-toggle",
@@ -1048,8 +1175,16 @@ impl Render for ModifyPanel {
             cx,
             move |d| d.select_modify_mut().config.modify.enabled = !modify_on,
         );
-        let modify = modify_on
-            .then(|| self.modify_half(&c.modify, &shown.dests, &mut body_scope, window, cx));
+        let modify = modify_on.then(|| {
+            self.modify_half(
+                &c.modify,
+                &shown.dests,
+                &shown.targets,
+                &mut body_scope,
+                window,
+                cx,
+            )
+        });
         self.drop_undrawn_fields(window, cx);
         let divider = || div().flex_none().h(px(1.)).bg(rgb(t.surface_separator));
         let body = div()

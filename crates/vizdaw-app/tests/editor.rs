@@ -396,7 +396,7 @@ fn saving_keeps_ui_json_keys_this_app_does_not_know() {
         "windows": [{"id": "6F9619FF-8B86-D011-B42D-00C04FC964FF",
                      "detail": {"kind": "pianoRoll", "target": {"lane": {"seq": 3, "lane": 30}}},
                      "frame": [1, 2, 3, 4]}],
-        "controllers": {"3:30": [{"kind": "velocity"}]},
+        "controllers": {"3:30": [{"velocity": {}}, {"controller": {"_0": 7}}]},
         "sequenceOrder": [2, 1],
         "transport": {"punch": true},
         "detail": {"kind": "pianoRoll", "target": {"lane": {"seq": 3, "lane": 31}},

@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::automation::{
-    AutomationModeRow, AutomationSettingsRow, AutomationStateRow, GestureHolderRow, GesturePhaseRow,
+    AutomationModeRow, AutomationSettingsRow, AutomationStateRow, GestureHolderRow,
+    GesturePhaseRow, PreviewPointRow,
 };
 use vizdaw_ffi::blocks::{BlockRow, BlockRule};
 use vizdaw_ffi::bundled::DefaultEqRow;
@@ -478,6 +479,16 @@ pub trait DocSession: Send + Sync {
     fn remove_learn(&self, source: LearnSourceRow) -> Result<DocSnapshot, VizError>;
     /// Removes every map to `target`, as one step.
     fn unlearn_target(&self, target: AutomationTargetRow) -> Result<DocSnapshot, VizError>;
+
+    // The Strip Chart (slice 10c).
+
+    /// The write in progress for `target` in the current pass, as it
+    /// would land now (`(tick, value)` in the playing sequence); empty
+    /// when it is not being written (Plan 5e-2 Ruling 9).
+    fn automation_preview(
+        &self,
+        target: AutomationTargetRow,
+    ) -> Result<Vec<PreviewPointRow>, VizError>;
 }
 
 impl DocSession for Session {
@@ -1026,6 +1037,12 @@ impl DocSession for Session {
     }
     fn unlearn_target(&self, target: AutomationTargetRow) -> Result<DocSnapshot, VizError> {
         Session::unlearn_target(self, target)
+    }
+    fn automation_preview(
+        &self,
+        target: AutomationTargetRow,
+    ) -> Result<Vec<PreviewPointRow>, VizError> {
+        Session::automation_preview(self, target)
     }
 }
 

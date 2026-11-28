@@ -11,7 +11,8 @@ use crate::session::IdleNews;
 use std::sync::Arc;
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::automation::{
-    AutomationModeRow, AutomationStateRow, GestureHolderRow, GesturePhaseRow, StripModeRow,
+    AutomationModeRow, AutomationStateRow, GestureHolderRow, GesturePhaseRow, PreviewPointRow,
+    StripModeRow,
 };
 use vizdaw_ffi::blocks::{BlockKind, BlockRow, BlockRule};
 use vizdaw_ffi::control::{ControlArg, ControlValue};
@@ -131,6 +132,8 @@ struct State {
     channel_touches: u32,
     /// What the next `idle()` says of the slots (once).
     idle_slots_changed: bool,
+    /// What `automation_preview` answers, whatever the target.
+    preview_rows: Vec<PreviewPointRow>,
     idle_media_changed: bool,
     idle_problems: Vec<String>,
     /// The scripted region waveforms and their reads.
@@ -617,6 +620,7 @@ impl FakeSession {
             holders: vec![],
             channel_touches: 0,
             idle_slots_changed: false,
+            preview_rows: vec![],
             idle_media_changed: false,
             idle_problems: vec![],
             waves: Waves::default(),
@@ -710,6 +714,11 @@ impl FakeSession {
     /// The snapshot the next `idle()` returns (once).
     pub fn set_idle(&self, s: Option<DocSnapshot>) {
         self.st().idle_snapshot = s;
+    }
+
+    /// What `automation_preview` answers from now on.
+    pub fn set_preview_rows(&self, rows: Vec<PreviewPointRow>) {
+        self.st().preview_rows = rows;
     }
 
     /// Makes the next `idle()` say the slots changed (once).
@@ -2728,6 +2737,15 @@ impl DocSession for FakeSession {
         s.calls.push("set_ui_layout".into());
         s.layout = Some(json);
         Ok(())
+    }
+    fn automation_preview(
+        &self,
+        _target: AutomationTargetRow,
+    ) -> Result<Vec<PreviewPointRow>, VizError> {
+        let mut s = self.st();
+        s.calls.push("automation_preview".into());
+        Self::scripted(&mut s, "automation_preview")?;
+        Ok(s.preview_rows.clone())
     }
     fn mixer(&self) -> Result<MixerSnapshot, VizError> {
         let mut s = self.st();

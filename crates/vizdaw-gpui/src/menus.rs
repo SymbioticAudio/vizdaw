@@ -182,11 +182,12 @@ pub const PLUGIN_MANAGER_CONTEXT: &str = "PluginManagerWindow";
 pub const MODIFY_PANEL_CONTEXT: &str = "ModifyPanel";
 /// The editor commands (`commands::EDITOR_COMMANDS`) the GPUI app routes
 /// to its menus, keys and control channel: the grid, the Piano Roll, the
-/// List, closing the detail, Insert Event (the List's) and the nudges.
+/// List, the Strip Chart, closing the detail, Insert Event (the List's) and the nudges.
 pub const ROUTED_EDITOR_COMMANDS: &[&str] = &[
     "editors.snap",
     "editors.piano_roll",
     "editors.list",
+    "editors.strip_chart",
     "editors.close_detail",
     "editors.insert_event",
     "editors.nudge_earlier",
@@ -699,6 +700,7 @@ pub fn menu_model(front: Option<&DocumentModel>, keymap: &Keymap) -> MenuModel {
                 vec![
                     cmd("editors.piano_roll"),
                     cmd("editors.list"),
+                    cmd("editors.strip_chart"),
                     ItemSpec::Separator,
                     cmd("editors.close_detail"),
                     cmd("editors.insert_event"),

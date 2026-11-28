@@ -3,6 +3,7 @@
 //! `SelectModify.swift`, `ModifyPanel.swift:244-273`). The FFI rows are the
 //! data; this module only names, defaults and assembles them.
 
+use serde::{Deserialize, Serialize};
 use vizdaw_ffi::edit::EditCommand;
 use vizdaw_ffi::events::{AutomationTargetRow, EventKindRow};
 use vizdaw_ffi::modify::{
@@ -13,6 +14,8 @@ use vizdaw_ffi::strip::{LineOpRow, LineRow, LineShapeRow, LineTargetRow, SeriesR
 
 use crate::arrangement::PPQ;
 use crate::editing_prefs::ScaleKind;
+use crate::list::PitchName;
+use crate::strip_chart::StripLane;
 
 pub mod exact;
 mod fields;
@@ -22,8 +25,8 @@ pub use exact::{GestureOrigin, exact_request, select_request};
 
 pub use fields::{
     Edge, Field, FieldKind, GROOVE_HELP, GROOVE_LABEL, NOTE_MAP_PLACEHOLDER, condition_fields,
-    condition_numbers, condition_with, field_text, modify_fields, modify_numbers, modify_with,
-    note_map_text, offsets_text, parse_field, parse_note_map, parse_offsets,
+    condition_numbers, condition_with, field_text, line_unit, modify_fields, modify_numbers,
+    modify_with, note_map_text, offsets_text, parse_field, parse_note_map, parse_offsets, remap,
 };
 
 /// The Modify Again help text (`M/SelectModifyModel.swift:59`).
@@ -266,22 +269,8 @@ impl ConditionKind {
         ConditionKind::Automation,
     ];
 
-    /// The Add Condition menu: every kind but Automation Target, which needs
-    /// the unported Strip Chart's target menus.
-    pub const OFFERED: [ConditionKind; 12] = [
-        ConditionKind::Time,
-        ConditionKind::Kind,
-        ConditionKind::Pitch,
-        ConditionKind::Velocity,
-        ConditionKind::ReleaseVelocity,
-        ConditionKind::Duration,
-        ConditionKind::Value,
-        ConditionKind::Controller,
-        ConditionKind::Destination,
-        ConditionKind::Metric,
-        ConditionKind::EveryNth,
-        ConditionKind::Bracketed,
-    ];
+    /// The Add Condition menu: every kind, as Swift's `allCases` (Ruling 8).
+    pub const OFFERED: [ConditionKind; 13] = Self::ALL;
 
     pub fn title(self) -> &'static str {
         match self {
@@ -497,25 +486,8 @@ impl ModifyKind {
         ModifyKind::Line,
     ];
 
-    /// The Operation picker: every kind but Strip Chart Line, which needs the
-    /// unported Strip Chart.
-    pub const OFFERED: [ModifyKind; 15] = [
-        ModifyKind::Transpose,
-        ModifyKind::Diatonic,
-        ModifyKind::ToScale,
-        ModifyKind::Invert,
-        ModifyKind::NoteMap,
-        ModifyKind::Quantize,
-        ModifyKind::Change,
-        ModifyKind::Move,
-        ModifyKind::ScaleTime,
-        ModifyKind::TrimStart,
-        ModifyKind::SetDest,
-        ModifyKind::Substitute,
-        ModifyKind::Thin,
-        ModifyKind::Thicken,
-        ModifyKind::Delete,
-    ];
+    /// The Operation picker: every kind, as Swift's `allCases` (Ruling 8).
+    pub const OFFERED: [ModifyKind; 16] = Self::ALL;
 
     pub fn title(self) -> &'static str {
         match self {
@@ -559,8 +531,8 @@ impl ModifyKind {
         }
     }
 
-    /// A new modification of this kind. Line is Swift's default line; the
-    /// panel never offers it in this slice.
+    /// A new modification of this kind; Line is Swift's default line
+    /// (`M/SelectModify.swift:292-295`).
     pub fn default_op(self) -> ModifyRow {
         let q = PPQ;
         let major = ScaleKind::Major.mask();
@@ -619,6 +591,55 @@ impl ModifyKind {
     }
 }
 
+/// The Line target picker's first items (Plan 4d Ruling 24,
+/// `M/SelectModifyModel.swift:533-535`): what the Strip Chart's row menu
+/// offers but controllers, poly pressure and automation.
+pub const LINE_TARGET_BASICS: [StripLane; 7] = [
+    StripLane::Velocity,
+    StripLane::ReleaseVelocity,
+    StripLane::Duration,
+    StripLane::PitchBend,
+    StripLane::ChannelPressure,
+    StripLane::Program,
+    StripLane::Tempo,
+];
+
+/// The Line target picker's Controller submenu: 0–127
+/// (`M/SelectModifyModel.swift:536`).
+pub fn line_target_controllers() -> Vec<StripLane> {
+    (0..=127).map(StripLane::Controller).collect()
+}
+
+/// The Line target picker's Poly Pressure submenus: eleven octaves titled
+/// "‹low›–‹high›", as the row menu groups them
+/// (`M/SelectModifyModel.swift:537-542`).
+pub fn line_target_octaves() -> Vec<(String, Vec<StripLane>)> {
+    (0..11u8)
+        .map(|octave| {
+            let lo = octave * 12;
+            let hi = (octave * 12 + 11).min(127);
+            (
+                format!("{}\u{2013}{}", PitchName::name(lo), PitchName::name(hi)),
+                (lo..=hi).map(StripLane::PolyPressure).collect(),
+            )
+        })
+        .collect()
+}
+
+/// The Line operation picker (`S/LineModifyEditor.swift:13-16`).
+pub const LINE_OPS: [(&str, LineOpRow); 10] = [
+    ("Draw", LineOpRow::Draw),
+    ("Set", LineOpRow::Set),
+    ("Scale", LineOpRow::Scale),
+    ("Add", LineOpRow::Add),
+    ("Max Limit", LineOpRow::LimitMax),
+    ("Min Limit", LineOpRow::LimitMin),
+    ("Compress", LineOpRow::Compress),
+    ("Thin", LineOpRow::Thin),
+    ("Thicken", LineOpRow::Thicken),
+    ("Legato", LineOpRow::Legato),
+];
+
 /// The step's name as the undo menu shows it (Swift `ModifyKind.title(_:)`
 /// and `lineTitle`, `M/SelectModify.swift:300-340`).
 pub fn modify_title(op: &ModifyRow) -> &'static str {
@@ -647,7 +668,8 @@ pub fn modify_title(op: &ModifyRow) -> &'static str {
     }
 }
 
-fn line_title(t: &LineTargetRow, op: LineOpRow) -> &'static str {
+/// The undo step's name of a line (the core's).
+pub fn line_title(t: &LineTargetRow, op: LineOpRow) -> &'static str {
     match (op, t) {
         (LineOpRow::Draw, LineTargetRow::Tempo) => "Draw Tempo",
         (
@@ -924,8 +946,10 @@ impl CurveKind {
     }
 }
 
-/// An oscillating amount's wave (`S/ModifyPanel.swift:373-377`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// An oscillating amount's wave (`S/ModifyPanel.swift:373-377`); Swift's
+/// JSON is `sine`, `square`, `triangle` and `saw` (`M/StripChart.swift:42`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum WaveKind {
     Sine,
     Square,

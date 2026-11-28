@@ -6076,3 +6076,152 @@ fn gpui_nudge_moves_the_selection_and_says_why_not() {
     );
     app.quit();
 }
+
+// ---- Slice 10c: the Strip Chart and the panel's Strip Chart Line. The
+// control channel has no `ui.drag` (Ruling 9), so the strokes are left
+// to the GPUI tests and M28.
+
+/// The labels of the buttons inside the `group` "Strip Chart" whose
+/// label starts with `prefix` (the chart's values; the tree is flat, so
+/// "inside" is by path).
+fn chart_values(nodes: &Value, prefix: &str) -> Option<Vec<String>> {
+    let chart = find_group(nodes, "Strip Chart")?;
+    let path = path_of(&chart)?.to_owned();
+    Some(
+        nodes
+            .as_array()?
+            .iter()
+            .filter(|n| under(n, &path) && n["role"] == "button")
+            .filter_map(|n| n["label"].as_str())
+            .filter(|l| l.starts_with(prefix))
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
+/// Clicks the node with role `role` labelled `label` in window `w`.
+fn click_role(app: &mut App, w: &Value, role: &str, label: &str) {
+    let n = wait_in_tree(app, w, label, |t| find_role(t, role, label));
+    app.call("ui.click", json!({"window": w, "element": n["id"]}));
+}
+
+/// Polls the tree until the node with role `role` labelled `label` has
+/// the value `value`.
+fn wait_for_role_value(app: &mut App, w: &Value, role: &str, label: &str, value: &str) {
+    wait_in_tree(app, w, &format!("{role} {label} = {value:?}"), |t| {
+        find_role(t, role, label).filter(|n| n["value"].as_str() == Some(value))
+    });
+}
+
+/// Editors › Strip Chart over the demo's Chords block: the chart draws a
+/// velocity row with a button per value, Rows + adds a Volume row, its
+/// menu turns it into Pitch Bend, the bar's Mode goes to Modify, and all
+/// three survive Save As and reopen.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_strip_chart_opens_draws_rows_and_saves_them() {
+    let home = temp_home();
+    let (mut app, w) = start_demo(home.path());
+
+    // 1. The chart opens on the Chords block.
+    select_chords(&mut app, &w);
+    run_in(&mut app, &w, "editors.strip_chart", json!({}));
+    wait_for_editor(&mut app, &w, "the Strip Chart", |e| {
+        e["detail"]["kind"] == "strip_chart"
+    });
+
+    // 2. Its group, a value per event and one row.
+    wait_in_tree(&mut app, &w, "the Strip Chart's values", |t| {
+        let values = chart_values(t, "Velocity ")?;
+        (!values.is_empty()).then_some(())?;
+        find_role(t, "text", "Rows: 1")
+    });
+
+    // 3. Rows +: a second row, on Volume.
+    click_role(&mut app, &w, "button", "Increase Rows");
+    wait_in_tree(&mut app, &w, "Rows: 2", |t| find_role(t, "text", "Rows: 2"));
+    wait_for_role_value(&mut app, &w, "menu", "Row 2", "Controller 7 (Volume)");
+
+    // 4. Row 2's menu › Pitch Bend.
+    click_role(&mut app, &w, "menu", "Row 2");
+    click_role(&mut app, &w, "menuitem", "Pitch Bend");
+    wait_for_role_value(&mut app, &w, "menu", "Row 2", "Pitch Bend");
+
+    // 5. Mode › Modify shows the Operation picker.
+    click_role(&mut app, &w, "button", "Modify");
+    wait_in_tree(&mut app, &w, "the Operation picker", |t| {
+        find_role(t, "menu", "Operation")
+    });
+
+    // 6. Saved with the project.
+    let path = home.path().join("strip-chart.vizdaw");
+    run_in(&mut app, &w, "file.save_as", json!({"path": path}));
+    app.call("command.run", json!({"id": "file.close", "window": w}));
+    let w2 = app.call("app.open", json!({"path": path}))["window"].clone();
+    app.wait(&w2, json!({"condition": "documents_at_least", "count": 1}));
+    wait_for_editor(&mut app, &w2, "the reopened Strip Chart", |e| {
+        e["detail"]["kind"] == "strip_chart"
+    });
+    wait_in_tree(&mut app, &w2, "the reopened chart's rows", |t| {
+        find_role(t, "text", "Rows: 2")
+    });
+    wait_for_role_value(&mut app, &w2, "menu", "Row 2", "Pitch Bend");
+    wait_in_tree(&mut app, &w2, "Modify selected", |t| {
+        find_role(t, "button", "Modify").filter(|n| n["selected"] == true)
+    });
+    app.quit();
+}
+
+/// The panel's Strip Chart Line sets the Chords block's velocities in
+/// bar 1 to 100 as one "Change Velocity" step, which the Strip Chart
+/// reads back; Modify Again repeats it; and Add Condition offers the
+/// Automation Target condition.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_modify_strip_chart_line_sets_velocities() {
+    let home = temp_home();
+    let (mut app, w) = start_demo(home.path());
+
+    // 1. Change on the Chords block.
+    select_chords(&mut app, &w);
+    run_in(&mut app, &w, "modify.change", json!({}));
+    let panel = wait_for_modify_panel(&mut app)["number"].clone();
+
+    // 2. Operation › Strip Chart Line, on Velocity.
+    click_role(&mut app, &panel, "menu", "Operation");
+    click_role(&mut app, &panel, "menuitem", "Strip Chart Line");
+    wait_for_role_value(&mut app, &panel, "menu", "Line Target", "Velocity");
+
+    // 3. A flat line at 100, applied.
+    type_into_field(&mut app, &panel, "start", "100");
+    type_into_field(&mut app, &panel, "end", "100");
+    click_button(&mut app, &panel, "Apply");
+    wait_for_undo(&mut app, &w, "Change Velocity");
+
+    // 4. The chart reads 100 for every value in bar 1 (the default line
+    // runs 0 to 4q).
+    run_in(&mut app, &w, "editors.strip_chart", json!({}));
+    wait_in_tree(&mut app, &w, "bar 1 at velocity 100", |t| {
+        let values = chart_values(t, "Velocity ")?;
+        let bar1: Vec<&String> = values.iter().filter(|l| l.contains(", bar 1 ")).collect();
+        (!bar1.is_empty() && bar1.iter().all(|l| l.starts_with("Velocity 100, bar 1 ")))
+            .then_some(())
+    });
+
+    // 5. Modify Again repeats it.
+    let v0 = app.call("state.get", json!({"target": "document", "window": w}))["version"].clone();
+    run_in(&mut app, &w, "modify.again", json!({}));
+    wait_for_state(&mut app, &w, "document", |d| {
+        d["version"] != v0 && d["undo"] == "Change Velocity"
+    });
+
+    // 6. With the Select half on, Add Condition › Automation Target adds
+    // its picker.
+    click_role(&mut app, &panel, "checkbox", "Select");
+    click_role(&mut app, &panel, "menu", "Add Condition");
+    click_role(&mut app, &panel, "menuitem", "Automation Target");
+    wait_in_tree(&mut app, &panel, "the Automation Target picker", |t| {
+        find_role(t, "menu", "Automation Target")
+    });
+    app.quit();
+}

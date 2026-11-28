@@ -348,11 +348,14 @@ fn editors_piano_roll_opens_the_roll(cx: &mut TestAppContext) {
     assert_eq!(s.model(|d| d.tool()), Tool::Pencil);
     assert!(s.roll_control("button", "Pencil").selected);
 
-    // The pane's picker lists the Piano Roll, then the List, then the
-    // pane's other views (slice 6a).
+    // The pane's picker lists the Piano Roll, the List and the Strip
+    // Chart, then the pane's other views (slice 6a, slice 10c).
     s.click_picker();
     let items: Vec<String> = s.menu_items().into_iter().map(|e| e.label).collect();
-    assert_eq!(items, [ROLL, "List", "Audio Editor", "Mixer"]);
+    assert_eq!(
+        items,
+        [ROLL, "List", "Strip Chart", "Audio Editor", "Mixer"]
+    );
     assert!(s.element("menuitem", ROLL).selected);
     let list = s.element("menuitem", "List");
     s.click_at(list.bounds.center());
@@ -1341,7 +1344,7 @@ fn the_key_strip_keeps_to_its_keys(cx: &mut TestAppContext) {
 /// double-click opens the Piano Roll, and a save keeps the saved value.
 #[gpui::test]
 fn an_unported_last_editor_double_click_opens_the_roll(cx: &mut TestAppContext) {
-    for json in ["stripChart", "drumGrid"] {
+    for json in ["drumGrid"] {
         let fake = roll_fake();
         fake.set_layout(Some(&format!(r#"{{"lastKind":"{json}"}}"#)));
         let mut s = setup(cx, fake);

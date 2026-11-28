@@ -14,7 +14,7 @@ pub use detail::{DetailEditorKind, DetailState, EditorTarget, ListFilter};
 pub use gesture::{Gesture, LANE_REMOVED};
 pub use layout::{
     BlockRuleSetting, EditorLayout, LightMode, MainView, PaneSetup, PaneSide, PaneState, PaneView,
-    TransportMarks, ViewLayouts, off_list,
+    TransportMarks, ViewLayouts, controllers_key, off_list,
 };
 pub use nudge::NudgeDirection;
 pub use snap::{Division, Snap};

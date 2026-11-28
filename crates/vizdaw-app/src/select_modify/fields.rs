@@ -6,6 +6,7 @@ use vizdaw_ffi::events::MeterEntryRow;
 use vizdaw_ffi::modify::{
     AmountRow, ChangeOpRow, ConditionTest, ModifyRow, NoteMapEntry, SubstituteRow, ValueTargetRow,
 };
+use vizdaw_ffi::strip::{LineOpRow, LinePointRow, LineRow, LineShapeRow, LineTargetRow, PeriodRow};
 
 use crate::arrangement::PPQ;
 use crate::list::{Bbu, DurationText, PitchName, Value7, Velocity7, parse_position, trim_ws};
@@ -318,8 +319,118 @@ fn change_fields(t: ValueTargetRow, op: &ChangeOpRow, a: &AmountRow) -> Vec<Fiel
     }
 }
 
-/// A modification's fields (`PanelFields.swift:258-273`). The Strip Chart
-/// line is out of scope and shows none.
+/// What a line's values are typed in (Plan 4d Ruling 18,
+/// `PanelFields.swift:183-193`).
+pub fn line_unit(t: &LineTargetRow, op: LineOpRow) -> FieldKind {
+    let e = if op == LineOpRow::Add {
+        Edge::Delta
+    } else {
+        Edge::Exact
+    };
+    if op == LineOpRow::Scale {
+        return FieldKind::Percent;
+    }
+    match t {
+        LineTargetRow::Tempo => FieldKind::Bpm,
+        LineTargetRow::Value {
+            target: ValueTargetRow::Velocity | ValueTargetRow::ReleaseVelocity,
+        } => FieldKind::Velocity(e),
+        LineTargetRow::Value {
+            target: ValueTargetRow::Duration,
+        } => FieldKind::Length,
+        _ => FieldKind::Value(e),
+    }
+}
+
+/// A line's fields (`PanelFields.swift:195-208`).
+fn line_fields(t: &LineTargetRow, op: LineOpRow, l: &LineRow) -> Vec<Field> {
+    use FieldKind as K;
+    let u = line_unit(t, op);
+    let mut f = vec![
+        field("from", K::Position),
+        field("to", K::Position),
+        field("start", u),
+        field("end", u),
+        field("step", K::Length),
+    ];
+    if let LineShapeRow::Oscillator { period, .. } = &l.shape {
+        f.push(match period {
+            PeriodRow::Ticks { .. } => field("period", K::Length),
+            PeriodRow::Millis { .. } => field("period (ms)", K::Bounded(1, 600_000)),
+            PeriodRow::Bars { .. } => field("period (bars)", K::Bounded(1, 1_000)),
+        });
+        f.push(field("phase (\u{2030})", K::Bounded(0, 999)));
+    }
+    f
+}
+
+/// `t` moved from range `a` to range `b` in proportion (a zero-width `a`
+/// maps to `b`'s start), inside `b` (`PanelFields.swift:210-218`).
+pub fn remap(t: i64, a: (i64, i64), b: (i64, i64)) -> i64 {
+    let span = a.1 as f64 - a.0 as f64;
+    if span <= 0. {
+        return b.0;
+    }
+    let x = (t as f64 - a.0 as f64) / span;
+    let v = (b.0 as f64 + x * (b.1 as f64 - b.0 as f64)).round();
+    // Swift's `min(max(v, b.0), b.1)`; `as` saturates.
+    v.max(b.0 as f64).min(b.1 as f64) as i64
+}
+
+/// A line's numbers (`PanelFields.swift:220-231`).
+fn line_numbers(l: &LineRow) -> Vec<i64> {
+    let mut n = vec![l.from, l.to, l.start, l.end, l.step];
+    if let LineShapeRow::Oscillator { period, phase, .. } = &l.shape {
+        n.push(match *period {
+            PeriodRow::Ticks { ticks } => ticks,
+            PeriodRow::Millis { ms } => ms.into(),
+            PeriodRow::Bars { bars } => bars.into(),
+        });
+        n.push((*phase).into());
+    }
+    n
+}
+
+/// The line with numbers `n` (`PanelFields.swift:233-256`): "to" at least
+/// "from", "step" and the period at least 1, the phase 0–999; a Free
+/// line's points move with its range.
+fn line_with(l: &LineRow, n: &[i64]) -> LineRow {
+    let mut o = l.clone();
+    o.from = n[0];
+    o.to = n[1].max(n[0]);
+    if let LineShapeRow::Free { points } = &l.shape
+        && (o.from != l.from || o.to != l.to)
+    {
+        o.shape = LineShapeRow::Free {
+            points: points
+                .iter()
+                .map(|p| LinePointRow {
+                    tick: remap(p.tick, (l.from, l.to), (o.from, o.to)),
+                    value: p.value,
+                })
+                .collect(),
+        };
+    }
+    o.start = n[2];
+    o.end = n[3];
+    o.step = n[4].max(1);
+    if let LineShapeRow::Oscillator { wave, period, .. } = &l.shape {
+        let v = n[5].max(1);
+        let period = match period {
+            PeriodRow::Ticks { .. } => PeriodRow::Ticks { ticks: v },
+            PeriodRow::Millis { .. } => PeriodRow::Millis { ms: u32_of(v) },
+            PeriodRow::Bars { .. } => PeriodRow::Bars { bars: u32_of(v) },
+        };
+        o.shape = LineShapeRow::Oscillator {
+            wave: *wave,
+            period,
+            phase: n[6].clamp(0, 999) as u16,
+        };
+    }
+    o
+}
+
+/// A modification's fields (`PanelFields.swift:258-273`).
 pub fn modify_fields(r: &ModifyRow) -> Vec<Field> {
     use FieldKind as K;
     match r {
@@ -341,12 +452,12 @@ pub fn modify_fields(r: &ModifyRow) -> Vec<Field> {
             to: SubstituteRow::Pitch { .. },
         } => vec![field("pitch", K::Pitch)],
         ModifyRow::Thin { .. } | ModifyRow::Thicken { .. } => vec![field("spacing", K::Length)],
+        ModifyRow::Line { target, op, line } => line_fields(target, *op, line),
         ModifyRow::TransposeToScale { .. }
         | ModifyRow::NoteMap { .. }
         | ModifyRow::SetDest { .. }
         | ModifyRow::Substitute { .. }
-        | ModifyRow::Delete
-        | ModifyRow::Line { .. } => Vec::new(),
+        | ModifyRow::Delete => Vec::new(),
     }
 }
 
@@ -384,12 +495,12 @@ pub fn modify_numbers(r: &ModifyRow) -> Vec<i64> {
             to: SubstituteRow::Pitch { pitch },
         } => vec![(*pitch).into()],
         ModifyRow::Thin { spacing } | ModifyRow::Thicken { spacing } => vec![*spacing],
+        ModifyRow::Line { line, .. } => line_numbers(line),
         ModifyRow::TransposeToScale { .. }
         | ModifyRow::NoteMap { .. }
         | ModifyRow::SetDest { .. }
         | ModifyRow::Substitute { .. }
-        | ModifyRow::Delete
-        | ModifyRow::Line { .. } => Vec::new(),
+        | ModifyRow::Delete => Vec::new(),
     }
 }
 
@@ -492,12 +603,16 @@ pub fn modify_with(r: &ModifyRow, n: &[i64]) -> Option<ModifyRow> {
         ModifyRow::Thicken { .. } => ModifyRow::Thicken {
             spacing: at(0).max(1),
         },
+        ModifyRow::Line { target, op, line } => ModifyRow::Line {
+            target: *target,
+            op: *op,
+            line: line_with(line, n),
+        },
         ModifyRow::TransposeToScale { .. }
         | ModifyRow::NoteMap { .. }
         | ModifyRow::SetDest { .. }
         | ModifyRow::Substitute { .. }
-        | ModifyRow::Delete
-        | ModifyRow::Line { .. } => r.clone(),
+        | ModifyRow::Delete => r.clone(),
     })
 }
 

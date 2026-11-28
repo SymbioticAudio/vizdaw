@@ -3,8 +3,9 @@
 //! `ui.json`, written on Save, never an undo step. Decoding is tolerant (a
 //! missing or malformed field keeps its default); writing merges into the
 //! JSON already there, so keys this app does not model (torn windows,
-//! controllers, …) survive.
+//! the drum grid, …) survive.
 
+use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 
 use serde::de::DeserializeOwned;
@@ -16,6 +17,7 @@ use super::detail::{DetailEditorKind, DetailState};
 use super::snap::Snap;
 use crate::arrangement::PPQ;
 use crate::piano_roll::PianoRollSettings;
+use crate::strip_chart::{StripChartSettings, StripLane};
 
 /// Light drawing mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -498,6 +500,28 @@ pub struct EditorLayout {
     pub piano_roll: PianoRollSettings,
     /// The locators, punch range and record modes (`transport`).
     pub transport: TransportMarks,
+    /// Every Strip Chart's bar (`stripChart`, Plan 4d Ruling 21).
+    pub strip_chart: StripChartSettings,
+    /// The right pane's controllers chart rows, per track (`controllers`,
+    /// keyed by `controllers_key`; Plan 7a Ruling 7).
+    pub controllers: BTreeMap<String, Vec<StripLane>>,
+}
+
+/// The `controllers` key of a track: `"seq:lane"`
+/// (`M/EditorLayout.swift:67`).
+pub fn controllers_key(seq: u64, lane: u64) -> String {
+    format!("{seq}:{lane}")
+}
+
+/// The `controllers` map; an entry that fails to decode is dropped, and
+/// anything but an object is empty.
+fn decode_controllers(v: &Value) -> BTreeMap<String, Vec<StripLane>> {
+    let Some(obj) = v.as_object() else {
+        return BTreeMap::new();
+    };
+    obj.iter()
+        .filter_map(|(k, rows)| Some((k.clone(), Vec::<StripLane>::deserialize(rows).ok()?)))
+        .collect()
 }
 
 impl Default for EditorLayout {
@@ -514,6 +538,8 @@ impl Default for EditorLayout {
             views: ViewLayouts::default(),
             piano_roll: PianoRollSettings::default(),
             transport: TransportMarks::default(),
+            strip_chart: StripChartSettings::default(),
+            controllers: BTreeMap::new(),
         }
     }
 }
@@ -593,6 +619,12 @@ impl EditorLayout {
             transport: obj
                 .get("transport")
                 .map_or_else(TransportMarks::default, TransportMarks::decode),
+            strip_chart: obj
+                .get("stripChart")
+                .map_or_else(StripChartSettings::default, StripChartSettings::decode),
+            controllers: obj
+                .get("controllers")
+                .map_or_else(BTreeMap::new, decode_controllers),
         }
     }
 
@@ -611,6 +643,8 @@ impl EditorLayout {
             ("views", Some(to_value(&self.views))),
             ("pianoRoll", Some(to_value(&self.piano_roll))),
             ("transport", Some(to_value(&self.transport))),
+            ("stripChart", Some(to_value(&self.strip_chart))),
+            ("controllers", Some(to_value(&self.controllers))),
         ]
     }
 
@@ -645,11 +679,12 @@ impl EditorLayout {
 
 /// Struct-shaped objects are merged into what is there, so keys this app
 /// does not model inside them survive; enum-shaped values (`blockRule`,
-/// `lastKind`, `lightMode`, `detail.target`) and the detail itself (its
-/// unmodelled fields ride in `DetailState::extra`) are replaced whole.
+/// `lastKind`, `lightMode`, `detail.target`), the `controllers` map and
+/// the detail itself (its unmodelled fields ride in `DetailState::extra`)
+/// are replaced whole.
 fn merge_key(key: &str, old: Option<&Value>, new: Value) -> Value {
     match key {
-        "snap" | "pianoRoll" | "transport" => merge_struct(old, new, &[]),
+        "snap" | "pianoRoll" | "transport" | "stripChart" => merge_struct(old, new, &[]),
         "views" => {
             let mut views = merge_struct(old, new, &["frame"]);
             for main in ["arrange", "mix"] {

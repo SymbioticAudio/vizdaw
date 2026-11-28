@@ -349,12 +349,9 @@ fn panes_follow_the_layout(cx: &mut TestAppContext) {
         s.picker(RIGHT).and_then(|e| e.value).as_deref(),
         Some("Controllers")
     );
-    // A track is selected: the controllers come later.
+    // A track is selected: its Strip Chart.
     assert!(s.find("text", CONTROLLERS_NOTE).is_none());
-    assert!(
-        s.find("text", "Controllers comes in a later version.")
-            .is_some()
-    );
+    assert!(s.find("group", "Strip Chart").is_some());
 
     // Hidden: the centre takes the room.
     s.run_menu("ui.toggle_left");
@@ -515,7 +512,7 @@ fn pane_pickers_choose_views(cx: &mut TestAppContext) {
     s.click_picker(BOTTOM);
     assert_eq!(
         s.menu_items(),
-        ["Piano Roll", "List", "Audio Editor", "Mixer"]
+        ["Piano Roll", "List", "Strip Chart", "Audio Editor", "Mixer"]
     );
     assert!(s.element("menuitem", "Piano Roll").selected);
     s.click("menuitem", "Mixer");
@@ -553,7 +550,10 @@ fn pane_pickers_choose_views(cx: &mut TestAppContext) {
     s.run_menu("ui.view_mix");
     s.run_menu("ui.toggle_bottom");
     s.click_picker(BOTTOM);
-    assert_eq!(s.menu_items(), ["Piano Roll", "List", "Audio Editor"]);
+    assert_eq!(
+        s.menu_items(),
+        ["Piano Roll", "List", "Strip Chart", "Audio Editor"]
+    );
     s.click("menuitem", "Audio Editor");
     assert_eq!(s.pane(PaneSide::Bottom).view, PaneView::AudioEditor);
     assert!(
