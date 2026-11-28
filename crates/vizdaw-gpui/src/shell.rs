@@ -1345,6 +1345,8 @@ impl DocumentWindow {
     /// song they check or save.
     pub fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.end_rename(true, window, cx);
+        // A drum row's too.
+        self.end_drum_rename(true, false, window, cx);
         // A strip's rename in the mixer too.
         for placed in [
             &self.mix_view,

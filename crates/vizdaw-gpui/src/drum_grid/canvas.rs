@@ -121,9 +121,10 @@ impl DrumGridView {
     /// Drops the press (the window cancels its stroke). Whether there was
     /// one.
     pub(super) fn drop_press(&mut self) -> bool {
-        let had = self.pressing();
+        let had = self.pressing() || self.headers.drag.is_some();
         self.press = None;
         self.ruler = None;
+        self.headers.drag = None;
         had
     }
 
@@ -616,6 +617,7 @@ impl DocumentWindow {
     /// The document window closes: the grid's stroke goes first.
     pub(crate) fn drum_closing(grid: &mut DrumGridView, d: &mut DocumentModel) {
         grid.drop_press();
+        grid.end_rename_closing(d);
         d.drum_stroke_cancelled();
     }
 
@@ -635,7 +637,7 @@ impl DocumentWindow {
 
     /// Escape on the canvas: a press is dropped, a stroke cancelled
     /// without an undo step. Whether there was anything to cancel.
-    fn cancel_drum(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(super) fn cancel_drum(&mut self, cx: &mut Context<Self>) -> bool {
         let stroke = self
             .read_model(cx, |d| d.drum_stroke().is_some())
             .unwrap_or(false);
@@ -821,7 +823,7 @@ impl DocumentWindow {
 
     /// The wheel: scrolls the time and the bands (inside them); with the
     /// secondary modifier it zooms about the pointer.
-    fn drum_wheel(&mut self, e: &ScrollEvent, cx: &mut Context<Self>) {
+    pub(super) fn drum_wheel(&mut self, e: &ScrollEvent, cx: &mut Context<Self>) {
         let (precise, dx, dy) = match e.delta {
             ScrollDelta::Pixels(p) => (true, f32::from(p.x), f32::from(p.y)),
             ScrollDelta::Lines(p) => (false, p.x, p.y),

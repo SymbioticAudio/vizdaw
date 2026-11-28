@@ -875,3 +875,370 @@ fn the_wheel_zoom_is_saved(cx: &mut TestAppContext) {
         .unwrap();
     assert_eq!(axis, after);
 }
+
+// ---- The row headers (Swift `T/DrumGridViewTests.swift`) ----
+//
+// Header points: x from the headers' left edge, y in content points (the
+// headers' y less the ruler), as the canvas's.
+
+fn drum(edit: DrumEdit) -> EditCommand {
+    EditCommand::Drum { edit }
+}
+
+/// The row menu's items, in order (`E/DrumRowHeaderView.swift:222-236`).
+const ROW_MENU: [&str; 4] = [
+    "Rename\u{2026}",
+    "Show Velocity",
+    "Split Row to Own Track",
+    "Remove Row",
+];
+
+impl Setup {
+    /// Window point of header point `(x, y)`.
+    fn header_at(&mut self, x: f32, y: f32) -> gpui::Point<Pixels> {
+        let o = self.control("group", ROWS).bounds.origin;
+        point(o.x + px(x), o.y + px(RULER_HEIGHT + y))
+    }
+
+    fn right_click_at(&mut self, position: gpui::Point<Pixels>) {
+        self.cx.simulate_event(MouseDownEvent {
+            position,
+            modifiers: Modifiers::none(),
+            button: MouseButton::Right,
+            click_count: 1,
+            first_mouse: false,
+        });
+        self.cx.simulate_event(MouseUpEvent {
+            position,
+            modifiers: Modifiers::none(),
+            button: MouseButton::Right,
+            click_count: 1,
+        });
+        self.cx.run_until_parked();
+    }
+
+    /// The row being renamed.
+    fn drum_renaming(&mut self) -> Option<DrumRowKey> {
+        self.window
+            .read_with(&self.cx, |v, _| v.drum_renaming())
+            .unwrap()
+    }
+
+    /// The `button`s under "Drum Rows".
+    fn row_buttons(&mut self) -> Vec<Element> {
+        let g = self.control("group", ROWS);
+        self.elements()
+            .into_iter()
+            .filter(|e| {
+                e.path.len() > g.path.len() && e.path.starts_with(&g.path) && e.role == "button"
+            })
+            .collect()
+    }
+
+    /// The open menu's items.
+    fn menu_items(&mut self) -> Vec<Element> {
+        self.elements()
+            .into_iter()
+            .filter(|e| e.role == "menuitem")
+            .collect()
+    }
+
+    fn choose(&mut self, item: &str) {
+        let e = self
+            .find("menuitem", item)
+            .unwrap_or_else(|| panic!("no menuitem {item:?}"));
+        self.click_at(e.bounds.center(), 1);
+    }
+
+    /// The rows of the first two tracks swap Kick and Snare (a fresh
+    /// read).
+    fn swap_kick_and_snare(&mut self) {
+        let mut lanes = self.fake.drum_lanes(3).expect("the drum lanes");
+        lanes[0].rows.swap(0, 1);
+        self.fake.set_drum_lanes(3, lanes);
+        self.update_model(|d| {
+            d.mark_drum_lane(3, 30, true);
+        });
+        assert_eq!(self.model(|d| d.drum_row(0, 0)).unwrap().name, "Snare");
+    }
+}
+
+#[gpui::test]
+fn a_row_header_drag_moves_the_row_and_a_double_click_renames(cx: &mut TestAppContext) {
+    let mut s = drums_grid(cx);
+    // Kick dragged onto Clap (content 84–104): into Perc.
+    let (from, to) = (s.header_at(20., 30.), s.header_at(20., 95.));
+    s.down(from);
+    s.move_to(to);
+    s.up(to);
+    assert_eq!(
+        s.edits().last(),
+        Some(&drum(DrumEdit::MoveRowToLane {
+            seq: 3,
+            lane: 40,
+            row: 1,
+            to_lane: 41,
+        }))
+    );
+    // A press without a drag only selects.
+    let n = s.edits().len();
+    let snare = s.header_at(20., 50.);
+    s.click_at(snare, 1);
+    assert_eq!(s.edits().len(), n);
+    assert_eq!(
+        s.model(|d| d.drum_selected_row()),
+        Some(DrumRowKey { lane: 40, row: 2 })
+    );
+    // A double-click renames.
+    s.click_at(snare, 2);
+    assert_eq!(s.drum_renaming(), Some(DrumRowKey { lane: 40, row: 2 }));
+    assert!(!s.model(|d| d.transport_keys_enabled()));
+    s.cx.simulate_input("Rim");
+    s.keys("enter");
+    assert_eq!(
+        s.edits().last(),
+        Some(&drum(DrumEdit::RenameRow {
+            seq: 3,
+            lane: 40,
+            row: 2,
+            name: "Rim".into(),
+        }))
+    );
+    assert_eq!(s.edits().len(), n + 1);
+    assert_eq!(s.drum_renaming(), None);
+    assert!(s.model(|d| d.transport_keys_enabled()));
+    // The row menu, a separator after its second item.
+    let kick = s.header_at(20., 30.);
+    s.right_click_at(kick);
+    let items = s.menu_items();
+    assert_eq!(
+        items.iter().map(|e| e.label.as_str()).collect::<Vec<_>>(),
+        ROW_MENU
+    );
+    let gap = |a: &Element, b: &Element| f32::from(b.bounds.top() - a.bounds.bottom());
+    assert!(
+        gap(&items[1], &items[2]) > gap(&items[0], &items[1]),
+        "a separator after Show Velocity"
+    );
+    assert!(gap(&items[2], &items[3]) < gap(&items[1], &items[2]));
+    s.keys("escape");
+    assert!(s.menu_items().is_empty(), "Escape closes the menu");
+    // The tree.
+    assert_eq!(
+        s.row_buttons()
+            .iter()
+            .map(|e| e.label.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "Kick, C2, Drums, Kit",
+            "Snare, D2, Drums, Kit",
+            "Clap, D#2, Perc, Kit"
+        ]
+    );
+    let selected: Vec<bool> = s.row_buttons().iter().map(|e| e.selected).collect();
+    assert_eq!(selected, [true, false, false], "Kick was selected last");
+    // Pressing one selects it (a real click at its centre).
+    let clap = s.row_buttons()[2].clone();
+    s.click_at(clap.bounds.center(), 1);
+    assert_eq!(
+        s.model(|d| d.drum_selected_row()),
+        Some(DrumRowKey { lane: 41, row: 3 })
+    );
+    assert_eq!(s.edits().len(), n + 1, "a press sends nothing");
+}
+
+#[gpui::test]
+fn escape_in_the_rename_field_cancels_the_rename(cx: &mut TestAppContext) {
+    let mut s = drums_grid(cx);
+    let snare = s.header_at(20., 50.);
+    s.click_at(snare, 2);
+    assert!(s.drum_renaming().is_some());
+    s.cx.simulate_input("Rim");
+    s.keys("escape");
+    assert!(s.edits().is_empty(), "{:?}", s.edits());
+    assert_eq!(s.drum_renaming(), None, "the field is gone");
+    assert!(s.model(|d| d.transport_keys_enabled()));
+    assert_eq!(s.model(|d| d.drum_row(0, 1)).unwrap().name, "Snare");
+    // A blur commits.
+    s.click_at(snare, 2);
+    s.cx.simulate_input("Rim");
+    let canvas = s.at(85., -10.);
+    s.click_at(canvas, 1);
+    assert_eq!(s.drum_renaming(), None);
+    assert_eq!(
+        s.edits(),
+        [drum(DrumEdit::RenameRow {
+            seq: 3,
+            lane: 40,
+            row: 2,
+            name: "Rim".into(),
+        })]
+    );
+}
+
+/// Ruling 9: the grid leaving its pane ends the rename without renaming.
+#[gpui::test]
+fn leaving_the_pane_ends_the_rename_without_renaming(cx: &mut TestAppContext) {
+    let mut s = drums_grid(cx);
+    let snare = s.header_at(20., 50.);
+    s.click_at(snare, 2);
+    s.cx.simulate_input("Rim");
+    s.update_model(|d| d.show_detail(DetailEditorKind::List));
+    assert_eq!(s.drum_renaming(), None);
+    assert!(s.model(|d| d.transport_keys_enabled()));
+    assert!(s.edits().is_empty(), "{:?}", s.edits());
+
+    let mut s = drums_grid(cx);
+    let snare = s.header_at(20., 50.);
+    s.click_at(snare, 2);
+    s.cx.simulate_input("Rim");
+    s.update_model(|d| d.update_layout(|l| l.views.current_mut().bottom.shown = false));
+    assert_eq!(s.drum_renaming(), None);
+    assert!(s.model(|d| d.transport_keys_enabled()));
+    assert!(s.edits().is_empty(), "{:?}", s.edits());
+}
+
+/// Review Focus 1.
+#[gpui::test]
+fn escape_during_a_row_header_drag_drops_nothing(cx: &mut TestAppContext) {
+    let mut s = drums_grid(cx);
+    let (from, to) = (s.header_at(20., 30.), s.header_at(20., 95.));
+    s.down(from);
+    s.move_to(to);
+    s.keys("escape");
+    s.up(to);
+    assert!(s.edits().is_empty(), "{:?}", s.edits());
+    // With the keyboard still on the headers, Escape cancels the grid's
+    // open stroke.
+    s.update_model(|d| {
+        d.drum_stroke_began(0, 1, 0, 0, 384, None, false);
+        d.drum_stroke_moved(3 * S16, 384, None);
+    });
+    assert!(s.model(|d| d.gesture().is_some()), "the gesture opened");
+    s.keys("escape");
+    assert_eq!(s.last_edit_call().as_deref(), Some("abort_edit"));
+    assert!(s.no_stroke());
+}
+
+/// A header press, as any new press, first cancels a stroke whose release
+/// was lost.
+#[gpui::test]
+fn a_header_press_cancels_a_stroke_whose_release_was_lost(cx: &mut TestAppContext) {
+    let mut s = drums_grid(cx);
+    s.mid_stroke();
+    let at = s.header_at(20., 30.);
+    s.down(at);
+    assert_eq!(s.last_edit_call().as_deref(), Some("abort_edit"));
+    assert!(s.no_stroke());
+    s.up(at);
+    assert!(!s.edit_calls().iter().any(|c| c == "end_edit"));
+}
+
+#[gpui::test]
+fn the_row_menu_shows_velocity_and_splits(cx: &mut TestAppContext) {
+    let mut s = drums_grid(cx);
+    let snare = s.header_at(20., 50.);
+    s.right_click_at(snare);
+    assert_eq!(
+        s.model(|d| d.drum_selected_row()),
+        Some(DrumRowKey { lane: 40, row: 2 })
+    );
+    assert!(!s.find("menuitem", "Show Velocity").unwrap().selected);
+    s.choose("Show Velocity");
+    assert_eq!(
+        s.edits().last(),
+        Some(&drum(DrumEdit::ShowVelocity {
+            seq: 3,
+            lane: 40,
+            row: 2,
+            show: true,
+        }))
+    );
+    assert!(s.menu_items().is_empty(), "the menu closed");
+    s.right_click_at(snare);
+    s.choose("Split Row to Own Track");
+    assert_eq!(
+        s.edits().last(),
+        Some(&drum(DrumEdit::SplitRow {
+            seq: 3,
+            lane: 40,
+            row: 2,
+        }))
+    );
+    // Rename… opens the field.
+    s.right_click_at(snare);
+    s.choose("Rename\u{2026}");
+    assert_eq!(s.drum_renaming(), Some(DrumRowKey { lane: 40, row: 2 }));
+
+    // A shown velocity lane is checked, and the item hides it.
+    let mut s = velocity_grid(cx);
+    let snare = s.header_at(20., 50.);
+    s.right_click_at(snare);
+    assert!(s.find("menuitem", "Show Velocity").unwrap().selected);
+    s.choose("Show Velocity");
+    assert_eq!(
+        s.edits(),
+        [drum(DrumEdit::ShowVelocity {
+            seq: 3,
+            lane: 40,
+            row: 2,
+            show: false,
+        })]
+    );
+}
+
+/// Review Focus 2: a drop and the row menu act on the row the user acted
+/// on, by its ID, after the rows changed under them.
+#[gpui::test]
+fn a_drop_and_the_row_menu_act_on_the_row_pressed_after_the_rows_reorder(cx: &mut TestAppContext) {
+    let mut s = drums_grid(cx);
+    // Snare pressed and dragged onto Clap; Kick and Snare swap.
+    let (from, to) = (s.header_at(20., 50.), s.header_at(20., 95.));
+    s.down(from);
+    s.move_to(to);
+    s.swap_kick_and_snare();
+    s.up(to);
+    assert_eq!(
+        s.edits().last(),
+        Some(&drum(DrumEdit::MoveRowToLane {
+            seq: 3,
+            lane: 40,
+            row: 2,
+            to_lane: 41,
+        }))
+    );
+
+    let mut s = drums_grid(cx);
+    // The menu opened on Snare; the rows swap and Kick is selected.
+    let snare = s.header_at(20., 50.);
+    s.right_click_at(snare);
+    s.swap_kick_and_snare();
+    s.update_model(|d| d.drum_select(0, 1));
+    assert_eq!(
+        s.model(|d| d.drum_selected_row()),
+        Some(DrumRowKey { lane: 40, row: 1 })
+    );
+    s.choose("Remove Row");
+    assert_eq!(
+        s.edits().last(),
+        Some(&drum(DrumEdit::RemoveRow {
+            seq: 3,
+            lane: 40,
+            row: 2,
+        }))
+    );
+
+    // A row gone under its menu: nothing is removed.
+    let mut s = drums_grid(cx);
+    s.right_click_at(snare);
+    let mut lanes = s.fake.drum_lanes(3).expect("the drum lanes");
+    lanes[0].rows.retain(|r| r.id != 2);
+    s.fake.set_drum_lanes(3, lanes);
+    s.update_model(|d| {
+        d.mark_drum_lane(3, 30, true);
+    });
+    s.update_model(|d| d.drum_select(0, 0));
+    let n = s.edits().len();
+    s.choose("Remove Row");
+    assert_eq!(s.edits().len(), n, "{:?}", s.edits());
+}

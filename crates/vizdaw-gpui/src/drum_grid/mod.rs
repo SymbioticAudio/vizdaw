@@ -14,6 +14,9 @@
 //! `drum_open_lane`.
 
 mod canvas;
+mod headers;
+
+pub use headers::{REMOVE_ROW, RENAME, SHOW_VELOCITY, SPLIT_ROW};
 
 use std::cell::Cell;
 use std::collections::HashSet;
@@ -134,6 +137,8 @@ pub struct DrumGridView {
     /// The bands' height at the last prepare (the wheel's vertical
     /// clamp).
     content_height: f32,
+    /// The row headers: their keyboard, drag, menu and rename field.
+    headers: headers::Headers,
 }
 
 impl DrumGridView {
@@ -150,6 +155,7 @@ impl DrumGridView {
             press: None,
             ruler: None,
             content_height: 0.,
+            headers: headers::Headers::new(cx),
         }
     }
 
@@ -178,7 +184,7 @@ impl DrumGridView {
 
     /// Closes the bar's menu; false when none was open.
     pub(crate) fn close_menu(&mut self) -> bool {
-        self.menu.take().is_some()
+        self.menu.take().is_some() | self.headers.menu.take().is_some()
     }
 
     /// Before drawing: whether the grid shows (the pane's detail is the
@@ -352,7 +358,7 @@ pub(crate) fn render(
     let body = if state.lanes.is_empty() {
         empty_state(&state, &mut scope.container(), cx)
     } else {
-        body(view, &state, &mut scope.container(), cx)
+        body(view, &state, &mut scope.container(), window, cx)
     };
     div()
         .flex()
@@ -372,20 +378,10 @@ fn body(
     view: &DrumGridView,
     state: &DrumGridState,
     scope: &mut RegistryScope,
+    window: &Window,
     cx: &mut Context<DocumentWindow>,
 ) -> AnyElement {
-    let rows = scope.container();
-    let headers = div()
-        .relative()
-        .flex_none()
-        .w(px(HEADER_WIDTH))
-        .h_full()
-        .overflow_hidden()
-        .bg(rgb(bar_colors::bar()))
-        .border_r_1()
-        .border_color(rgb(bar_colors::border()))
-        .child(rows.this("group", ROWS_GROUP, true))
-        .child(rows.clip());
+    let headers = headers::row_headers(view, state, &mut scope.container(), window, cx);
     let canvas = canvas::grid_canvas(view, state, &mut scope.container(), cx);
     div()
         .flex()
@@ -770,6 +766,8 @@ impl DocumentWindow {
             return;
         }
         self.end_drum_stroke(cx);
+        // A rename ends without renaming (Ruling 9).
+        self.end_drum_rename(false, false, window, cx);
         self.drum_grid.unmount();
         self.drum_unfocus(window, cx);
     }
@@ -779,6 +777,7 @@ impl DocumentWindow {
     /// stroke, no menu and no keyboard.
     pub(crate) fn drum_hidden(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.end_drum_stroke(cx);
+        self.end_drum_rename(false, false, window, cx);
         self.drum_grid.close_menu();
         self.drum_unfocus(window, cx);
     }
@@ -786,11 +785,14 @@ impl DocumentWindow {
     /// A grid out of sight that kept the keyboard gives it back to the
     /// window.
     fn drum_unfocus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.drum_grid.focus.is_focused(window) {
+        let held = |g: &DrumGridView, window: &Window| {
+            g.focus.is_focused(window) || g.headers.focus.is_focused(window)
+        };
+        if !held(&self.drum_grid, window) {
             return;
         }
         cx.defer_in(window, move |this, window, cx| {
-            if this.drum_grid.focus.is_focused(window) {
+            if held(&this.drum_grid, window) {
                 window.focus(&this.focus_handle(cx), cx);
             }
         });
