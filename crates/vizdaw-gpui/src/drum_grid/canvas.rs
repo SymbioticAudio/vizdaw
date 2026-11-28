@@ -671,6 +671,9 @@ impl DocumentWindow {
     /// starts a click or a range drag; on a row it starts a stroke
     /// (`E/DrumGridView.swift:240-248,283-287`).
     fn drum_mouse_down(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // A stroke still held lost its release: it goes first, wherever
+        // this press lands (Swift's `ToolMachine.down`).
+        self.end_drum_stroke(cx);
         let g = &mut self.drum_grid;
         window.focus(&g.focus, cx);
         let at = g.content_point(e.position);

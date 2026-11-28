@@ -746,8 +746,35 @@ fn closing_the_window_mid_stroke_leaves_no_undo_step(cx: &mut TestAppContext) {
         .update(&mut s.cx, |_, window, _| window.remove_window())
         .unwrap();
     s.cx.run_until_parked();
+    // The window is gone: only the edit calls can be checked.
     assert_eq!(s.last_edit_call().as_deref(), Some("abort_edit"));
     assert!(!s.edit_calls().iter().any(|c| c == "end_edit"));
+}
+
+/// A press off a row (the ruler, a header band, the new-track band)
+/// cancels a stroke whose release was lost (Swift's `ToolMachine.down`).
+#[gpui::test]
+fn a_ruler_or_header_press_cancels_a_stroke_whose_release_was_lost(cx: &mut TestAppContext) {
+    // (ruler, Perc's header band, the new-track band)
+    for y in [-10., 70., 110.] {
+        let mut s = drums_grid(cx);
+        s.mid_stroke();
+        // The release went elsewhere: a new press lands off the rows.
+        let at = s.at(200., y);
+        s.down(at);
+        assert_eq!(
+            s.last_edit_call().as_deref(),
+            Some("abort_edit"),
+            "at y {y}"
+        );
+        assert!(s.no_stroke(), "at y {y}");
+        let n = s.edit_calls().len();
+        let to = s.at(260., y);
+        s.move_to(to);
+        s.up(to);
+        assert_eq!(s.edit_calls().len(), n, "at y {y}: nothing after");
+        assert!(!s.edit_calls().iter().any(|c| c == "end_edit"));
+    }
 }
 
 /// The stroke's track removed under it, with its gesture open and before
