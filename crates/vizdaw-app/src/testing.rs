@@ -16,6 +16,7 @@ use vizdaw_ffi::automation::{
 };
 use vizdaw_ffi::blocks::{BlockKind, BlockRow, BlockRule};
 use vizdaw_ffi::control::{ControlArg, ControlValue};
+use vizdaw_ffi::drum::{DrumEdit, DrumHitRow, DrumLaneRow, DrumRowRow};
 use vizdaw_ffi::edit::{
     EditCommand, LaneEdit, LaneInputRow, LaneRef, MonitorModeRow, ViewFilterRow,
 };
@@ -162,6 +163,16 @@ struct State {
     surfaces: Surfaces,
     /// Select and Modify templates and Modify Again (slice 10b).
     modify: Modify,
+    /// The Drum Grid's drum tracks (slice 10d).
+    drums: Drums,
+}
+
+/// The fake's Drum Grid side (slice 10d): the drum tracks per sequence
+/// and their reads.
+#[derive(Default)]
+struct Drums {
+    lanes: HashMap<u64, Vec<DrumLaneRow>>,
+    reads: usize,
 }
 
 /// The fake's Select and Modify side (slice 10b): the templates by name,
@@ -639,6 +650,7 @@ impl FakeSession {
             windows: Windows::default(),
             surfaces: Surfaces::default(),
             modify: Modify::default(),
+            drums: Drums::default(),
         }))
     }
 
@@ -1079,6 +1091,16 @@ impl FakeSession {
     /// `lanes` calls.
     pub fn lanes_reads(&self) -> usize {
         self.st().lanes_reads
+    }
+
+    /// Scripts the drum tracks `drum_lanes(seq)` returns.
+    pub fn set_drum_lanes(&self, seq: u64, rows: Vec<DrumLaneRow>) {
+        self.st().drums.lanes.insert(seq, rows);
+    }
+
+    /// `drum_lanes` calls.
+    pub fn drum_lanes_reads(&self) -> usize {
+        self.st().drums.reads
     }
 
     /// `lane_events` calls.
@@ -2419,6 +2441,15 @@ impl DocSession for FakeSession {
             } => Some("Set Track Monitor"),
             _ => None,
         };
+        // Like the core: marking a lane gives it (or takes away) its drum
+        // layout.
+        if let EditCommand::Drum {
+            edit: DrumEdit::MarkLane { seq, lane, drum },
+        } = &cmd
+            && let Some(l) = Self::lane_mut(&mut s, *seq, *lane)
+        {
+            l.is_drum = *drum;
+        }
         if let EditCommand::Lane { edit } = &cmd {
             match edit {
                 LaneEdit::Rename { seq, lane, name } => {
@@ -2746,6 +2777,13 @@ impl DocSession for FakeSession {
         s.calls.push("automation_preview".into());
         Self::scripted(&mut s, "automation_preview")?;
         Ok(s.preview_rows.clone())
+    }
+    fn drum_lanes(&self, seq: u64) -> Result<Vec<DrumLaneRow>, VizError> {
+        let mut s = self.st();
+        s.drums.reads += 1;
+        s.calls.push("drum_lanes".into());
+        Self::scripted(&mut s, "drum_lanes")?;
+        Ok(s.drums.lanes.get(&seq).cloned().unwrap_or_default())
     }
     fn mixer(&self) -> Result<MixerSnapshot, VizError> {
         let mut s = self.st();
@@ -3947,6 +3985,86 @@ pub fn editor_fake() -> FakeSession {
         }],
     );
     f.set_blocks(3, 31, vec![block_row(0, BAR, &[1])]);
+    f
+}
+
+/// A drum hit a sixteenth long, velocity `100 << 9` (Swift `drumHit`).
+pub fn drum_hit(id: u64, tick: i64) -> DrumHitRow {
+    DrumHitRow {
+        id,
+        tick,
+        duration: 15_360 / 4,
+        velocity: 100 << 9,
+        mute: false,
+    }
+}
+
+/// A drum row on the track's destination "Kit", velocity lane hidden
+/// (Swift `drumRow`).
+pub fn drum_row(id: u64, name: &str, note: u8, hits: Vec<DrumHitRow>) -> DrumRowRow {
+    DrumRowRow {
+        id,
+        name: name.into(),
+        note,
+        dest: None,
+        destination: Some("Kit".into()),
+        show_velocity: false,
+        hits,
+    }
+}
+
+/// A drum track on destination "Kit", no quantize or nudge.
+fn drum_lane(lane: u64, name: &str, rows: Vec<DrumRowRow>) -> DrumLaneRow {
+    DrumLaneRow {
+        lane,
+        name: name.into(),
+        destination: Some("Kit".into()),
+        mute: false,
+        solo: false,
+        play_quantize: None,
+        play_shift: 0,
+        rows,
+    }
+}
+
+/// Sequence 3 of [`editor_fake`] with drum tracks "Drums" (40: Kick 1
+/// with hits 11 at 0 and 12 at a beat, Snare 2 with hit 13 at a beat) and
+/// "Perc" (41: Clap 3), beside Groove (30, MIDI) and Vocals (42, audio)
+/// (Swift `drumFake`, `T/DrumGridModelTests.swift:18-41`).
+pub fn drum_fake() -> FakeSession {
+    const Q: i64 = 15_360;
+    let f = editor_fake();
+    let drums = LaneRow {
+        is_drum: true,
+        ..lane_row(40, "Drums", false)
+    };
+    let perc = LaneRow {
+        is_drum: true,
+        ..lane_row(41, "Perc", false)
+    };
+    let vocals = LaneRow {
+        kind: TrackKindRow::Audio,
+        ..lane_row(42, "Vocals", false)
+    };
+    f.set_lanes(3, vec![lane_row(30, "Groove", false), drums, perc, vocals]);
+    f.set_info(3, four_four(3));
+    // The snapshot lists the new tracks' revisions (Swift adds them by
+    // hand).
+    FakeSession::sync_revs(&mut f.st());
+    f.set_drum_lanes(
+        3,
+        vec![
+            drum_lane(
+                40,
+                "Drums",
+                vec![
+                    drum_row(1, "Kick", 36, vec![drum_hit(11, 0), drum_hit(12, Q)]),
+                    drum_row(2, "Snare", 38, vec![drum_hit(13, Q)]),
+                ],
+            ),
+            drum_lane(41, "Perc", vec![drum_row(3, "Clap", 39, vec![])]),
+        ],
+    );
     f
 }
 

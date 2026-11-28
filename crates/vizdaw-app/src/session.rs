@@ -10,6 +10,7 @@ use vizdaw_ffi::automation::{
 use vizdaw_ffi::blocks::{BlockRow, BlockRule};
 use vizdaw_ffi::bundled::DefaultEqRow;
 use vizdaw_ffi::control::ControlArg;
+use vizdaw_ffi::drum::DrumLaneRow;
 use vizdaw_ffi::edit::{EditCommand, MonitorModeRow, ViewFilterRow};
 use vizdaw_ffi::events::{AutomationTargetRow, LaneEvents, MarkerRow, SequenceInfo};
 use vizdaw_ffi::host::InputDeviceRow;
@@ -489,6 +490,11 @@ pub trait DocSession: Send + Sync {
         &self,
         target: AutomationTargetRow,
     ) -> Result<Vec<PreviewPointRow>, VizError>;
+
+    // The Drum Grid (slice 10d).
+
+    /// The drum tracks of sequence `seq`, in track order.
+    fn drum_lanes(&self, seq: u64) -> Result<Vec<DrumLaneRow>, VizError>;
 }
 
 impl DocSession for Session {
@@ -1043,6 +1049,9 @@ impl DocSession for Session {
         target: AutomationTargetRow,
     ) -> Result<Vec<PreviewPointRow>, VizError> {
         Session::automation_preview(self, target)
+    }
+    fn drum_lanes(&self, seq: u64) -> Result<Vec<DrumLaneRow>, VizError> {
+        Session::drum_lanes(self, seq)
     }
 }
 

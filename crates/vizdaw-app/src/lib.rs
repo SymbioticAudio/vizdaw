@@ -18,6 +18,7 @@ pub mod close_prompts;
 pub mod commands;
 pub mod dawproject;
 pub mod document;
+pub mod drum_grid;
 pub mod editing_prefs;
 pub mod editor;
 pub mod for_daw;

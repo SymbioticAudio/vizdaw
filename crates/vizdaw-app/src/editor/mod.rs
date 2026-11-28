@@ -12,6 +12,7 @@ mod snap;
 
 pub use detail::{DetailEditorKind, DetailState, EditorTarget, ListFilter};
 pub use gesture::{Gesture, LANE_REMOVED};
+pub(crate) use layout::field;
 pub use layout::{
     BlockRuleSetting, EditorLayout, LightMode, MainView, PaneSetup, PaneSide, PaneState, PaneView,
     TransportMarks, ViewLayouts, controllers_key, off_list,

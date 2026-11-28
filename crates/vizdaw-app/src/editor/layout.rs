@@ -16,6 +16,7 @@ use vizdaw_ffi::blocks::BlockRule;
 use super::detail::{DetailEditorKind, DetailState};
 use super::snap::Snap;
 use crate::arrangement::PPQ;
+use crate::drum_grid::DrumGridSettings;
 use crate::piano_roll::PianoRollSettings;
 use crate::strip_chart::{StripChartSettings, StripLane};
 
@@ -502,6 +503,8 @@ pub struct EditorLayout {
     pub transport: TransportMarks,
     /// Every Strip Chart's bar (`stripChart`, Plan 4d Ruling 21).
     pub strip_chart: StripChartSettings,
+    /// Every Drum Grid's bar (`drumGrid`, Plan 4e Ruling 11).
+    pub drum_grid: DrumGridSettings,
     /// The right pane's controllers chart rows, per track (`controllers`,
     /// keyed by `controllers_key`; Plan 7a Ruling 7).
     pub controllers: BTreeMap<String, Vec<StripLane>>,
@@ -539,13 +542,14 @@ impl Default for EditorLayout {
             piano_roll: PianoRollSettings::default(),
             transport: TransportMarks::default(),
             strip_chart: StripChartSettings::default(),
+            drum_grid: DrumGridSettings::default(),
             controllers: BTreeMap::new(),
         }
     }
 }
 
 /// `obj[key]` as a `T`, or `fallback` when missing or malformed.
-fn field<T: DeserializeOwned>(obj: &Map<String, Value>, key: &str, fallback: T) -> T {
+pub(crate) fn field<T: DeserializeOwned>(obj: &Map<String, Value>, key: &str, fallback: T) -> T {
     obj.get(key)
         .and_then(|v| T::deserialize(v).ok())
         .unwrap_or(fallback)
@@ -622,6 +626,9 @@ impl EditorLayout {
             strip_chart: obj
                 .get("stripChart")
                 .map_or_else(StripChartSettings::default, StripChartSettings::decode),
+            drum_grid: obj
+                .get("drumGrid")
+                .map_or_else(DrumGridSettings::default, DrumGridSettings::decode),
             controllers: obj
                 .get("controllers")
                 .map_or_else(BTreeMap::new, decode_controllers),
@@ -644,6 +651,7 @@ impl EditorLayout {
             ("pianoRoll", Some(to_value(&self.piano_roll))),
             ("transport", Some(to_value(&self.transport))),
             ("stripChart", Some(to_value(&self.strip_chart))),
+            ("drumGrid", Some(to_value(&self.drum_grid))),
             ("controllers", Some(to_value(&self.controllers))),
         ]
     }
@@ -684,7 +692,9 @@ impl EditorLayout {
 /// are replaced whole.
 fn merge_key(key: &str, old: Option<&Value>, new: Value) -> Value {
     match key {
-        "snap" | "pianoRoll" | "transport" | "stripChart" => merge_struct(old, new, &[]),
+        "snap" | "pianoRoll" | "transport" | "stripChart" | "drumGrid" => {
+            merge_struct(old, new, &[])
+        }
         "views" => {
             let mut views = merge_struct(old, new, &["frame"]);
             for main in ["arrange", "mix"] {
