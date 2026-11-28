@@ -583,3 +583,16 @@
    - The exact-mode drag is covered by the app tests and one GPUI test that drives the mouse in the test context (Task 8), and on screen by M27.
    - The e2e checks the `modify.exact_mode` toggle through `state.get editor` and runs the panel's Move from `modify.move`.
    - Cost if wrong: a wiring bug between the real window's mouse events and `end_gesture` that only M27 would catch.
+
+## Outcome (2026-11-27)
+
+All 10 tasks reviewed clean; the final review found 0 Critical, 0 Important, 3 Minor. Rulings made while running it:
+
+1. Save as Template's one-way name field was promoted to a fix (Task 5): the field now always shows the name Save uses.
+2. Duplicate GPUI ids on same-label pickers were promoted to a fix (Task 6): each picker has its own id.
+3. Off macOS a ⌃⌘ chord yields to the plain ⌘ chord on the same key, so Select by Rule and Move… have no Linux key (Save and Paste keep Ctrl+S and Ctrl+V).
+4. Off macOS the hidden-selection text names View > Arrange View, because ⌃1 opens the Piano Roll there.
+5. The panel window forwards the document's chords to its document; bare transport keys stay off in it. Nudges are refused while the panel is key, as in Swift.
+6. Esc during an Exact Mode revert that is waiting on a busy core opens no panel (Swift's retry would).
+7. Panel Apply and template runs don't refuse a hidden selection, as in Swift (backlog).
+
