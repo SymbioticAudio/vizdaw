@@ -13,7 +13,8 @@ use core_control::registry;
 use gpui::{Action, App, Global, KeyBinding, Menu, MenuItem, SharedString, actions};
 use vizdaw_app::DocumentModel;
 use vizdaw_app::commands::{
-    self, DOCUMENT_COMMANDS, MIXER_COMMANDS, MODIFY_COMMANDS, TRANSPORT_COMMANDS, VIEW_COMMANDS,
+    self, DOCUMENT_COMMANDS, DRUM_COMMANDS, MIXER_COMMANDS, MODIFY_COMMANDS, TRANSPORT_COMMANDS,
+    VIEW_COMMANDS,
 };
 
 use crate::text_input;
@@ -182,12 +183,14 @@ pub const PLUGIN_MANAGER_CONTEXT: &str = "PluginManagerWindow";
 pub const MODIFY_PANEL_CONTEXT: &str = "ModifyPanel";
 /// The editor commands (`commands::EDITOR_COMMANDS`) the GPUI app routes
 /// to its menus, keys and control channel: the grid, the Piano Roll, the
-/// List, the Strip Chart, closing the detail, Insert Event (the List's) and the nudges.
+/// List, the Strip Chart, the Drum Grid, closing the detail, Insert Event
+/// (the List's) and the nudges. The torn-off windows come later.
 pub const ROUTED_EDITOR_COMMANDS: &[&str] = &[
     "editors.snap",
     "editors.piano_roll",
     "editors.list",
     "editors.strip_chart",
+    "editors.drum_grid",
     "editors.close_detail",
     "editors.insert_event",
     "editors.nudge_earlier",
@@ -197,12 +200,13 @@ pub const ROUTED_EDITOR_COMMANDS: &[&str] = &[
 ];
 
 /// Whether the menus, keys and control channel route `id` to
-/// `commands::run`: the document, editor, view, mixer and Modify commands
-/// (`commands::VIEW_COMMANDS`, `commands::MIXER_COMMANDS`,
-/// `commands::MODIFY_COMMANDS`).
+/// `commands::run`: the document, editor, Drum, view, mixer and Modify
+/// commands (`commands::DRUM_COMMANDS`, `commands::VIEW_COMMANDS`,
+/// `commands::MIXER_COMMANDS`, `commands::MODIFY_COMMANDS`).
 pub fn routed(id: &str) -> bool {
     DOCUMENT_COMMANDS.contains(&id)
         || ROUTED_EDITOR_COMMANDS.contains(&id)
+        || DRUM_COMMANDS.contains(&id)
         || VIEW_COMMANDS.contains(&id)
         || MIXER_COMMANDS.contains(&id)
         || MODIFY_COMMANDS.contains(&id)
@@ -462,6 +466,7 @@ fn bound_ids() -> Vec<&'static str> {
     DOCUMENT_COMMANDS
         .iter()
         .chain(ROUTED_EDITOR_COMMANDS)
+        .chain(&DRUM_COMMANDS)
         .chain(VIEW_COMMANDS)
         .chain(MIXER_COMMANDS)
         .chain(MODIFY_COMMANDS)
@@ -622,6 +627,8 @@ fn command(id: &'static str, front: Option<&DocumentModel>, keymap: &Keymap) -> 
             | "step.dot"
             | "step.triplet"
             | "modify.exact_mode"
+            | "drum.show_velocity"
+            | "drum.timeline"
     )
     .then(|| front.is_some_and(|d| commands::is_on(id, d)));
     ItemSpec::Command {
@@ -701,6 +708,7 @@ pub fn menu_model(front: Option<&DocumentModel>, keymap: &Keymap) -> MenuModel {
                     cmd("editors.piano_roll"),
                     cmd("editors.list"),
                     cmd("editors.strip_chart"),
+                    cmd("editors.drum_grid"),
                     ItemSpec::Separator,
                     cmd("editors.close_detail"),
                     cmd("editors.insert_event"),
@@ -724,6 +732,19 @@ pub fn menu_model(front: Option<&DocumentModel>, keymap: &Keymap) -> MenuModel {
                     cmd("track.duplicate"),
                     cmd("track.delete"),
                     cmd("track.rename"),
+                ],
+            ),
+            // After Track (Plan 10d Ruling 7). No default keys (Plan 4e
+            // Ruling 13). Swift `S/AppCommands.swift:311-318`.
+            menu(
+                "Drum",
+                vec![
+                    cmd("drum.add_row"),
+                    cmd("drum.show_velocity"),
+                    cmd("drum.split_row"),
+                    cmd("drum.remove_row"),
+                    ItemSpec::Separator,
+                    cmd("drum.timeline"),
                 ],
             ),
             menu("Transport", transport_items(front, keymap)),

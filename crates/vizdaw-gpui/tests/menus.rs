@@ -72,6 +72,7 @@ fn the_menu_model_follows_the_swift_order() {
                 "Editors",
                 "Modify",
                 "Track",
+                "Drum",
                 "Transport",
                 "Step",
                 "Automation",
@@ -157,12 +158,12 @@ fn the_menu_model_follows_the_swift_order() {
         assert!(enabled);
     }
     assert_eq!(
-        ids(11),
+        ids(12),
         [Some("window.mixer"), Some("window.plugin_manager")]
     );
     // Swift `AppCommands.swift:354-365`.
     assert_eq!(
-        ids(8),
+        ids(9),
         [
             Some("step.entry"),
             None,
@@ -181,7 +182,7 @@ fn the_menu_model_follows_the_swift_order() {
         ]
     );
     assert!(
-        m.menus[8]
+        m.menus[9]
             .items
             .iter()
             .all(|i| matches!(i, ItemSpec::Command { .. } | ItemSpec::Separator)),
@@ -193,6 +194,7 @@ fn the_menu_model_follows_the_swift_order() {
             Some("editors.piano_roll"),
             Some("editors.list"),
             Some("editors.strip_chart"),
+            Some("editors.drum_grid"),
             None,
             Some("editors.close_detail"),
             Some("editors.insert_event"),
@@ -676,6 +678,12 @@ fn off_macos_the_command_keys_own_the_control_keys() {
     assert_eq!(
         menus::key_text("editors.strip_chart", &keymap, false).as_deref(),
         Some("⌘3")
+    );
+    // ⌘4 is Ctrl+4 off macOS; no ⌃4 chord exists, so nothing yields.
+    assert_eq!(menus::owner(&c("⌃4"), &keymap, false), Some(c("⌘4")));
+    assert_eq!(
+        menus::key_text("editors.drum_grid", &keymap, false).as_deref(),
+        Some("⌘4")
     );
     assert_eq!(
         menus::key_text("ui.toggle_left", &keymap, false).as_deref(),

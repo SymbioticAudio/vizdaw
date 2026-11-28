@@ -52,6 +52,7 @@ use crate::banners;
 use crate::channel_strip_pane;
 use crate::controls::MixerRef;
 use crate::detail_pane::{self, DetailPaneState};
+use crate::drum_grid::{DrumGridState, DrumGridView};
 use crate::frame_stats::{self, FrameStats};
 use crate::list_editor::{ListEditor, ListState};
 use crate::menu_bar::MenuBar;
@@ -139,6 +140,8 @@ pub struct DocumentWindow {
     /// chart.
     pub(crate) strip_chart: StripChart,
     pub(crate) controllers_chart: StripChart,
+    /// The bottom pane's Drum Grid.
+    pub(crate) drum_grid: DrumGridView,
     /// The size of the pane host's area (under the transport bar, above
     /// the status line), at the last draw (zero before the first).
     regions: Rc<Cell<gpui::Size<gpui::Pixels>>>,
@@ -480,6 +483,7 @@ impl DocumentWindow {
             piano_roll: PianoRoll::new(cx),
             strip_chart: StripChart::new(ChartSlot::Pane, cx),
             controllers_chart: StripChart::new(ChartSlot::Controllers, cx),
+            drum_grid: DrumGridView::new(cx),
             regions: Rc::default(),
             fit_log: Rc::default(),
             mix_view: None,
@@ -1502,7 +1506,9 @@ impl DocumentWindow {
         let detail = self.pane_menu.take().is_some();
         let list = self.list_editor.close_menu();
         let roll = self.piano_roll.close_menu();
-        let charts = self.strip_chart.close_menu() | self.controllers_chart.close_menu();
+        let charts = self.strip_chart.close_menu()
+            | self.controllers_chart.close_menu()
+            | self.drum_grid.close_menu();
         if self.menu_bar.as_mut().is_some_and(MenuBar::close)
             || headers
             || more
@@ -1771,6 +1777,8 @@ struct RegionParts<'a> {
     /// The bottom pane's Strip Chart, and the Controllers chart.
     charted: Option<StripChartState>,
     controlled: Option<StripChartState>,
+    /// The bottom pane's Drum Grid.
+    drummed: Option<DrumGridState>,
 }
 
 impl DocumentWindow {
@@ -1945,6 +1953,7 @@ impl DocumentWindow {
                     parts.listed.map(|l| (&self.list_editor, l)),
                     parts.rolled.map(|r| (&self.piano_roll, r)),
                     parts.charted.map(|c| (&self.strip_chart, c)),
+                    parts.drummed.map(|g| (&self.drum_grid, g)),
                     &mut scope,
                     window,
                     cx,
@@ -2246,6 +2255,7 @@ impl Render for DocumentWindow {
             rolled,
             charted,
             controlled,
+            drummed,
             banners,
         ) = {
             let s = self.app.read(cx);
@@ -2319,6 +2329,9 @@ impl Render for DocumentWindow {
                             self.controllers_chart.row_menu_open(),
                         )
                     }),
+                // The grid's axis first, likewise.
+                d.filter(|d| self.drum_grid.prepare(d))
+                    .and_then(|d| DrumGridState::of(d, s.transport(doc), Instant::now())),
                 d.map(banners::bars).unwrap_or_default(),
             )
         };
@@ -2348,6 +2361,11 @@ impl Render for DocumentWindow {
                 }
                 None => self.chart_detach(slot, window, cx),
             }
+        }
+        match &drummed {
+            Some(g) if g.playing() => window.request_animation_frame(),
+            Some(_) => {}
+            None => self.drum_detach(window, cx),
         }
         // The picker's track went: so does the picker.
         if picker.is_none() {
@@ -2392,6 +2410,9 @@ impl Render for DocumentWindow {
         // stroke (Review Focus 1).
         if charted.is_some() && !editor_shown {
             self.chart_hidden(ChartSlot::Pane, window, cx);
+        }
+        if drummed.is_some() && !editor_shown {
+            self.drum_hidden(window, cx);
         }
         if controlled.is_some() && frames.right.is_none() {
             self.chart_hidden(ChartSlot::Controllers, window, cx);
@@ -2478,6 +2499,7 @@ impl Render for DocumentWindow {
                 rolled,
                 charted,
                 controlled,
+                drummed,
             },
             &mut root,
             window,

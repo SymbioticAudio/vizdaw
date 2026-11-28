@@ -348,13 +348,21 @@ fn editors_piano_roll_opens_the_roll(cx: &mut TestAppContext) {
     assert_eq!(s.model(|d| d.tool()), Tool::Pencil);
     assert!(s.roll_control("button", "Pencil").selected);
 
-    // The pane's picker lists the Piano Roll, the List and the Strip
-    // Chart, then the pane's other views (slice 6a, slice 10c).
+    // The pane's picker lists the Piano Roll, the List, the Strip Chart
+    // and the Drum Grid, then the pane's other views (slices 6a, 10c,
+    // 10d).
     s.click_picker();
     let items: Vec<String> = s.menu_items().into_iter().map(|e| e.label).collect();
     assert_eq!(
         items,
-        [ROLL, "List", "Strip Chart", "Audio Editor", "Mixer"]
+        [
+            ROLL,
+            "List",
+            "Strip Chart",
+            "Drum Grid",
+            "Audio Editor",
+            "Mixer"
+        ]
     );
     assert!(s.element("menuitem", ROLL).selected);
     let list = s.element("menuitem", "List");
@@ -1340,40 +1348,8 @@ fn the_key_strip_keeps_to_its_keys(cx: &mut TestAppContext) {
     assert_eq!(s.sounds().len(), 6);
 }
 
-/// A song whose saved last editor is not in this app yet: a block's
-/// double-click opens the Piano Roll, and a save keeps the saved value.
-#[gpui::test]
-fn an_unported_last_editor_double_click_opens_the_roll(cx: &mut TestAppContext) {
-    for json in ["drumGrid"] {
-        let fake = roll_fake();
-        fake.set_layout(Some(&format!(r#"{{"lastKind":"{json}"}}"#)));
-        let mut s = setup(cx, fake);
-        let block = s
-            .element("button", "Block on Chords, bar 1, 1 event")
-            .bounds;
-        let at = block.center();
-        for count in [1, 2] {
-            s.cx.simulate_event(MouseDownEvent {
-                position: at,
-                modifiers: Modifiers::none(),
-                button: MouseButton::Left,
-                click_count: count,
-                first_mouse: false,
-            });
-            s.cx.simulate_event(MouseUpEvent {
-                position: at,
-                modifiers: Modifiers::none(),
-                button: MouseButton::Left,
-                click_count: count,
-            });
-        }
-        s.cx.run_until_parked();
-        assert_eq!(s.model(|d| d.detail_kind_name()), "piano_roll", "{json}");
-        assert!(s.find("group", ROLL).is_some(), "{json}: the roll shows");
-        let saved = s.saved_layout(&format!("vizdaw-unported-{json}.vizdaw"));
-        assert_eq!(saved["lastKind"], json);
-    }
-}
+// A saved Drum Grid last editor: `tests/drum_grid.rs`
+// (`a_saved_drum_grid_last_editor_opens_the_grid`).
 
 /// Swift `S/PianoRollPane.swift:68-69`: the bar's Exact toggle, the Modify
 /// menu's check mark and ⌃⌘E are one setting.

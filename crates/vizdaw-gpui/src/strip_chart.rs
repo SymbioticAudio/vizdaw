@@ -1492,7 +1492,7 @@ fn shapeless(s: &StripChartSettings) -> bool {
 
 /// A bar picker's face: its value and the menu arrow; `menu` in the tree,
 /// its value the current title.
-fn picker(
+pub(crate) fn picker(
     id: (&'static str, usize),
     label: &str,
     face: &str,
