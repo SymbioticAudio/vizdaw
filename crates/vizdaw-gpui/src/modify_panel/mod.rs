@@ -14,6 +14,7 @@
 //!
 //! [`SelectModifyModel`]: vizdaw_app::select_modify::model::SelectModifyModel
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
@@ -25,8 +26,10 @@ use gpui::{
 };
 use vizdaw_app::alerts::AlertItem;
 use vizdaw_app::commands;
-use vizdaw_app::select_modify::{MODIFY_AGAIN_HELP, PanelTask};
+use vizdaw_app::select_modify::{MODIFY_AGAIN_HELP, ModifyConfig, PanelTask};
 use vizdaw_app::{DocId, DocumentModel, WindowToken};
+use vizdaw_ffi::mixer::DestRow;
+use vizdaw_ffi::modify::{ConditionTest, ModifyRow};
 
 use crate::app_state::{AppState, WindowKind, modify_panel_title};
 use crate::menus::{CloseWindow, MODIFY_PANEL_CONTEXT, RunCommand};
@@ -34,6 +37,8 @@ use crate::registry::{RegistryScope, SharedRegistry};
 use crate::strip_palette::tokens;
 use crate::text_input::{TextInput, TextInputEvent};
 
+mod modify_half;
+mod select_half;
 #[cfg(test)]
 mod tests;
 
@@ -59,7 +64,10 @@ const TEMPLATE_NAME_WIDTH: f32 = 180.;
 
 /// The labels of the frame (`S/ModifyPanel.swift:64-400`); each is also
 /// its control's accessibility label.
+pub const REMOVE_CONDITION: &str = "Remove Condition";
 pub const TASK: &str = "Task";
+pub const SELECT: &str = "Select";
+pub const MODIFY: &str = "Modify";
 pub const TEMPLATES: &str = "Templates";
 pub const NO_TEMPLATES: &str = "No Templates";
 pub const TEMPLATE_NAME: &str = "Template name";
@@ -77,11 +85,36 @@ pub fn delete_item(name: &str) -> String {
     format!("Delete \u{201c}{name}\u{201d}")
 }
 
-/// A menu of the top row, while open.
+/// A menu or picker of the panel, while open (one at a time).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PanelMenu {
     Task,
     Templates,
+    /// The select half's.
+    Result,
+    Match,
+    Comparison(usize),
+    Kinds(usize),
+    ConditionDest(usize),
+    AddCondition,
+    /// The modify half's.
+    Operation,
+    Root,
+    Scale,
+    ValueToChange,
+    ChangeOp,
+    Amount,
+    Curve,
+    Wave,
+    Destination,
+    Substitute,
+}
+
+/// A field of the halves: its input and what it was made with.
+struct PanelField {
+    placeholder: String,
+    input: Entity<TextInput>,
+    _subscriptions: Vec<Subscription>,
 }
 
 type Pick = Rc<dyn Fn(&mut ModifyPanel, &mut Window, &mut Context<ModifyPanel>)>;
@@ -120,7 +153,12 @@ pub struct ModifyPanel {
     registry: SharedRegistry,
     /// The Template name field (the model's name is its text).
     template_name: Entity<TextInput>,
-    /// The top row's menu, while open.
+    /// The halves' fields by model key (`c<i>.<j>`, `m<j>`, `map`,
+    /// `offsets`); each shows the model's text for its key.
+    fields: BTreeMap<String, PanelField>,
+    /// The keys drawn this frame (the rest are dropped after it).
+    drawn: BTreeSet<String>,
+    /// The open menu.
     menu: Option<PanelMenu>,
     /// The title last given to the platform window.
     title: String,
@@ -189,6 +227,11 @@ impl ModifyPanel {
                 {
                     this.template_name.update(cx, |f, cx| f.set_text(&name, cx));
                 }
+                // The halves' fields likewise follow the model (a new
+                // operation, a removed row, a loaded template), and are
+                // red while their text does not parse. A field being typed
+                // in already agrees: its text is the model's draft.
+                this.sync_fields(cx);
                 cx.notify();
             }),
             cx.observe_window_activation(window, |this, window, cx| {
@@ -220,6 +263,8 @@ impl ModifyPanel {
             focus,
             registry: SharedRegistry::default(),
             template_name,
+            fields: BTreeMap::new(),
+            drawn: BTreeSet::new(),
             menu: None,
             title,
             listed: false,
@@ -230,6 +275,12 @@ impl ModifyPanel {
     /// The panel's document.
     pub fn doc(&self) -> DocId {
         self.doc
+    }
+
+    /// The field for model key `key`, while drawn.
+    #[cfg(test)]
+    fn field_for_test(&self, key: &str) -> Option<&Entity<TextInput>> {
+        self.fields.get(key).map(|f| &f.input)
     }
 
     /// The elements this window drew last.
@@ -440,9 +491,9 @@ impl ModifyPanel {
         vec![backdrop, list]
     }
 
-    /// A menu's face showing `text`, opening `menu`.
+    /// A top-row menu's face showing `text`, opening `menu`.
     fn menu_face(
-        &self,
+        &mut self,
         menu: PanelMenu,
         text: &str,
         rows: Vec<MenuRow>,
@@ -450,9 +501,32 @@ impl ModifyPanel {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (label, width, id) = match menu {
-            PanelMenu::Task => (TASK, TASK_WIDTH, "modify-task-menu"),
-            PanelMenu::Templates => (TEMPLATES, TEMPLATES_WIDTH, "modify-templates-menu"),
+        let (label, width) = match menu {
+            PanelMenu::Task => (TASK, TASK_WIDTH),
+            _ => (TEMPLATES, TEMPLATES_WIDTH),
+        };
+        self.picker(menu, label, width, text, rows, scope, window, cx)
+    }
+
+    /// The face of picker or menu `menu`, `width` wide, labelled `label`
+    /// (also its accessibility label) and showing `text`; open, its rows
+    /// under it.
+    #[allow(clippy::too_many_arguments)]
+    fn picker(
+        &mut self,
+        menu: PanelMenu,
+        label: &str,
+        width: f32,
+        text: &str,
+        rows: Vec<MenuRow>,
+        scope: &mut RegistryScope,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = match menu {
+            PanelMenu::Task => "modify-task-menu",
+            PanelMenu::Templates => "modify-templates-menu",
+            _ => "modify-picker-menu",
         };
         let me = cx.entity().downgrade();
         let face =
@@ -468,6 +542,282 @@ impl ModifyPanel {
                 d.children(self.popup(id, rows, scope, window, cx))
             })
             .into_any_element()
+    }
+
+    /// A picker's rows: one per item, the current one checked; a pick
+    /// runs `pick` on the document.
+    fn choice_rows<T: Copy + PartialEq + 'static>(
+        items: &[T],
+        current: Option<T>,
+        title: impl Fn(T) -> String,
+        pick: impl Fn(&mut DocumentModel, T) + 'static,
+    ) -> Vec<MenuRow> {
+        let pick = Rc::new(pick);
+        items
+            .iter()
+            .map(|&item| {
+                let pick = pick.clone();
+                MenuRow::Item {
+                    title: title(item),
+                    enabled: true,
+                    checked: current == Some(item),
+                    pick: Rc::new(move |this, _, cx| {
+                        this.with_doc(cx, |d| pick(d, item));
+                    }),
+                }
+            })
+            .collect()
+    }
+
+    /// The field for model key `key`, `width` wide, showing `placeholder`
+    /// while empty and recorded as `textfield` `label`. Its text is the
+    /// model's for the key; what is typed goes to `set_modify_field`; it
+    /// owns the text owner `selectModify.‹key›` while focused; Return in
+    /// it applies.
+    #[allow(clippy::too_many_arguments)]
+    fn text_field(
+        &mut self,
+        key: &str,
+        placeholder: &str,
+        label: &str,
+        width: f32,
+        help: Option<&'static str>,
+        scope: &mut RegistryScope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.drawn.insert(key.to_owned());
+        let stale = self
+            .fields
+            .get(key)
+            .is_none_or(|f| f.placeholder != placeholder);
+        if stale {
+            let field = self.new_field(key, placeholder, window, cx);
+            self.fields.insert(key.to_owned(), field);
+        }
+        let input = self.fields[key].input.clone();
+        let text = input.read(cx).text().to_owned();
+        let focused = input.focus_handle(cx).is_focused(window);
+        let el = div()
+            .id(gpui::ElementId::Name(format!("modify-field:{key}").into()))
+            .relative()
+            .flex_none()
+            .w(px(width))
+            .child(input)
+            .child(scope.control_with("textfield", label, true, Some(&text), focused));
+        match help {
+            Some(h) => crate::sheet_host::with_help(el, h).into_any_element(),
+            None => el.into_any_element(),
+        }
+    }
+
+    fn new_field(
+        &mut self,
+        key: &str,
+        placeholder: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> PanelField {
+        let (text, invalid) = self
+            .app
+            .read(cx)
+            .store
+            .document(self.doc)
+            .map(|d| (d.modify_field_text(key), d.modify_field_invalid(key)))
+            .unwrap_or_default();
+        let input = cx.new(|cx| {
+            let mut f = TextInput::new(placeholder, cx).compact().with_text(&text);
+            f.set_error(invalid, cx);
+            f
+        });
+        let focus = input.focus_handle(cx);
+        let (k1, k2, k3) = (key.to_owned(), key.to_owned(), key.to_owned());
+        let subscriptions = vec![
+            // Typed text goes to the model; a caret move, or the model's
+            // own text set here, is not an edit.
+            cx.observe(&input, move |this, field, cx| {
+                let text = field.read(cx).text().to_owned();
+                let doc = this.app.read(cx).store.document(this.doc);
+                if doc.is_some_and(|d| d.modify_field_text(&k1) != text) {
+                    this.with_doc(cx, |d| d.set_modify_field(&k1, &text));
+                }
+            }),
+            cx.subscribe_in(&input, window, |this, _, e, window, cx| {
+                if *e == TextInputEvent::Confirm {
+                    this.apply(&Apply, window, cx);
+                }
+            }),
+            cx.on_focus(&focus, window, move |this, _, cx| {
+                this.with_doc(cx, |d| d.set_modify_text_editing(&k2, true));
+            }),
+            cx.on_blur(&focus, window, move |this, _, cx| {
+                this.with_doc(cx, |d| d.set_modify_text_editing(&k3, false));
+            }),
+        ];
+        PanelField {
+            placeholder: placeholder.to_owned(),
+            input,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    /// Each field shows the model's text for its key (unless it already
+    /// does) and is red while that text does not parse.
+    fn sync_fields(&mut self, cx: &mut Context<Self>) {
+        let Some(d) = self.app.read(cx).store.document(self.doc) else {
+            return;
+        };
+        let wanted: Vec<(Entity<TextInput>, String, bool)> = self
+            .fields
+            .iter()
+            .map(|(k, f)| {
+                (
+                    f.input.clone(),
+                    d.modify_field_text(k),
+                    d.modify_field_invalid(k),
+                )
+            })
+            .collect();
+        for (input, text, invalid) in wanted {
+            input.update(cx, |f, cx| {
+                if f.text() != text {
+                    f.set_text(&text, cx);
+                }
+                f.set_error(invalid, cx);
+            });
+        }
+    }
+
+    /// Drops the fields this frame did not draw; one torn down while it
+    /// had the keyboard gives it back.
+    fn drop_undrawn_fields(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let drawn = std::mem::take(&mut self.drawn);
+        let gone: Vec<String> = self
+            .fields
+            .keys()
+            .filter(|k| !drawn.contains(*k))
+            .cloned()
+            .collect();
+        if gone.is_empty() {
+            return;
+        }
+        for k in &gone {
+            self.fields.remove(k);
+        }
+        cx.defer_in(window, move |this, _, cx| {
+            this.with_doc(cx, |d| {
+                for k in &gone {
+                    d.set_modify_text_editing(k, false);
+                }
+            });
+        });
+    }
+
+    /// A half's on/off toggle: its box and `title`, a `checkbox` (selected
+    /// when on); a click runs `flip`.
+    fn checkbox(
+        id: &'static str,
+        title: &'static str,
+        on: bool,
+        scope: &mut RegistryScope,
+        cx: &mut Context<Self>,
+        flip: impl Fn(&mut DocumentModel) + 'static,
+    ) -> AnyElement {
+        div()
+            .id(id)
+            .relative()
+            .flex()
+            .flex_row()
+            .flex_none()
+            .items_center()
+            .gap_2()
+            .text_size(px(15.))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .cursor_pointer()
+            .child(if on { "\u{2611}" } else { "\u{2610}" })
+            .child(title)
+            .child(scope.control_selected("checkbox", title, true, None, on))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.menu = None;
+                this.with_doc(cx, &flip);
+            }))
+            .into_any_element()
+    }
+
+    /// The remove button of a condition row.
+    fn remove_button(i: usize, scope: &mut RegistryScope, cx: &mut Context<Self>) -> AnyElement {
+        let t = tokens();
+        let b = div()
+            .id(("modify-remove-condition", i))
+            .relative()
+            .flex_none()
+            .px_1()
+            .text_color(rgb(t.text_secondary))
+            .cursor_pointer()
+            .child("\u{2296}")
+            .child(scope.control("button", REMOVE_CONDITION, true))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.menu = None;
+                this.with_doc(cx, |d| d.remove_modify_condition(i));
+            }));
+        crate::sheet_host::with_help(b, REMOVE_CONDITION).into_any_element()
+    }
+
+    /// A segmented picker `label` (a `group`), one `button` per segment,
+    /// the chosen one selected; a click runs `pick` with its index.
+    fn segments(
+        label: &'static str,
+        width: f32,
+        titles: &[&'static str],
+        chosen: usize,
+        scope: &mut RegistryScope,
+        cx: &mut Context<Self>,
+        pick: impl Fn(&mut DocumentModel, usize) + 'static,
+    ) -> AnyElement {
+        let t = tokens();
+        let mut group = scope.container();
+        let pick = Rc::new(pick);
+        let mut row = div()
+            .relative()
+            .flex()
+            .flex_row()
+            .flex_none()
+            .w(px(width))
+            .h(px(22.))
+            .rounded(px(t.radius))
+            .overflow_hidden()
+            .border_1()
+            .border_color(rgb(t.surface_separator))
+            .child(group.this("group", label, true));
+        for (n, &title) in titles.iter().enumerate() {
+            let on = n == chosen;
+            let pick = pick.clone();
+            row = row.child(
+                div()
+                    .id((label, n))
+                    .relative()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(11.))
+                    .cursor_pointer()
+                    .map(|d| {
+                        if on {
+                            d.bg(rgb(t.accent)).text_color(rgb(t.on_accent))
+                        } else {
+                            d.bg(rgb(t.surface_raised)).text_color(rgb(t.text_primary))
+                        }
+                    })
+                    .child(title)
+                    .child(group.control_selected("button", title, true, None, on))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.menu = None;
+                        this.with_doc(cx, |d| pick(d, n));
+                    })),
+            );
+        }
+        row.into_any_element()
     }
 }
 
@@ -508,6 +858,9 @@ fn button(
 /// What the frame shows of the document, read once per frame.
 struct Shown {
     task: PanelTask,
+    config: ModifyConfig,
+    /// The session's destinations, read only while a picker shows them.
+    dests: Vec<DestRow>,
     templates: Vec<String>,
     notice: Option<String>,
     caption: &'static str,
@@ -518,8 +871,22 @@ struct Shown {
 
 impl Shown {
     fn of(d: &DocumentModel) -> Self {
+        let config = d.select_modify().config.clone();
+        let wants_dests = matches!(config.modify.op, ModifyRow::SetDest { .. })
+            || config
+                .select
+                .conditions
+                .iter()
+                .any(|c| matches!(c.test, ConditionTest::Dest { .. }));
+        let dests = if wants_dests {
+            d.session().destinations().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         Shown {
             task: d.select_modify().task,
+            config,
+            dests,
             templates: d
                 .modify_templates()
                 .iter()
@@ -592,14 +959,49 @@ impl Render for ModifyPanel {
             .child(div().flex_1())
             .child(templates);
 
-        // The body: the Select and Modify halves (Task 6).
+        // The body: the Select and Modify halves, each under its toggle.
+        let mut body_scope = scope.container();
+        let c = &shown.config;
+        let select_on = c.select.enabled;
+        let select_toggle = Self::checkbox(
+            "modify-select-toggle",
+            SELECT,
+            select_on,
+            &mut body_scope,
+            cx,
+            move |d| d.select_modify_mut().config.select.enabled = !select_on,
+        );
+        let select = select_on
+            .then(|| self.select_half(&c.select, &shown.dests, &mut body_scope, window, cx));
+        let modify_on = c.modify.enabled;
+        let modify_toggle = Self::checkbox(
+            "modify-modify-toggle",
+            MODIFY,
+            modify_on,
+            &mut body_scope,
+            cx,
+            move |d| d.select_modify_mut().config.modify.enabled = !modify_on,
+        );
+        let modify = modify_on
+            .then(|| self.modify_half(&c.modify, &shown.dests, &mut body_scope, window, cx));
+        self.drop_undrawn_fields(window, cx);
+        let divider = || div().flex_none().h(px(1.)).bg(rgb(t.surface_separator));
         let body = div()
             .id("modify-body")
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
             .border_t_1()
-            .border_color(rgb(t.surface_separator));
+            .border_color(rgb(t.surface_separator))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_2()
+            .child(select_toggle)
+            .children(select)
+            .child(divider())
+            .child(modify_toggle)
+            .children(modify);
 
         // The notice line, when there is one.
         let notice = shown.notice.as_ref().map(|n| {

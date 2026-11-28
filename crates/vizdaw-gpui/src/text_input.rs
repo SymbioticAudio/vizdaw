@@ -70,6 +70,8 @@ pub struct TextInput {
     compact: bool,
     /// A list cell's field: a table row high.
     cell: bool,
+    /// Its text does not parse: drawn in the error colour.
+    error: bool,
 }
 
 impl TextInput {
@@ -728,7 +730,11 @@ impl Render for TextInput {
                         .w_full()
                         .p(px(pad))
                         .bg(rgb(crate::transport_bar::colors::field()))
-                        .text_color(rgb(crate::transport_bar::colors::field_text()))
+                        .text_color(rgb(if self.error {
+                            crate::strip_palette::tokens().state_error
+                        } else {
+                            crate::transport_bar::colors::field_text()
+                        }))
                         .child(TextElement { input: cx.entity() }),
                 )
             })
@@ -755,6 +761,7 @@ impl TextInput {
             is_selecting: false,
             compact: false,
             cell: false,
+            error: false,
         }
     }
 
@@ -779,6 +786,18 @@ impl TextInput {
     pub fn cell(mut self) -> Self {
         self.cell = true;
         self
+    }
+
+    /// Its text is marked as not parsing (red) or not.
+    pub fn set_error(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.error != on {
+            self.error = on;
+            cx.notify();
+        }
+    }
+
+    pub fn is_error(&self) -> bool {
+        self.error
     }
 
     /// Holds `text` now, all of it selected.

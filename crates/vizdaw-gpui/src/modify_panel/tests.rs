@@ -22,7 +22,7 @@ use crate::menus::RunCommand;
 use crate::shell::DocumentWindow;
 
 #[derive(Default)]
-struct FakeCalls {
+pub(super) struct FakeCalls {
     queue: RefCell<VecDeque<Call>>,
     replies: RefCell<Vec<(u64, Result<Value, ControlError>)>>,
     next: RefCell<u64>,
@@ -48,14 +48,14 @@ impl CallSource for FakeCalls {
 }
 
 /// Every session the store made, in order.
-type Made = Arc<Mutex<Vec<Arc<FakeSession>>>>;
+pub(super) type Made = Arc<Mutex<Vec<Arc<FakeSession>>>>;
 
-struct Setup {
-    calls: FakeCalls,
-    made: Made,
+pub(super) struct Setup {
+    pub(super) calls: FakeCalls,
+    pub(super) made: Made,
 }
 
-fn setup(cx: &mut TestAppContext) -> Setup {
+pub(super) fn setup(cx: &mut TestAppContext) -> Setup {
     let made: Made = Arc::default();
     let m = made.clone();
     let store = DocumentStore::new(
@@ -76,7 +76,7 @@ fn setup(cx: &mut TestAppContext) -> Setup {
     }
 }
 
-fn call(
+pub(super) fn call(
     s: &Setup,
     cx: &mut TestAppContext,
     cmd: &str,
@@ -114,11 +114,11 @@ fn call(
         .expect("the call was answered")
 }
 
-fn ok(r: Result<Value, ControlError>) -> Value {
+pub(super) fn ok(r: Result<Value, ControlError>) -> Value {
     r.unwrap_or_else(|e| panic!("call failed: {e:?}"))
 }
 
-fn node(tree: &Value, role: &str, label: &str) -> Value {
+pub(super) fn node(tree: &Value, role: &str, label: &str) -> Value {
     tree["nodes"]
         .as_array()
         .unwrap()
@@ -128,7 +128,7 @@ fn node(tree: &Value, role: &str, label: &str) -> Value {
         .unwrap_or_else(|| panic!("no {role} {label:?} in {tree}"))
 }
 
-fn has_node(tree: &Value, role: &str, label: &str) -> bool {
+pub(super) fn has_node(tree: &Value, role: &str, label: &str) -> bool {
     tree["nodes"]
         .as_array()
         .unwrap()
@@ -136,7 +136,7 @@ fn has_node(tree: &Value, role: &str, label: &str) -> bool {
         .any(|n| n["role"] == role && n["label"] == label)
 }
 
-fn new_document(cx: &mut TestAppContext) -> (WindowHandle<DocumentWindow>, DocId) {
+pub(super) fn new_document(cx: &mut TestAppContext) -> (WindowHandle<DocumentWindow>, DocId) {
     let h = cx.update(|cx| crate::new_document(cx).expect("a window"));
     cx.run_until_parked();
     let doc = cx.update(|cx| h.read(cx).unwrap().doc());
@@ -144,7 +144,7 @@ fn new_document(cx: &mut TestAppContext) -> (WindowHandle<DocumentWindow>, DocId
 }
 
 /// The `modify_panel` rows of `state.get windows`.
-fn panels(s: &Setup, cx: &mut TestAppContext) -> Vec<Value> {
+pub(super) fn panels(s: &Setup, cx: &mut TestAppContext) -> Vec<Value> {
     let w = ok(call(s, cx, "state.get", json!({"target": "windows"})));
     w["windows"]
         .as_array()
@@ -155,7 +155,7 @@ fn panels(s: &Setup, cx: &mut TestAppContext) -> Vec<Value> {
         .collect()
 }
 
-fn panel_of(cx: &mut TestAppContext, doc: DocId) -> Option<AnyWindowHandle> {
+pub(super) fn panel_of(cx: &mut TestAppContext, doc: DocId) -> Option<AnyWindowHandle> {
     cx.update(|cx| {
         AppState::global(cx)
             .read(cx)
@@ -164,12 +164,17 @@ fn panel_of(cx: &mut TestAppContext, doc: DocId) -> Option<AnyWindowHandle> {
     })
 }
 
-fn run_in(s: &Setup, cx: &mut TestAppContext, id: &str, window: impl Into<AnyWindowHandle>) {
+pub(super) fn run_in(
+    s: &Setup,
+    cx: &mut TestAppContext,
+    id: &str,
+    window: impl Into<AnyWindowHandle>,
+) {
     let n = control::number(window);
     ok(call(s, cx, "command.run", json!({"id": id, "window": n})));
 }
 
-fn with_doc<R>(
+pub(super) fn with_doc<R>(
     cx: &mut TestAppContext,
     doc: DocId,
     f: impl FnOnce(&mut vizdaw_app::DocumentModel) -> R,
@@ -522,4 +527,90 @@ fn the_template_name_field_follows_a_template_run_from_the_menu(cx: &mut TestApp
         _ => None,
     });
     assert_eq!(saved.as_deref(), Some("Bass"));
+}
+
+/// Every node of `role` labelled `label`, in tree order.
+pub(super) fn nodes(tree: &Value, role: &str, label: &str) -> Vec<Value> {
+    tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|n| n["role"] == role && n["label"] == label)
+        .cloned()
+        .collect()
+}
+
+/// The labels of every node of `role`, in tree order.
+pub(super) fn labels(tree: &Value, role: &str) -> Vec<String> {
+    tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|n| n["role"] == role)
+        .map(|n| n["label"].as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
+/// Window `n`'s tree.
+pub(super) fn tree(s: &Setup, cx: &mut TestAppContext, n: i64) -> Value {
+    ok(call(s, cx, "ui.tree", json!({"window": n})))
+}
+
+/// A click on element `id` of window `n`.
+pub(super) fn click(s: &Setup, cx: &mut TestAppContext, n: i64, id: &Value) {
+    ok(call(s, cx, "ui.click", json!({"window": n, "element": id})));
+}
+
+/// A click on the `role` node labelled `label` (the first such).
+pub(super) fn click_node(s: &Setup, cx: &mut TestAppContext, n: i64, role: &str, label: &str) {
+    let t = tree(s, cx, n);
+    let id = node(&t, role, label)["id"].clone();
+    click(s, cx, n, &id);
+}
+
+/// The platform's command modifier (the key bindings' `secondary-`).
+const SECONDARY: &str = if cfg!(target_os = "macos") {
+    "command"
+} else {
+    "control"
+};
+
+/// Replaces the text of field `label` (the first such) with `text`.
+pub(super) fn type_into(s: &Setup, cx: &mut TestAppContext, n: i64, label: &str, text: &str) {
+    let t = tree(s, cx, n);
+    let id = node(&t, "textfield", label)["id"].clone();
+    ok(call(
+        s,
+        cx,
+        "ui.key",
+        json!({"window": n, "element": id, "key": "a", "modifiers": [SECONDARY]}),
+    ));
+    ok(call(s, cx, "ui.key", json!({"window": n, "text": text})));
+}
+
+/// Opens command `id`'s panel over a new document: the panel's window
+/// number and the document.
+pub(super) fn open_panel(s: &Setup, cx: &mut TestAppContext, id: &str) -> (i64, DocId) {
+    let (h, doc) = new_document(cx);
+    run_in(s, cx, id, h);
+    let panel = panel_of(cx, doc).expect("the panel");
+    cx.update(|cx| panel.update(cx, |_, w, _| w.activate_window()).unwrap());
+    cx.run_until_parked();
+    (control::number(panel), doc)
+}
+
+/// Runs `f` on document `doc`'s model as another surface would (the
+/// windows hear of it).
+pub(super) fn edit_doc(
+    cx: &mut TestAppContext,
+    doc: DocId,
+    f: impl FnOnce(&mut vizdaw_app::DocumentModel),
+) {
+    cx.update(|cx| {
+        AppState::global(cx).update(cx, |s, cx| {
+            s.store.with_document(doc, |d, _| f(d));
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
 }
