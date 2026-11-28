@@ -160,6 +160,9 @@ pub struct ModifyPanel {
     drawn: BTreeSet<String>,
     /// The open menu.
     menu: Option<PanelMenu>,
+    /// The element id paths of the pickers drawn last frame.
+    #[cfg(test)]
+    picker_ids: Vec<String>,
     /// The title last given to the platform window.
     title: String,
     /// The app state has listed this window (until then a notify that
@@ -266,6 +269,8 @@ impl ModifyPanel {
             fields: BTreeMap::new(),
             drawn: BTreeSet::new(),
             menu: None,
+            #[cfg(test)]
+            picker_ids: Vec::new(),
             title,
             listed: false,
             _subscriptions: subscriptions,
@@ -528,12 +533,20 @@ impl ModifyPanel {
             PanelMenu::Templates => "modify-templates-menu",
             _ => "modify-picker-menu",
         };
+        // The face's own id is by label alone, and several pickers share
+        // a label (each row's Comparison, both Operations): the wrapper's
+        // id, by picker and row, keeps each one its own element.
+        let wrapper = format!("modify-picker:{menu:?}");
+        #[cfg(test)]
+        self.picker_ids
+            .push(format!("{wrapper}/mixer-menu:{label}"));
         let me = cx.entity().downgrade();
         let face =
             crate::controls::menu_face::menu_face(label, text, None, true, scope, move |_, cx| {
                 me.update(cx, |this, cx| this.toggle_menu(menu, cx)).ok();
             });
         div()
+            .id(gpui::ElementId::Name(wrapper.into()))
             .relative()
             .flex_none()
             .w(px(width))
@@ -911,6 +924,8 @@ impl Render for ModifyPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = tokens();
         let mut scope = RegistryScope::root(&self.registry);
+        #[cfg(test)]
+        self.picker_ids.clear();
         let shown = self.app.read(cx).store.document(self.doc).map(Shown::of);
         let root = div()
             .id("modify-panel")

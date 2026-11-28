@@ -390,6 +390,39 @@ mod tests {
         assert_eq!(nodes(&t, "button", "Remove Condition").len(), 1);
     }
 
+    /// Same-label pickers in different rows are different elements: a
+    /// real click on the second row's Comparison opens that row's menu
+    /// (Pitch offers four comparisons, Kind two), and a second click on
+    /// it closes it again.
+    #[gpui::test]
+    fn each_rows_comparison_picker_is_its_own_element(cx: &mut TestAppContext) {
+        let s = setup(cx);
+        let (n, doc) = open_panel(&s, cx, "modify.select_by_rule");
+        click_node(&s, cx, n, "menu", ADD_CONDITION);
+        click_node(&s, cx, n, "menuitem", "Pitch");
+        let t = tree(&s, cx, n);
+        let pickers = nodes(&t, "menu", "Comparison");
+        assert_eq!(pickers.len(), 2);
+        click(&s, cx, n, &pickers[1]["id"]);
+        let t = tree(&s, cx, n);
+        assert_eq!(
+            labels(&t, "menuitem"),
+            ["is", "is not", "inside", "outside"]
+        );
+        let pickers = nodes(&t, "menu", "Comparison");
+        click(&s, cx, n, &pickers[1]["id"]);
+        assert!(labels(&tree(&s, cx, n), "menuitem").is_empty());
+        click(&s, cx, n, &pickers[0]["id"]);
+        assert_eq!(labels(&tree(&s, cx, n), "menuitem"), ["is", "is not"]);
+        let panel = super::super::tests::panel_of(cx, doc)
+            .unwrap()
+            .downcast::<super::super::ModifyPanel>()
+            .unwrap();
+        let ids = cx.update(|cx| panel.read(cx).unwrap().picker_ids.clone());
+        let unique: std::collections::BTreeSet<&String> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "duplicate picker ids: {ids:?}");
+    }
+
     #[gpui::test]
     fn the_kinds_menu_toggles_kinds_and_the_result_picker_sets_the_mode(cx: &mut TestAppContext) {
         let s = setup(cx);
