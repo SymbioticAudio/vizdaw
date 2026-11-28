@@ -3,7 +3,9 @@
 //! in both apps.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
+
+use crate::strip_chart::{MAX_ROWS, StripLane};
 
 pub use crate::list::ListFilter;
 
@@ -144,4 +146,53 @@ impl DetailState {
             }
         }
     }
+
+    /// The Strip Chart's rows (`stripRows`); `None` when missing or
+    /// malformed: an unknown entry, no rows, or more than `MAX_ROWS + 1`
+    /// (the saved rows plus an opening target's row,
+    /// `M/StripChartModel.swift:180-190`).
+    pub fn strip_rows(&self) -> Option<Vec<StripLane>> {
+        Vec::<StripLane>::deserialize(self.extra.get("stripRows")?)
+            .ok()
+            .filter(|r| (1..=MAX_ROWS + 1).contains(&r.len()))
+    }
+
+    /// Sets the Strip Chart's rows; `None` leaves the key out.
+    pub fn set_strip_rows(&mut self, rows: Option<Vec<StripLane>>) {
+        match rows.and_then(|r| serde_json::to_value(r).ok()) {
+            Some(v) => {
+                self.extra.insert("stripRows".into(), v);
+            }
+            None => {
+                self.extra.remove("stripRows");
+            }
+        }
+    }
+
+    /// The track the rows were saved for (`stripRowsLane`, Swift's
+    /// `LaneKey` `{"seq":…,"lane":…}`); `None` when missing or malformed.
+    pub fn strip_rows_lane(&self) -> Option<(u64, u64)> {
+        let k = RowsLane::deserialize(self.extra.get("stripRowsLane")?).ok()?;
+        Some((k.seq, k.lane))
+    }
+
+    /// Sets the rows' track; `None` leaves the key out.
+    pub fn set_strip_rows_lane(&mut self, lane: Option<(u64, u64)>) {
+        match lane {
+            Some((seq, lane)) => {
+                self.extra
+                    .insert("stripRowsLane".into(), json!({"seq": seq, "lane": lane}));
+            }
+            None => {
+                self.extra.remove("stripRowsLane");
+            }
+        }
+    }
+}
+
+/// Swift's `LaneKey` JSON.
+#[derive(Deserialize)]
+struct RowsLane {
+    seq: u64,
+    lane: u64,
 }

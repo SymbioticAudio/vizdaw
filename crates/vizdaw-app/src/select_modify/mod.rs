@@ -3,6 +3,7 @@
 //! `SelectModify.swift`, `ModifyPanel.swift:244-273`). The FFI rows are the
 //! data; this module only names, defaults and assembles them.
 
+use serde::{Deserialize, Serialize};
 use vizdaw_ffi::edit::EditCommand;
 use vizdaw_ffi::events::{AutomationTargetRow, EventKindRow};
 use vizdaw_ffi::modify::{
@@ -647,7 +648,8 @@ pub fn modify_title(op: &ModifyRow) -> &'static str {
     }
 }
 
-fn line_title(t: &LineTargetRow, op: LineOpRow) -> &'static str {
+/// The undo step's name of a line (the core's).
+pub fn line_title(t: &LineTargetRow, op: LineOpRow) -> &'static str {
     match (op, t) {
         (LineOpRow::Draw, LineTargetRow::Tempo) => "Draw Tempo",
         (
@@ -924,8 +926,10 @@ impl CurveKind {
     }
 }
 
-/// An oscillating amount's wave (`S/ModifyPanel.swift:373-377`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// An oscillating amount's wave (`S/ModifyPanel.swift:373-377`); Swift's
+/// JSON is `sine`, `square`, `triangle` and `saw` (`M/StripChart.swift:42`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum WaveKind {
     Sine,
     Square,
