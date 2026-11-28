@@ -6,10 +6,6 @@
 //! `menuitem` in the tree. It looks like the mixer's menus
 //! (`mixer_view.rs`'s `menu_rows`).
 
-// The Strip Chart's row menu (slice 10c Task 6) and the Modify panel's
-// target pickers are its first users.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;

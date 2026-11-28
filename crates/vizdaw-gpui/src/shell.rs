@@ -352,6 +352,8 @@ impl DocumentWindow {
                     }
                     // A held note or key stops sounding.
                     this.roll_deactivated(cx);
+                    // A Strip Chart stroke goes without an undo step.
+                    this.charts_deactivated(cx);
                 }
             }),
         ];
@@ -373,6 +375,8 @@ impl DocumentWindow {
             let field = this.transport_fields.editing();
             let shuttle = &mut this.shuttle;
             let roll = &mut this.piano_roll;
+            let (pane_chart, controllers_chart) =
+                (&mut this.strip_chart, &mut this.controllers_chart);
             // A sheet's field edit ends with its window: the document's
             // keys come back.
             let sheet_owner = this
@@ -408,6 +412,7 @@ impl DocumentWindow {
                     }
                     if kind == WindowKind::Document {
                         DocumentWindow::roll_closing(roll, d);
+                        DocumentWindow::charts_closing(pane_chart, controllers_chart, d);
                     }
                 });
                 match kind {
@@ -2296,7 +2301,13 @@ impl Render for DocumentWindow {
                     .and_then(|d| RollState::of(d, s.transport(doc), Instant::now())),
                 // The charts' axes first, likewise.
                 d.filter(|d| self.strip_chart.prepare(d)).and_then(|d| {
-                    StripChartState::of(d, ChartSlot::Pane, s.transport(doc), Instant::now())
+                    StripChartState::of(
+                        d,
+                        ChartSlot::Pane,
+                        s.transport(doc),
+                        Instant::now(),
+                        self.strip_chart.row_menu_open(),
+                    )
                 }),
                 d.filter(|d| self.controllers_chart.prepare(d))
                     .and_then(|d| {
@@ -2305,6 +2316,7 @@ impl Render for DocumentWindow {
                             ChartSlot::Controllers,
                             s.transport(doc),
                             Instant::now(),
+                            self.controllers_chart.row_menu_open(),
                         )
                     }),
                 d.map(banners::bars).unwrap_or_default(),
@@ -2328,9 +2340,13 @@ impl Render for DocumentWindow {
             (ChartSlot::Controllers, &controlled),
         ] {
             match chart {
-                Some(c) if c.playing() => window.request_animation_frame(),
-                Some(_) => {}
-                None => self.chart_detach(slot, cx),
+                Some(c) => {
+                    self.chart_mut(slot).follow(c);
+                    if c.playing() {
+                        window.request_animation_frame();
+                    }
+                }
+                None => self.chart_detach(slot, window, cx),
             }
         }
         // The picker's track went: so does the picker.
@@ -2370,6 +2386,15 @@ impl Render for DocumentWindow {
         }
         if frames.right.is_none() || controlled.is_none() {
             self.controllers_chart.close_menu();
+        }
+        // A chart mounted but out of sight (the bottom pane hidden or on
+        // another view, a window too small for the right pane) keeps no
+        // stroke (Review Focus 1).
+        if charted.is_some() && !editor_shown {
+            self.chart_hidden(ChartSlot::Pane, window, cx);
+        }
+        if controlled.is_some() && frames.right.is_none() {
+            self.chart_hidden(ChartSlot::Controllers, window, cx);
         }
         if self.pane_menu.is_some_and(|side| frames.of(side).is_none()) {
             self.pane_menu = None;

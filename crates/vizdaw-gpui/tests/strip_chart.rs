@@ -8,13 +8,21 @@
 use std::sync::Arc;
 
 use gpui::{
-    Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, TestAppContext,
-    VisualTestContext, WindowHandle,
+    Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, ScrollDelta, ScrollEvent,
+    TestAppContext, TouchPhase, VisualTestContext, WindowHandle, point, px,
 };
 use vizdaw_app::DocumentStore;
-use vizdaw_app::editor::{DetailEditorKind, EditorTarget};
-use vizdaw_app::strip_chart::{ChartSlot, MAX_ROWS};
-use vizdaw_app::testing::{FakeSession, demo_fake, roll_fake};
+use vizdaw_app::arrangement::RULER_HEIGHT;
+use vizdaw_app::editor::{DetailEditorKind, EditorTarget, PaneView};
+use vizdaw_app::strip_chart::{
+    ChartSlot, MAX_ROWS, StripLane, StripMode, StripOp, StripScale, erase_command, line_command,
+};
+use vizdaw_app::testing::{FakeSession, demo_fake, mixer_fake, roll_fake};
+use vizdaw_ffi::VizError;
+use vizdaw_ffi::edit::EditCommand;
+use vizdaw_ffi::events::AutomationTargetRow;
+use vizdaw_ffi::modify::{ModifyRow, SelectModeRow};
+use vizdaw_ffi::strip::{LineOpRow, LineRow, LineShapeRow};
 use vizdaw_gpui::registry::Element;
 use vizdaw_gpui::{AppState, DocumentWindow, RunCommand};
 
@@ -22,6 +30,13 @@ const CHART: &str = "Strip Chart";
 const PANE: &str = "Bottom Pane";
 const RIGHT: &str = "Right Pane";
 const CONTROLLERS_NOTE: &str = "Select a track to see its controllers.";
+/// A quarter.
+const Q: i64 = 15_360;
+const PANE_SLOT: ChartSlot = ChartSlot::Pane;
+/// Swift presses at x 0; here 4 points in (tick 384, which the quarter
+/// snap takes to 0): the canvas's first 3 points are under the left
+/// pane's divider handle.
+const START_X: f32 = 4.;
 
 struct Setup {
     fake: Arc<FakeSession>,
@@ -168,6 +183,81 @@ impl Setup {
     fn run_menu(&mut self, id: &str) {
         self.cx.dispatch_action(RunCommand::new(id.to_owned()));
         self.cx.run_until_parked();
+    }
+
+    /// Window point of chart point `(x, y)` (below the ruler) in the
+    /// chart of pane group `pane`.
+    fn at_in(&mut self, pane: &str, x: f32, y: f32) -> gpui::Point<Pixels> {
+        let o = self
+            .in_pane(pane, "group", CHART)
+            .unwrap_or_else(|| panic!("no chart in {pane}"))
+            .bounds
+            .origin;
+        point(o.x + px(x), o.y + px(RULER_HEIGHT + y))
+    }
+
+    /// The bottom pane's chart point `(x, y)`.
+    fn at(&mut self, x: f32, y: f32) -> gpui::Point<Pixels> {
+        self.at_in(PANE, x, y)
+    }
+
+    fn down(&mut self, at: gpui::Point<Pixels>, m: Modifiers) {
+        self.cx.simulate_mouse_down(at, MouseButton::Left, m);
+        self.cx.run_until_parked();
+    }
+
+    fn move_to(&mut self, at: gpui::Point<Pixels>, m: Modifiers) {
+        self.cx.simulate_mouse_move(at, Some(MouseButton::Left), m);
+        self.cx.run_until_parked();
+    }
+
+    fn up(&mut self, at: gpui::Point<Pixels>, m: Modifiers) {
+        self.cx.simulate_mouse_up(at, MouseButton::Left, m);
+        self.cx.run_until_parked();
+    }
+
+    fn drag(&mut self, from: gpui::Point<Pixels>, to: gpui::Point<Pixels>, m: Modifiers) {
+        self.down(from, m);
+        self.move_to(to, m);
+        self.up(to, m);
+    }
+
+    /// The wheel over the bottom pane's chart, `dx` points across.
+    fn wheel(&mut self, dx: f32) {
+        let at = self.at(400., 40.);
+        self.cx.simulate_event(ScrollEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(dx), px(0.))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+            source: Default::default(),
+        });
+        self.cx.run_until_parked();
+    }
+
+    /// The labels of the values the bottom pane's chart lists.
+    fn value_labels(&mut self) -> Vec<String> {
+        let chart = self.control("group", CHART);
+        self.inside(&chart)
+            .into_iter()
+            .filter(|e| e.role == "button")
+            .map(|e| e.label)
+            .collect()
+    }
+
+    /// Opens row `row`'s menu (its title, `menu` "Row ‹n›").
+    fn open_row_menu(&mut self, row: usize) {
+        let e = self.control("menu", &format!("Row {}", row + 1));
+        self.click_at(e.bounds.center());
+    }
+
+    fn menuitem(&mut self, label: &str) -> Element {
+        self.find("menuitem", label)
+            .unwrap_or_else(|| panic!("no menuitem {label:?}"))
+    }
+
+    fn last_call(&self) -> Option<String> {
+        self.fake.calls().last().cloned()
     }
 
     fn saved_layout(&mut self, name: &str) -> serde_json::Value {
@@ -318,4 +408,413 @@ fn a_saved_strip_chart_last_editor_opens_the_chart(cx: &mut TestAppContext) {
     s.cx.run_until_parked();
     assert_eq!(s.model(|d| d.detail_kind_name()), "strip_chart");
     assert!(s.in_pane(PANE, "group", CHART).is_some());
+}
+
+// MARK: Strokes, the row menu and the tree (Swift `T/StripChartViewTests.swift`)
+
+/// Row 0's scale: one velocity row, 96 points tall.
+fn velocity_scale() -> StripScale {
+    StripScale::new(StripLane::Velocity.range(), 0., 96.)
+}
+
+#[gpui::test]
+fn a_drag_in_draw_mode_sets_velocities_along_the_line(cx: &mut TestAppContext) {
+    let mut s = chords_chart(cx);
+    s.fake.clear_calls();
+    let (from, to) = (s.at(START_X, 30.), s.at(160., 48.));
+    s.drag(from, to, Modifiers::none());
+    let sc = velocity_scale();
+    let line = LineRow {
+        from: 0,
+        to: Q,
+        start: sc.value_at(30.),
+        end: sc.value_at(48.),
+        step: Q / 8,
+        shape: LineShapeRow::Straight,
+    };
+    assert_eq!(
+        s.fake.gesture_edits().last(),
+        Some(&line_command(
+            StripLane::Velocity,
+            LineOpRow::Set,
+            line,
+            false
+        ))
+    );
+    let calls = s.fake.calls();
+    assert_eq!(
+        calls.first().map(String::as_str),
+        Some("begin_edit(Change Velocity)")
+    );
+    assert_eq!(calls.last().map(String::as_str), Some("end_edit"));
+    assert!(s.model(|d| d.strip_stroke(PANE_SLOT).is_none()));
+}
+
+#[gpui::test]
+fn a_click_in_draw_mode_draws_one_point(cx: &mut TestAppContext) {
+    let mut s = chords_chart(cx);
+    let at = s.at(165., 48.);
+    s.down(at, Modifiers::none());
+    s.up(at, Modifiers::none());
+    match s.fake.gesture_edits().last() {
+        Some(EditCommand::SelectAndModify {
+            modify: Some(ModifyRow::Line { line, .. }),
+            ..
+        }) => assert_eq!((line.from, line.to), (Q, Q), "snapped to the quarter"),
+        other => panic!("no line: {other:?}"),
+    }
+}
+
+#[gpui::test]
+fn escape_leaves_no_undo_step(cx: &mut TestAppContext) {
+    let mut s = chords_chart(cx);
+    let (from, to) = (s.at(START_X, 30.), s.at(160., 48.));
+    s.down(from, Modifiers::none());
+    s.move_to(to, Modifiers::none());
+    assert!(s.model(|d| d.gesture().is_some()));
+    s.keys("escape");
+    assert_eq!(s.last_call().as_deref(), Some("abort_edit"));
+    assert!(s.model(|d| d.gesture().is_none() && d.strip_stroke(PANE_SLOT).is_none()));
+    // The release that follows sends nothing.
+    let n = s.fake.calls().len();
+    s.up(to, Modifiers::none());
+    assert_eq!(s.fake.calls().len(), n);
+}
+
+#[gpui::test]
+fn modify_mode_reads_the_operations_amount(cx: &mut TestAppContext) {
+    let mut s = chords_chart(cx);
+    s.update_model(|d| {
+        d.update_strip_settings(|x| {
+            x.mode = StripMode::Modify;
+            x.op = StripOp::Scale;
+        })
+    });
+    // Right of the row's title (a press there opens its menu).
+    let (from, to) = (s.at(220., 3.), s.at(330., 93.));
+    s.drag(from, to, Modifiers::alt());
+    match s.fake.gesture_edits().last() {
+        Some(EditCommand::SelectAndModify {
+            mode,
+            modify: Some(ModifyRow::Line { op, line, .. }),
+            ..
+        }) => {
+            assert_eq!((*op, *mode), (LineOpRow::Scale, SelectModeRow::Refine));
+            assert_eq!((line.start, line.end), (200, 0), "top 200 %, bottom 0 %");
+            assert_eq!((line.from, line.to), (Q, 2 * Q));
+        }
+        other => panic!("no line: {other:?}"),
+    }
+}
+
+#[gpui::test]
+fn an_erase_drag_deletes_the_rows_series(cx: &mut TestAppContext) {
+    let mut s = chords_chart(cx);
+    s.update_model(|d| {
+        d.set_strip_row(PANE_SLOT, 0, StripLane::Controller(7));
+        d.update_strip_settings(|x| x.mode = StripMode::Erase);
+    });
+    s.fake.clear_calls();
+    let (from, to) = (s.at(220., 30.), s.at(320., 40.));
+    s.drag(from, to, Modifiers::none());
+    assert_eq!(
+        s.fake.gesture_edits().last(),
+        erase_command(StripLane::Controller(7), Q, 2 * Q).as_ref()
+    );
+    let calls = s.fake.calls();
+    assert_eq!(
+        calls.first().map(String::as_str),
+        Some("begin_edit(Erase Events)")
+    );
+    assert_eq!(calls.last().map(String::as_str), Some("end_edit"));
+}
+
+/// Review Focus 1.
+#[gpui::test]
+fn escape_before_the_dead_zone_sends_nothing(cx: &mut TestAppContext) {
+    let mut s = chords_chart(cx);
+    s.fake.clear_calls();
+    let (from, to) = (s.at(220., 30.), s.at(221., 31.));
+    s.down(from, Modifiers::none());
+    s.move_to(to, Modifiers::none());
+    s.keys("escape");
+    let edits: Vec<_> = s
+        .fake
+        .calls()
+        .into_iter()
+        .filter(|c| c.contains("edit"))
+        .collect();
+    assert!(edits.is_empty(), "{edits:?}");
+    assert!(s.model(|d| d.gesture().is_none() && d.strip_stroke(PANE_SLOT).is_none()));
+}
+
+/// A stroke held at `(220, 30)` → `(320, 48)` in the bottom pane's chart,
+/// its gesture open.
+fn mid_stroke(s: &mut Setup) -> gpui::Point<Pixels> {
+    let (from, to) = (s.at(220., 30.), s.at(320., 48.));
+    s.down(from, Modifiers::none());
+    s.move_to(to, Modifiers::none());
+    assert!(s.model(|d| d.gesture().is_some()));
+    to
+}
+
+/// Review Focus 1: the detail switched to another editor, and the bottom
+/// pane switched to another view while its detail stays a Strip Chart.
+#[gpui::test]
+fn leaving_the_pane_mid_stroke_leaves_no_undo_step(cx: &mut TestAppContext) {
+    let mut s = chords_chart(cx);
+    let to = mid_stroke(&mut s);
+    s.update_model(|d| d.show_detail(DetailEditorKind::List));
+    assert_eq!(s.last_call().as_deref(), Some("abort_edit"));
+    assert!(s.model(|d| d.gesture().is_none() && d.strip_stroke(PANE_SLOT).is_none()));
+    let n = s.fake.calls().len();
+    s.up(to, Modifiers::none());
+    assert_eq!(s.fake.calls().len(), n, "the release sends nothing");
+}
+
+#[gpui::test]
+fn another_bottom_view_mid_stroke_leaves_no_undo_step(cx: &mut TestAppContext) {
+    let mut s = chords_chart(cx);
+    let to = mid_stroke(&mut s);
+    s.update_model(|d| d.update_layout(|l| l.views.current_mut().bottom.view = PaneView::Mixer));
+    assert_eq!(
+        s.model(|d| d.detail_kind_name()),
+        "strip_chart",
+        "the detail stays"
+    );
+    assert_eq!(s.last_call().as_deref(), Some("abort_edit"));
+    assert!(s.model(|d| d.gesture().is_none() && d.strip_stroke(PANE_SLOT).is_none()));
+    let n = s.fake.calls().len();
+    s.up(to, Modifiers::none());
+    assert_eq!(s.fake.calls().len(), n, "the release sends nothing");
+}
+
+/// Review Focus 1: the window losing the keyboard.
+#[gpui::test]
+fn losing_the_window_mid_stroke_leaves_no_undo_step(cx: &mut TestAppContext) {
+    let mut s = chords_chart(cx);
+    mid_stroke(&mut s);
+    s.cx.deactivate_window();
+    s.cx.run_until_parked();
+    assert_eq!(s.last_call().as_deref(), Some("abort_edit"));
+    assert!(s.model(|d| d.gesture().is_none() && d.strip_stroke(PANE_SLOT).is_none()));
+}
+
+/// `roll_fake`'s notes have velocity `0x8000` (64), as Swift's fake.
+#[gpui::test]
+fn the_tree_reads_each_value(cx: &mut TestAppContext) {
+    let mut s = chords_chart(cx);
+    assert_eq!(
+        s.value_labels(),
+        ["Velocity 64, bar 1 beat 1", "Velocity 64, bar 1 beat 2"]
+    );
+    assert_eq!(s.value("menu", "Row 1").as_deref(), Some("Velocity"));
+}
+
+#[gpui::test]
+fn the_tree_reads_the_values_on_screen(cx: &mut TestAppContext) {
+    let mut s = chords_chart(cx);
+    // Two quarters on (320 points at 96 ticks a point): neither note.
+    s.wheel(-320.);
+    assert_eq!(
+        s.window
+            .read_with(&s.cx, |v, _| v.strip_chart(PANE_SLOT).axis().origin())
+            .unwrap(),
+        2 * Q
+    );
+    assert!(s.value_labels().is_empty());
+    // Back to half a quarter: only the second.
+    s.wheel(240.);
+    assert_eq!(s.value_labels(), ["Velocity 64, bar 1 beat 2"]);
+}
+
+#[gpui::test]
+fn the_row_menu_lists_every_kind(cx: &mut TestAppContext) {
+    let mut s = chords_chart(cx);
+    s.open_row_menu(0);
+    for t in [
+        "Velocity",
+        "Release Velocity",
+        "Length",
+        "Controller",
+        "Pitch Bend",
+        "Channel Pressure",
+        "Poly Pressure",
+        "Program",
+        "Tempo",
+        "Automation",
+        "Add Row",
+        "Remove Row",
+    ] {
+        assert!(s.find("menuitem", t).is_some(), "{t}");
+    }
+    assert!(
+        s.menuitem("Velocity").selected,
+        "the current lane is checked"
+    );
+    assert!(s.menuitem("Add Row").enabled);
+    assert!(!s.menuitem("Remove Row").enabled, "one row stays");
+    assert!(
+        s.find("menuitem", "MIDI Learn").is_none(),
+        "not an automation row"
+    );
+    let tempo = s.menuitem("Tempo").bounds.center();
+    s.click_at(tempo);
+    assert_eq!(s.model(|d| d.strip_rows(PANE_SLOT)), [StripLane::Tempo]);
+    assert!(s.find("menuitem", "Tempo").is_none(), "the menu closed");
+}
+
+#[gpui::test]
+fn the_row_menus_submenus_open_along_their_path(cx: &mut TestAppContext) {
+    let mut s = chords_chart(cx);
+    s.open_row_menu(0);
+    let c = s.menuitem("Controller").bounds.center();
+    s.click_at(c);
+    assert!(s.find("menuitem", "Controller 7 (Volume)").is_some());
+    let r = s.menuitem("96\u{2013}127").bounds.center();
+    s.click_at(r);
+    let item = s.menuitem("Controller 100").bounds.center();
+    s.click_at(item);
+    assert_eq!(
+        s.model(|d| d.strip_rows(PANE_SLOT)),
+        [StripLane::Controller(100)]
+    );
+    s.open_row_menu(0);
+    let p = s.menuitem("Poly Pressure").bounds.center();
+    s.click_at(p);
+    assert!(s.find("menuitem", "C4\u{2013}B4").is_some(), "octaves");
+}
+
+/// Review Focus 4.
+#[gpui::test]
+fn an_empty_automation_menu_says_why(cx: &mut TestAppContext) {
+    let mut s = setup(cx, roll_fake());
+    s.fake.set_call_error(
+        "mixer",
+        Some(VizError::Busy {
+            message: "busy".into(),
+        }),
+    );
+    s.update_model(|d| {
+        d.open_detail(
+            EditorTarget::Lane { seq: 3, lane: 31 },
+            Some(DetailEditorKind::StripChart),
+        )
+    });
+    s.open_row_menu(0);
+    let auto = s.menuitem("Automation");
+    assert!(!auto.enabled);
+    assert!(
+        auto.value.as_deref().is_some_and(|v| v.contains("busy")),
+        "{:?}",
+        auto.value
+    );
+}
+
+/// Review Focus 4: a 20-move stroke and its frames read the mixer at most
+/// once (an automation row draws with the targets' names every frame).
+/// `roll_fake`, as Swift's test: with `mixer_fake` the window's own mixer
+/// (the Channel Strip pane) refetches as the selection moves to the
+/// stroke's track, which is not the chart's read.
+#[gpui::test]
+fn a_stroke_loads_the_automation_targets_once(cx: &mut TestAppContext) {
+    let mut s = setup(cx, roll_fake());
+    s.update_model(|d| {
+        d.open_detail(
+            EditorTarget::Lane { seq: 3, lane: 31 },
+            Some(DetailEditorKind::StripChart),
+        );
+    });
+    s.update_model(|d| {
+        d.add_strip_row(PANE_SLOT);
+        d.set_strip_row(
+            PANE_SLOT,
+            1,
+            StripLane::Automation(AutomationTargetRow::StripFader { strip: 1 }),
+        );
+    });
+    assert_eq!(s.model(|d| d.strip_rows(PANE_SLOT).len()), 2);
+    let before = s.fake.mixer_reads();
+    let from = s.at(START_X, 30.);
+    s.down(from, Modifiers::none());
+    for i in 1..=20 {
+        let at = s.at(i as f32 * 8., 30. + i as f32);
+        s.move_to(at, Modifiers::none());
+    }
+    let reads = s.fake.mixer_reads() - before;
+    let to = s.at(160., 50.);
+    s.up(to, Modifiers::none());
+    assert!(s.fake.gesture_edits().len() > 1, "the stroke drew");
+    // The stroke's frames; the snapshot its release makes is a new
+    // version, read once after it.
+    assert!(reads <= 1, "{reads} reads");
+}
+
+#[gpui::test]
+fn midi_learn_on_an_automation_row(cx: &mut TestAppContext) {
+    let mut s = setup(cx, mixer_fake());
+    s.update_model(|d| {
+        d.open_detail(
+            EditorTarget::Lane { seq: 3, lane: 31 },
+            Some(DetailEditorKind::StripChart),
+        );
+    });
+    let fader = AutomationTargetRow::StripFader { strip: 1 };
+    s.update_model(|d| d.set_strip_row(PANE_SLOT, 0, StripLane::Automation(fader)));
+    s.open_row_menu(0);
+    let learn = s.menuitem("MIDI Learn").bounds.center();
+    s.click_at(learn);
+    assert_eq!(s.fake.learn_targets(), [fader]);
+}
+
+/// The right pane's Controllers chart draws on the focused track, and
+/// leaves the bottom pane's detail alone.
+#[gpui::test]
+fn a_controllers_chart_stroke_draws_on_the_focused_track(cx: &mut TestAppContext) {
+    let mut s = setup(cx, roll_fake());
+    s.run_menu("ui.toggle_right");
+    s.update_model(|d| d.select_track(31, false));
+    let detail = s.model(|d| d.layout().detail.clone());
+    s.fake.clear_calls();
+    let (from, to) = (s.at_in(RIGHT, START_X, 30.), s.at_in(RIGHT, 160., 48.));
+    s.down(from, Modifiers::none());
+    s.move_to(to, Modifiers::none());
+    let lanes: Vec<_> = s.model(|d| d.gesture().unwrap().lanes.iter().copied().collect());
+    assert_eq!(lanes, [(3, 31)]);
+    s.up(to, Modifiers::none());
+    let sc = velocity_scale();
+    let line = LineRow {
+        from: 0,
+        to: Q,
+        start: sc.value_at(30.),
+        end: sc.value_at(48.),
+        step: Q / 8,
+        shape: LineShapeRow::Straight,
+    };
+    assert_eq!(
+        s.fake.gesture_edits().last(),
+        Some(&line_command(
+            StripLane::Velocity,
+            LineOpRow::Set,
+            line,
+            false
+        ))
+    );
+    assert_eq!(s.last_call().as_deref(), Some("end_edit"));
+    assert_eq!(s.model(|d| d.layout().detail.clone()), detail);
+}
+
+/// Carried item 5: the right pane stops showing Controllers mid-stroke.
+#[gpui::test]
+fn a_controllers_stroke_ends_when_the_view_goes(cx: &mut TestAppContext) {
+    let mut s = setup(cx, roll_fake());
+    s.run_menu("ui.toggle_right");
+    s.update_model(|d| d.select_track(31, false));
+    let (from, to) = (s.at_in(RIGHT, START_X, 30.), s.at_in(RIGHT, 160., 48.));
+    s.down(from, Modifiers::none());
+    s.move_to(to, Modifiers::none());
+    assert!(s.model(|d| d.gesture().is_some()));
+    s.update_model(|d| d.update_layout(|l| l.views.current_mut().right.view = PaneView::Sequences));
+    assert_eq!(s.last_call().as_deref(), Some("abort_edit"));
+    assert!(s.model(|d| d.gesture().is_none() && d.strip_stroke(ChartSlot::Controllers).is_none()));
 }
