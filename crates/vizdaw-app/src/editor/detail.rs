@@ -29,12 +29,9 @@ impl DetailEditorKind {
         DetailEditorKind::DrumGrid,
     ];
 
-    /// This app has the editor (the Drum Grid comes in a later slice).
+    /// This app has the editor: every kind does since slice 10d.
     pub fn is_available(self) -> bool {
-        matches!(
-            self,
-            DetailEditorKind::PianoRoll | DetailEditorKind::List | DetailEditorKind::StripChart
-        )
+        true
     }
 
     pub fn title(self) -> &'static str {

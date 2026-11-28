@@ -9,13 +9,16 @@ use std::sync::Arc;
 
 use support::{FakeSession, drum_fake, edit_calls};
 use vizdaw_app::DocumentModel;
-use vizdaw_app::drum_grid::{DrumRowKey, drum_grid_offers};
+use vizdaw_app::drum_grid::{
+    DrumRowKey, NO_ROW, NO_TRACK_TO_ADD, drum_grid_offers, drum_quantize_choices,
+    drum_quantize_title, every_note_taken,
+};
 use vizdaw_app::editor::{DetailEditorKind, EditorTarget, GESTURE_OPEN};
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::drum::{
     DrumEdit, DrumGridSettingsRow, DrumHitRow, DrumPaintHitRow, DrumSpotRow, DrumStrokeRow,
 };
-use vizdaw_ffi::edit::{EditCommand, EventEdit, LaneRef};
+use vizdaw_ffi::edit::{EditCommand, EventEdit, LaneEdit, LaneRef};
 use vizdaw_ffi::selection::TickRange;
 
 const DRUM: Option<DetailEditorKind> = Some(DetailEditorKind::DrumGrid);
@@ -481,4 +484,288 @@ fn a_stroke_paints_the_row_it_began_on_after_the_rows_reorder() {
     };
     assert_eq!(row, 2, "Snare's ID");
     assert_eq!(edit_calls(&f).last().map(String::as_str), Some("end_edit"));
+}
+
+fn drum(edit: DrumEdit) -> EditCommand {
+    EditCommand::Drum { edit }
+}
+
+/// The last edit sent, and that it was the only one since `before`
+/// edits (one undo step, no gesture).
+fn one_edit(f: &FakeSession, before: usize) -> EditCommand {
+    let edits = f.edits();
+    assert_eq!(edits.len(), before + 1, "one edit: {edits:?}");
+    assert!(
+        !f.calls().iter().any(|c| c.starts_with("begin_edit")),
+        "no gesture"
+    );
+    edits.last().cloned().unwrap()
+}
+
+/// Swift `rowCommandsActOnTheSelectedRow` (`T/DrumGridModelTests.swift:177-203`).
+#[test]
+fn row_commands_act_on_the_selected_row() {
+    let (f, mut m) = make();
+    assert!(!m.drum_remove_selected_row());
+    assert_eq!(m.status(), Some(NO_ROW));
+    assert!(f.edits().is_empty());
+    assert!(m.drum_add_row());
+    assert_eq!(
+        one_edit(&f, 0),
+        drum(DrumEdit::AddRow {
+            seq: 3,
+            lane: 40,
+            name: "Closed Hat".into(),
+            note: 42,
+            dest: None,
+        })
+    );
+    m.drum_select(0, 1);
+    assert_eq!(m.drum_selected().unwrap().1.name, "Snare");
+    let n = f.edits().len();
+    assert!(m.drum_show_velocity(None));
+    assert_eq!(
+        one_edit(&f, n),
+        drum(DrumEdit::ShowVelocity {
+            seq: 3,
+            lane: 40,
+            row: 2,
+            show: true,
+        })
+    );
+    let n = f.edits().len();
+    assert!(m.drum_split_selected_row());
+    assert_eq!(
+        one_edit(&f, n),
+        drum(DrumEdit::SplitRow {
+            seq: 3,
+            lane: 40,
+            row: 2,
+        })
+    );
+    let n = f.edits().len();
+    assert!(m.drum_remove_selected_row());
+    assert_eq!(
+        one_edit(&f, n),
+        drum(DrumEdit::RemoveRow {
+            seq: 3,
+            lane: 40,
+            row: 2,
+        })
+    );
+    let kick = DrumRowKey { lane: 40, row: 1 };
+    let n = f.edits().len();
+    assert!(m.drum_rename(kick, "  Bass Drum "));
+    assert_eq!(
+        one_edit(&f, n),
+        drum(DrumEdit::RenameRow {
+            seq: 3,
+            lane: 40,
+            row: 1,
+            name: "Bass Drum".into(),
+        })
+    );
+    let n = f.edits().len();
+    assert!(!m.drum_rename(kick, "Kick"), "unchanged: no undo step");
+    assert!(!m.drum_rename(kick, "   "), "empty: no undo step");
+    assert_eq!(f.edits().len(), n);
+    // Kick dropped on Clap's band moves it into Perc; far below splits it.
+    assert!(m.drum_drop(0, 0, 90.));
+    assert_eq!(
+        one_edit(&f, n),
+        drum(DrumEdit::MoveRowToLane {
+            seq: 3,
+            lane: 40,
+            row: 1,
+            to_lane: 41,
+        })
+    );
+    let n = f.edits().len();
+    assert!(m.drum_drop(0, 0, 500.));
+    assert_eq!(
+        one_edit(&f, n),
+        drum(DrumEdit::SplitRow {
+            seq: 3,
+            lane: 40,
+            row: 1,
+        })
+    );
+    let n = f.edits().len();
+    assert!(!m.drum_drop(0, 0, 30.), "its own place");
+    assert!(!m.drum_drop(0, 9, 90.), "a stale row index");
+    assert!(!m.drum_drop(9, 0, 90.), "a stale track index");
+    assert_eq!(f.edits().len(), n);
+}
+
+/// Asking Show Velocity for the state the row is already in sends
+/// nothing and is done; with no selection each row command is refused.
+#[test]
+fn show_velocity_sets_and_toggles_and_needs_a_row() {
+    let (f, mut m) = make();
+    assert!(!m.drum_show_velocity(Some(true)));
+    assert_eq!(m.status(), Some(NO_ROW));
+    m.set_status(None);
+    assert!(!m.drum_split_selected_row());
+    assert_eq!(m.status(), Some(NO_ROW));
+    m.drum_select(0, 0);
+    assert!(m.drum_show_velocity(Some(false)), "already hidden");
+    assert!(f.edits().is_empty());
+    assert!(m.drum_show_velocity(Some(true)));
+    assert_eq!(
+        one_edit(&f, 0),
+        drum(DrumEdit::ShowVelocity {
+            seq: 3,
+            lane: 40,
+            row: 1,
+            show: true,
+        })
+    );
+}
+
+/// The row edits act on the selected row by track and row ID: the row of
+/// another track, a row that moved and a row that went (Review Focus 2).
+#[test]
+fn row_edits_never_touch_another_row_or_track() {
+    let (f, mut m) = make();
+    // Clap of Perc: the edit names Perc, never Drums.
+    m.drum_select(1, 0);
+    assert!(m.drum_split_selected_row());
+    assert_eq!(
+        one_edit(&f, 0),
+        drum(DrumEdit::SplitRow {
+            seq: 3,
+            lane: 41,
+            row: 3,
+        })
+    );
+    // Add Row adds to the selected row's track.
+    let next = vizdaw_ffi::drum::drum_next_row(vec![39]).unwrap().unwrap();
+    let n = f.edits().len();
+    assert!(m.drum_add_row());
+    assert_eq!(
+        one_edit(&f, n),
+        drum(DrumEdit::AddRow {
+            seq: 3,
+            lane: 41,
+            name: next.name,
+            note: next.note,
+            dest: None,
+        })
+    );
+    // Snare selected, then the rows swap: Remove still names Snare.
+    m.drum_select(0, 1);
+    let mut lanes = m.drum_lanes().to_vec();
+    lanes[0].rows.swap(0, 1);
+    f.set_drum_lanes(3, lanes.clone());
+    bump(&mut m, true);
+    assert_eq!(m.drum_row(0, 1).unwrap().name, "Kick");
+    let n = f.edits().len();
+    assert!(m.drum_remove_selected_row());
+    assert_eq!(
+        one_edit(&f, n),
+        drum(DrumEdit::RemoveRow {
+            seq: 3,
+            lane: 40,
+            row: 2,
+        })
+    );
+    // Snare goes: no row is selected, and nothing else is removed.
+    lanes[0].rows.retain(|r| r.id != 2);
+    f.set_drum_lanes(3, lanes);
+    bump(&mut m, false);
+    m.set_status(None);
+    let n = f.edits().len();
+    assert!(!m.drum_remove_selected_row());
+    assert!(!m.drum_split_selected_row());
+    assert!(!m.drum_show_velocity(None));
+    assert_eq!(m.status(), Some(NO_ROW));
+    assert_eq!(f.edits().len(), n);
+    // A renamed row that is not in the grid is refused.
+    assert!(!m.drum_rename(DrumRowKey { lane: 40, row: 2 }, "Snare 2"));
+    assert!(!m.drum_rename(DrumRowKey { lane: 42, row: 1 }, "Kick 2"));
+    assert_eq!(f.edits().len(), n);
+}
+
+/// A grid that no longer shows (another editor) has no row for the row
+/// edits, and Add Row has no track.
+#[test]
+fn row_edits_need_the_grid_to_show() {
+    let (f, mut m) = make();
+    m.drum_select(0, 1);
+    m.open_detail(lane(3, 40), Some(DetailEditorKind::List));
+    assert!(!m.drum_remove_selected_row());
+    assert!(!m.drum_add_row());
+    assert_eq!(m.status(), Some(NO_TRACK_TO_ADD));
+    assert!(!m.drum_drop(0, 0, 90.));
+    assert!(!m.drum_rename(DrumRowKey { lane: 40, row: 1 }, "Bass Drum"));
+    assert!(!m.drum_set_quantize(40, None));
+    assert!(!m.drum_nudge(40, 1));
+    assert!(f.edits().is_empty());
+}
+
+/// Every note has a row: Add Row says so and sends nothing.
+#[test]
+fn add_row_with_every_note_taken() {
+    let (f, mut m) = make();
+    let mut lanes = m.drum_lanes().to_vec();
+    lanes[0].rows = (0..=127u8)
+        .map(|n| vizdaw_app::testing::drum_row(100 + u64::from(n), "R", n, vec![]))
+        .collect();
+    f.set_drum_lanes(3, lanes);
+    bump(&mut m, true);
+    let n = f.edits().len();
+    assert!(!m.drum_add_row());
+    assert_eq!(m.status(), Some(every_note_taken("Drums").as_str()));
+    assert_eq!(f.edits().len(), n);
+}
+
+/// Swift `laneQuantizeNudgeAndDrumLaneMarking` (`:205-217`), and nudge
+/// stopping at its end (Review Focus 5).
+#[test]
+fn lane_quantize_and_nudge() {
+    let (f, mut m) = make();
+    let swing = drum_quantize_choices()
+        .iter()
+        .find(|c| c.title == "1/16 Swing 62%")
+        .expect("a swing choice");
+    assert!(std::ptr::eq(
+        drum_quantize_choices(),
+        drum_quantize_choices()
+    ));
+    assert!(m.drum_set_quantize(40, swing.quantize.clone()));
+    assert_eq!(
+        one_edit(&f, 0),
+        EditCommand::Lane {
+            edit: LaneEdit::SetPlayQuantize {
+                seq: 3,
+                lane: 40,
+                quantize: swing.quantize.clone(),
+            }
+        }
+    );
+    assert_eq!(drum_quantize_title(&m.drum_lanes()[0]), "Off");
+    let n = f.edits().len();
+    assert!(m.drum_nudge(40, -2));
+    assert_eq!(
+        one_edit(&f, n),
+        EditCommand::Lane {
+            edit: LaneEdit::SetPlayShift {
+                seq: 3,
+                lane: 40,
+                shift: -240,
+            }
+        }
+    );
+    assert!(m.mark_drum_lane(3, 30, true));
+    assert_eq!(f.edits().last(), Some(&mark(30, true)));
+    // At the end of its range a nudge sends nothing and is done.
+    let mut lanes = m.drum_lanes().to_vec();
+    lanes[0].play_shift = 3_840;
+    f.set_drum_lanes(3, lanes);
+    bump(&mut m, false);
+    let n = f.edits().len();
+    assert!(m.drum_nudge(40, 1));
+    assert_eq!(f.edits().len(), n);
+    assert!(!m.drum_nudge(99, 1), "a track the grid does not show");
+    assert_eq!(f.edits().len(), n);
 }

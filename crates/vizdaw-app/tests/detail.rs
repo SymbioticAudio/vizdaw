@@ -290,22 +290,11 @@ fn a_block_target_at_the_tick_limits_does_not_overflow() {
     }
 }
 
-/// The editors this app has: the Piano Roll, the List and the Strip
-/// Chart (slice 10c); the Drum Grid comes later.
+/// Every editor kind is one this app has (the Drum Grid since slice
+/// 10d).
 #[test]
-fn the_strip_chart_is_available() {
-    let available: Vec<_> = DetailEditorKind::ALL
-        .into_iter()
-        .filter(|k| k.is_available())
-        .collect();
-    assert_eq!(
-        available,
-        [
-            DetailEditorKind::PianoRoll,
-            DetailEditorKind::List,
-            DetailEditorKind::StripChart
-        ]
-    );
+fn every_editor_is_available() {
+    assert!(DetailEditorKind::ALL.into_iter().all(|k| k.is_available()));
 }
 
 /// A song saved with a Strip Chart as the last used editor: a
@@ -319,18 +308,17 @@ fn a_saved_strip_chart_last_editor_opens_the_chart() {
     assert_eq!(m.detail_kind_name(), "strip_chart");
 }
 
-/// A song saved with an editor this app does not have yet as the last
-/// used one (the Drum Grid): a double-click opens the Piano Roll, and the
-/// saved last-used editor stays.
+/// A song saved with the Drum Grid as the last used editor: a
+/// double-click opens it, and the saved last-used editor stays.
 #[test]
-fn an_unported_last_editor_opens_the_piano_roll() {
+fn a_saved_drum_grid_last_editor_opens_the_drum_grid() {
     let (json, kind) = ("drumGrid", DetailEditorKind::DrumGrid);
     let f = Arc::new(editor_fake());
     f.set_layout(Some(&format!(r#"{{"lastKind":"{json}"}}"#)));
     let mut m = model(&f);
     assert_eq!(m.layout().last_kind, kind);
     m.open_detail(block(0, 10), None);
-    assert_eq!(m.detail_kind_name(), "piano_roll");
+    assert_eq!(m.detail_kind_name(), "drum_grid");
     assert_eq!(m.layout().last_kind, kind, "the saved one stays");
     let v: serde_json::Value = serde_json::from_str(&m.layout().encoded()).unwrap();
     assert_eq!(v["lastKind"], json);

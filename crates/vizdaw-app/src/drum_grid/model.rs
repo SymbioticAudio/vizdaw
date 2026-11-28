@@ -48,7 +48,7 @@ struct LayoutCache {
 #[derive(Default)]
 pub struct DrumGridModel {
     /// The row the row commands act on.
-    selected: Option<DrumRowKey>,
+    pub(super) selected: Option<DrumRowKey>,
     lanes: Mutex<Option<LanesCache>>,
     /// A read that failed at `(seq, version)`: not retried there.
     failure: Mutex<Option<(u64, u64)>>,

@@ -170,14 +170,7 @@ impl EditorModel {
     }
 
     fn opening_kind_in(l: &EditorLayout, kind: Option<DetailEditorKind>) -> DetailEditorKind {
-        match kind {
-            Some(k) => k,
-            // A last-used editor this app does not have yet (a song saved
-            // with the Drum Grid) opens the Piano Roll and stays the saved
-            // one.
-            None if !l.last_kind.is_available() => DetailEditorKind::PianoRoll,
-            None => l.last_kind,
-        }
+        kind.unwrap_or(l.last_kind)
     }
 
     pub fn close_detail(&mut self) {

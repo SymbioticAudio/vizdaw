@@ -3,7 +3,9 @@
 //! the grid's labels and messages, and what the pane's grid shows. The grid's records and rules are
 //! the core's (`vizdaw_ffi::drum`). No GPUI; the view is the GPUI crate's.
 
+mod commands;
 mod model;
+mod rows;
 mod settings;
 mod stroke;
 mod text;
@@ -11,6 +13,9 @@ mod text;
 pub use model::{DrumGridModel, DrumRowKey, drum_grid_offers};
 
 pub use stroke::DrumExtend;
+
+pub use commands::{DRUM_COMMANDS, drum_enabled, drum_is_on, run_drum};
+pub use rows::{drum_quantize_choices, drum_quantize_title};
 
 pub use settings::{DrumGridSettings, DrumView, LENGTHS, lengths_including, stepped_velocity};
 pub use text::{

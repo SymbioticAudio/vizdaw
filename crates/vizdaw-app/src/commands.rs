@@ -14,6 +14,7 @@ use vizdaw_ffi::automation::automation_suspended;
 
 use crate::alerts::error_message;
 use crate::document::DocumentModel;
+pub use crate::drum_grid::{DRUM_COMMANDS, drum_enabled, drum_is_on, run_drum};
 use crate::editor::{DetailEditorKind, GESTURE_OPEN, NudgeDirection};
 pub use crate::lane_inputs::LANE_INPUT_COMMANDS;
 use crate::mixer::commands::{SELECTION_FILLED, SUSPEND, mode_of, suspend};
@@ -45,6 +46,7 @@ pub const EDITOR_COMMANDS: &[&str] = &[
     "editors.piano_roll",
     "editors.list",
     "editors.strip_chart",
+    "editors.drum_grid",
     "editors.close_detail",
     "editors.insert_event",
     "editors.nudge_earlier",
@@ -414,6 +416,9 @@ pub fn enabled(id: &str, doc: &DocumentModel) -> bool {
     if MODIFY_COMMANDS.contains(&id) {
         return crate::modify_commands::enabled(id, doc);
     }
+    if DRUM_COMMANDS.contains(&id) {
+        return drum_enabled(id, doc);
+    }
     if EDITOR_COMMANDS.contains(&id) {
         return match id {
             "editors.close_detail" => doc.layout().detail.is_some(),
@@ -468,6 +473,9 @@ pub fn perform_from_menu(id: &str, doc: &mut DocumentModel) -> Result<Ran, Contr
     }
     if MODIFY_COMMANDS.contains(&id) {
         return crate::modify_commands::perform_from_menu(id, doc);
+    }
+    if DRUM_COMMANDS.contains(&id) {
+        return run_drum(id, &[], doc).map_err(|e| refused(doc, e));
     }
     if EDITOR_COMMANDS.contains(&id) {
         return run_editor(id, &[], doc).map_err(|e| refused(doc, e));
@@ -542,6 +550,7 @@ pub fn is_on(id: &str, doc: &DocumentModel) -> bool {
         "modify.exact_mode" => doc.exact_mode(),
         SUSPEND => automation_suspended(),
         _ if STEP_COMMANDS.contains(&id) => crate::step_entry::step_is_on(id, doc),
+        _ if DRUM_COMMANDS.contains(&id) => drum_is_on(id, doc),
         _ => crate::view::is_on(id, doc),
     }
 }
@@ -602,6 +611,9 @@ pub fn run(
     }
     if MODIFY_COMMANDS.contains(&id) {
         return crate::modify_commands::run(id, args, doc);
+    }
+    if DRUM_COMMANDS.contains(&id) {
+        return run_drum(id, args, doc);
     }
     if EDITOR_COMMANDS.contains(&id) {
         return run_editor(id, args, doc);
@@ -767,7 +779,7 @@ pub(crate) fn on_flag(id: &str, args: &[(String, ArgValue)]) -> Result<Option<bo
 }
 
 /// An editor command: Snap to Grid (`on`, absent toggles), Piano Roll,
-/// List and Strip Chart (each opens on the open detail's target or the
+/// List, Strip Chart and Drum Grid (each opens on the open detail's target or the
 /// selection; nothing to show opens nothing), Close Detail Editor, Insert Event and the nudges (with the
 /// settings the UI handed the document).
 fn run_editor(
@@ -784,6 +796,7 @@ fn run_editor(
         "editors.piano_roll" => doc.show_detail(DetailEditorKind::PianoRoll),
         "editors.list" => doc.show_detail(DetailEditorKind::List),
         "editors.strip_chart" => doc.show_detail(DetailEditorKind::StripChart),
+        "editors.drum_grid" => doc.show_detail(DetailEditorKind::DrumGrid),
         "editors.insert_event" => {
             if !insert_event_ready(doc) {
                 return Err(unavailable(NO_LIST));
