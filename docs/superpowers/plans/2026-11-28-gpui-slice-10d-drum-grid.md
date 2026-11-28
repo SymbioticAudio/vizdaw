@@ -641,3 +641,15 @@
 
 - Confirm Ruling 3. Opening a plain MIDI or Instrument track in the Drum Grid marks it a drum track (an undoable edit), and the README's header-menu "Drum Track" is not ported.
 - Confirm Ruling 8 (the e2e uses the docked pane), and Ruling 7 (the Drum menu after Track until Region exists).
+
+## Outcome (2026-11-28)
+
+Eight tasks, 11 commits (beb0b737..4c2036a9), each task reviewed; final whole-branch review: ready to merge, no Critical or Important findings. Controller rulings:
+
+1. Ruling 3 confirmed: opening a non-drum track in the grid marks it a drum track, one undoable edit, as the code at the tag does; no header "Drum Track" item. The mark keys off the editor that really opens (`EditorModel::opening_kind`) and only off a fresh track read, so a Busy core cannot mark twice.
+2. Rulings 7 and 8 confirmed: the Drum menu sits after Track; the e2e paints by clicking cell elements in the docked pane.
+3. Ruling 13 checked: the Audio Editor is a pane view, not a detail kind, so removing the unported-editor fallback leaves nothing unported.
+4. A press anywhere on the grid (ruler, header band, new-track band, secondary click) first cancels a stroke whose release was lost. The task review graded the header case Important, because the next held move could commit the old stroke; fixed in 539ad3f9 and verified by the controller in place of a re-review.
+5. The digits font is a platform monospace (no theme token exists); duplicated helpers, live-settings strokes and the other edge cases are in "GPUI slice 10d: review leftovers".
+6. The slice 10b and 10c Linux ticks had left a stray empty cell in 18 checklist rows; fixed in 4c2036a9.
+
