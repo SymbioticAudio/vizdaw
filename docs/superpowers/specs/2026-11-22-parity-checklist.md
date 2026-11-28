@@ -71,7 +71,7 @@ item (false: keys, the Keys settings and the control channel only).
 |---|---|---|---|---|---|---|
 | editors.piano_roll | Editors | Piano Roll | ⌘1 | true | S5 | S5 |
 | editors.list | Editors | List | ⌘2 | true | S4 | S4 |
-| editors.strip_chart | Editors | Strip Chart | ⌘3 | true | | |
+| editors.strip_chart | Editors | Strip Chart | ⌘3 | true | S10c (`gpui_strip_chart_opens_draws_rows_and_saves_them`) | |
 | editors.drum_grid | Editors | Drum Grid | ⌘4 | true | | |
 | editors.audio_editor | Editors | Audio Editor | ⌘5 | true | | |
 | editors.piano_roll_window | Editors | Open Piano Roll in Window | ⌥⌘1 | true | | |
@@ -501,8 +501,8 @@ a group of by-eye steps the GPUI app must pass.
 | Plugins (plan 3c) | S10a (browser, inserts, EQ, Manager, launch scan, control verbs) | S10a (CI run 46060100604) |
 | Editors (plan 4a) | | |
 | Piano roll (plan 4b) | | |
-| List editor and Select and Modify (plan 4c) | S4 (List editor), S10b (Select and Modify; Strip Chart Line and Automation Target wait for the Strip Chart) | S4, S10b (CI run 46095836737) |
-| Strip Chart and automation (plan 4d) | | |
+| List editor and Select and Modify (plan 4c) | S4 (List editor), S10b (Select and Modify), S10c (Strip Chart Line and Automation Target: `gpui_modify_strip_chart_line_sets_velocities`) | S4, S10b (CI run 46095836737) |
+| Strip Chart and automation (plan 4d) | S10c (Strip Chart, Controllers pane, automation rows in the list, the panel's Strip Chart Line and Automation Target; torn-off windows: later slice; on screen: M28) | |
 | Control channel (plan CC) | | |
 | Drum grid (plan 4e) | | |
 | Keys and step entry (plan 4f) | | |
