@@ -540,7 +540,7 @@ impl DocumentModel {
     /// The pane's detail changed from `before`: a stroke of a pane that no
     /// longer shows that Strip Chart (another editor, another target, or
     /// none) is cancelled (Review Focus 1).
-    pub(crate) fn detail_changed(&mut self, before: Option<DetailState>) {
+    pub(crate) fn strip_detail_changed(&mut self, before: Option<DetailState>) {
         if self.strip_stroke(ChartSlot::Pane).is_none() {
             return;
         }

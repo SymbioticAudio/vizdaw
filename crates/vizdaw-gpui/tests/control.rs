@@ -1715,6 +1715,42 @@ fn close_detail_with_nothing_open_is_unavailable(cx: &mut TestAppContext) {
     assert_eq!(e["detail"], Value::Null);
 }
 
+/// The Drum Grid's commands run over the channel (slice 10d); its torn-off
+/// window comes in a later slice.
+#[gpui::test]
+fn the_drum_grid_commands_run_over_the_channel(cx: &mut TestAppContext) {
+    let s = setup(cx, demo_fake());
+    ok(call(&s, cx, "app.new_demo", json!({})));
+    ok(call(&s, cx, "command.run", json!({"id": "editors.list"})));
+    ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "editors.drum_grid"}),
+    ));
+    let e = ok(call(&s, cx, "state.get", json!({"target": "editor"})));
+    assert_eq!(e["detail"]["kind"], "drum_grid");
+    ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "drum.timeline", "params": {"on": true}}),
+    ));
+    // A refusal is the command's own, not `not_yet`.
+    let e = call(&s, cx, "command.run", json!({"id": "drum.remove_row"})).unwrap_err();
+    assert_eq!(e.code, ErrorCode::Unavailable);
+    assert!(!e.message.contains("GPUI app yet"), "{}", e.message);
+    let e = call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "editors.drum_grid_window"}),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Unavailable);
+    assert!(e.message.contains("GPUI app yet"), "{}", e.message);
+}
+
 #[gpui::test]
 fn the_wait_reads_the_detail_kind(cx: &mut TestAppContext) {
     let s = setup(cx, demo_fake());

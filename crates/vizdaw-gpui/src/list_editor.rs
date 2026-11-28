@@ -519,7 +519,7 @@ fn bar(
             })
             .collect();
         items.push(Entry::Separator);
-        items.push(Entry::Label(FRAME_RATE));
+        items.push(Entry::Label(FRAME_RATE.to_owned()));
         for fps in Smpte::RATES {
             items.push(Entry::item(
                 &format!("{fps} fps"),
@@ -630,7 +630,7 @@ pub(crate) enum Entry {
         enabled: bool,
         act: Act,
     },
-    Label(&'static str),
+    Label(String),
     Separator,
 }
 
@@ -720,8 +720,8 @@ pub(crate) fn bar_menu(
                     .py_1()
                     .text_xs()
                     .text_color(rgb(colors::dim()))
-                    .child(title)
-                    .child(scope.control("text", title, true)),
+                    .child(title.clone())
+                    .child(scope.control("text", &title, true)),
             ),
             Entry::Item {
                 title,

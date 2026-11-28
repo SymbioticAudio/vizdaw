@@ -12,6 +12,7 @@ mod snap;
 
 pub use detail::{DetailEditorKind, DetailState, EditorTarget, ListFilter};
 pub use gesture::{Gesture, LANE_REMOVED};
+pub(crate) use layout::field;
 pub use layout::{
     BlockRuleSetting, EditorLayout, LightMode, MainView, PaneSetup, PaneSide, PaneState, PaneView,
     TransportMarks, ViewLayouts, controllers_key, off_list,
@@ -143,17 +144,11 @@ impl EditorModel {
         let bottom = &mut l.views.setup_mut(main).bottom;
         bottom.shown = true;
         bottom.view = PaneView::Editor;
-        let kind = match kind {
-            Some(k) => {
-                l.last_kind = k;
-                k
-            }
-            // A last-used editor this app does not have yet (a song saved
-            // with the Strip Chart or Drum Grid) opens the Piano Roll and
-            // stays the saved one.
-            None if !l.last_kind.is_available() => DetailEditorKind::PianoRoll,
-            None => l.last_kind,
-        };
+        let opening = Self::opening_kind_in(l, kind);
+        if let Some(k) = kind {
+            l.last_kind = k;
+        }
+        let kind = opening;
         let mut next = DetailState::new(kind, target);
         if l.detail.as_ref().is_none_or(|old| old.target != target) {
             self.list.retarget();
@@ -166,6 +161,16 @@ impl EditorModel {
             }
         }
         l.detail = Some(next);
+    }
+
+    /// The editor [`EditorModel::open_detail`] opens for `kind`: `kind`,
+    /// else the last-used one.
+    pub fn opening_kind(&self, kind: Option<DetailEditorKind>) -> DetailEditorKind {
+        Self::opening_kind_in(&self.layout, kind)
+    }
+
+    fn opening_kind_in(l: &EditorLayout, kind: Option<DetailEditorKind>) -> DetailEditorKind {
+        kind.unwrap_or(l.last_kind)
     }
 
     pub fn close_detail(&mut self) {

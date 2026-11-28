@@ -39,10 +39,11 @@ pub const CONTROLLERS_NOTE: &str = "Select a track to see its controllers.";
 pub const MIXER: &str = "Mixer";
 /// The editor kinds the bottom pane's picker lists, in Swift's order (the
 /// others come with their editors).
-const KINDS: [DetailEditorKind; 3] = [
+const KINDS: [DetailEditorKind; 4] = [
     DetailEditorKind::PianoRoll,
     DetailEditorKind::List,
     DetailEditorKind::StripChart,
+    DetailEditorKind::DrumGrid,
 ];
 
 /// A region's rectangle in the area under the transport bar (top-left

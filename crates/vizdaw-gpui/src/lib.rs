@@ -10,6 +10,7 @@ mod channel_strip_pane;
 pub mod control;
 pub mod controls;
 pub mod detail_pane;
+pub mod drum_grid;
 pub mod file_menu;
 pub mod file_panels;
 mod fit;

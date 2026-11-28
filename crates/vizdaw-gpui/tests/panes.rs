@@ -512,7 +512,14 @@ fn pane_pickers_choose_views(cx: &mut TestAppContext) {
     s.click_picker(BOTTOM);
     assert_eq!(
         s.menu_items(),
-        ["Piano Roll", "List", "Strip Chart", "Audio Editor", "Mixer"]
+        [
+            "Piano Roll",
+            "List",
+            "Strip Chart",
+            "Drum Grid",
+            "Audio Editor",
+            "Mixer"
+        ]
     );
     assert!(s.element("menuitem", "Piano Roll").selected);
     s.click("menuitem", "Mixer");
@@ -552,7 +559,13 @@ fn pane_pickers_choose_views(cx: &mut TestAppContext) {
     s.click_picker(BOTTOM);
     assert_eq!(
         s.menu_items(),
-        ["Piano Roll", "List", "Strip Chart", "Audio Editor"]
+        [
+            "Piano Roll",
+            "List",
+            "Strip Chart",
+            "Drum Grid",
+            "Audio Editor"
+        ]
     );
     s.click("menuitem", "Audio Editor");
     assert_eq!(s.pane(PaneSide::Bottom).view, PaneView::AudioEditor);

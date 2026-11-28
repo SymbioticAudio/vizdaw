@@ -252,7 +252,14 @@ fn editors_list_opens_the_list_on_the_shown_sequence(cx: &mut TestAppContext) {
         .collect();
     assert_eq!(
         items,
-        ["Piano Roll", "List", "Strip Chart", "Audio Editor", "Mixer"]
+        [
+            "Piano Roll",
+            "List",
+            "Strip Chart",
+            "Drum Grid",
+            "Audio Editor",
+            "Mixer"
+        ]
     );
     assert!(s.element("menuitem", "List").selected);
     s.click("menuitem", "List");

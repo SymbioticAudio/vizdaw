@@ -4,15 +4,14 @@
 
 use std::ops::RangeInclusive;
 
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use vizdaw_ffi::modify::CurveRow;
 use vizdaw_ffi::strip::{LineShapeRow, PeriodRow};
 
 use super::scale::{StripMode, StripOp};
 use crate::arrangement::PPQ;
-use crate::editor::EditorLayout;
+use crate::editor::{EditorLayout, field};
 use crate::select_modify::WaveKind;
 
 /// The most rows a chart shows (`M/StripChartModel.swift:104`).
@@ -168,13 +167,6 @@ impl Default for StripChartSettings {
             ticks_per_point: 96.,
         }
     }
-}
-
-/// `obj[key]` as a `T`, or `fallback` when missing or malformed.
-fn field<T: DeserializeOwned>(obj: &Map<String, Value>, key: &str, fallback: T) -> T {
-    obj.get(key)
-        .and_then(|v| T::deserialize(v).ok())
-        .unwrap_or(fallback)
 }
 
 impl StripChartSettings {

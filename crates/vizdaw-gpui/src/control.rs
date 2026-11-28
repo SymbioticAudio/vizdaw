@@ -1783,7 +1783,8 @@ fn not_yet(what: &str) -> ControlError {
              file.interchange_report / media.import / media.convert / media.relink / \
              transport.* / locator.* / record.* / marker.* / midi.inject / step.* / ui.set_transport_bar / \
              ui.reset_transport_bar / audio.set / edit.undo / edit.redo / track.* / editors.snap / \
-             editors.list / editors.close_detail / editors.insert_event / ui.view_arrange / \
+             editors.list / editors.strip_chart / editors.drum_grid / drum.* / \
+             editors.close_detail / editors.insert_event / ui.view_arrange / \
              ui.view_mix / ui.toggle_left / ui.toggle_bottom / ui.toggle_right / ui.pane / \
              automation.set_mode / automation.gesture / automation.release_all / \
              automation.mode.* / automation.suspend / mixer.new_bus / mixer.set_strip / \
