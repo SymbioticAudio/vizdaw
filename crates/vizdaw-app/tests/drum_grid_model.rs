@@ -10,10 +10,12 @@ use std::sync::Arc;
 use support::{FakeSession, drum_fake, edit_calls};
 use vizdaw_app::DocumentModel;
 use vizdaw_app::drum_grid::{DrumRowKey, drum_grid_offers};
-use vizdaw_app::editor::{DetailEditorKind, EditorTarget};
+use vizdaw_app::editor::{DetailEditorKind, EditorTarget, GESTURE_OPEN};
 use vizdaw_ffi::VizError;
-use vizdaw_ffi::drum::{DrumEdit, DrumSpotRow};
-use vizdaw_ffi::edit::{EditCommand, LaneRef};
+use vizdaw_ffi::drum::{
+    DrumEdit, DrumGridSettingsRow, DrumHitRow, DrumPaintHitRow, DrumSpotRow, DrumStrokeRow,
+};
+use vizdaw_ffi::edit::{EditCommand, EventEdit, LaneRef};
 use vizdaw_ffi::selection::TickRange;
 
 const DRUM: Option<DetailEditorKind> = Some(DetailEditorKind::DrumGrid);
@@ -274,4 +276,209 @@ fn the_settings_and_a_ruler_range() {
     );
     assert!(sel.events.is_empty());
     assert!(edit_calls(&f).is_empty(), "no edit");
+}
+
+// MARK: Strokes (Task 3, `T/DrumGridModelTests.swift:107-247`)
+
+const Q: i64 = 15_360;
+const S16: i64 = Q / 4;
+
+fn paint(row: u64, hits: Vec<DrumPaintHitRow>) -> EditCommand {
+    EditCommand::Drum {
+        edit: DrumEdit::Paint {
+            seq: 3,
+            lane: 40,
+            row,
+            hits,
+            window: S16,
+            duration: Q / 8,
+        },
+    }
+}
+
+fn hit(tick: i64, velocity: u16) -> DrumPaintHitRow {
+    DrumPaintHitRow {
+        tick,
+        velocity: velocity << 9,
+    }
+}
+
+#[test]
+fn a_click_on_an_empty_cell_paints_one_hit() {
+    let (f, mut m) = make();
+    m.drum_stroke_began(0, 1, 2 * S16 + 5, 2 * S16, 1, None, false);
+    m.drum_stroke_ended(2 * S16 + 5, 1, None);
+    assert_eq!(
+        edit_calls(&f),
+        ["begin_edit(Paint Drum Hits)", "edit_gesture", "end_edit"]
+    );
+    assert_eq!(
+        f.gesture_edits().last(),
+        Some(&paint(2, vec![hit(2 * S16, 100)]))
+    );
+    assert_eq!(m.drum_selected_row(), Some(DrumRowKey { lane: 40, row: 2 }));
+    assert!(m.drum_stroke().is_none());
+}
+
+#[test]
+fn a_click_on_a_hit_erases_it() {
+    let (f, mut m) = make();
+    m.drum_stroke_began(0, 0, Q + 9, Q, 1, None, false);
+    m.drum_stroke_ended(Q + 9, 1, None);
+    assert_eq!(
+        edit_calls(&f).first().map(String::as_str),
+        Some("begin_edit(Erase Drum Hits)")
+    );
+    assert_eq!(
+        f.gesture_edits().last(),
+        Some(&EditCommand::Event {
+            edit: EventEdit::Delete { events: vec![12] }
+        })
+    );
+}
+
+#[test]
+fn a_drag_paints_a_run_and_the_velocity_lane_sets_each_hit() {
+    let (f, mut m) = make();
+    m.update_drum_settings(|s| s.spacing = Q / 2);
+    m.drum_stroke_began(0, 1, 0, 0, 1, Some(20), false);
+    m.drum_stroke_moved(2 * Q + 1, 1, Some(90));
+    let hits = vec![
+        hit(0, 20),
+        hit(Q / 2, 90),
+        hit(Q, 90),
+        hit(3 * Q / 2, 90),
+        hit(2 * Q, 90),
+    ];
+    assert_eq!(f.gesture_edits().last(), Some(&paint(2, hits.clone())));
+    m.drum_stroke_ended(Q / 2 + 3, 1, Some(127));
+    assert_eq!(
+        f.gesture_edits().last(),
+        Some(&paint(2, hits[..2].to_vec())),
+        "back towards the start: the run shrinks, each hit keeps its velocity"
+    );
+    assert_eq!(edit_calls(&f).last().map(String::as_str), Some("end_edit"));
+    assert!(m.gesture().is_none());
+}
+
+#[test]
+fn escape_and_refusals_leave_no_undo_step() {
+    let (f, mut m) = make();
+    m.drum_stroke_began(0, 1, 0, 0, 1, None, false);
+    m.drum_stroke_moved(Q, 1, None);
+    m.drum_stroke_cancelled();
+    assert_eq!(
+        edit_calls(&f),
+        ["begin_edit(Paint Drum Hits)", "edit_gesture", "abort_edit"]
+    );
+    assert!(m.drum_stroke().is_none() && m.gesture().is_none());
+    // The eraser on an empty cell erases nothing: no gesture at all.
+    f.clear_calls();
+    m.drum_stroke_began(1, 0, 0, 0, 1, None, true);
+    m.drum_stroke_ended(0, 1, None);
+    assert!(edit_calls(&f).is_empty());
+    // Another drag still finishing: the stroke is refused and says so.
+    let sent = f.gesture_edits().len();
+    assert!(m.begin_gesture("Move", vec![(3, 40)]));
+    m.drum_stroke_began(0, 1, 0, 0, 1, None, false);
+    m.drum_stroke_ended(0, 1, None);
+    assert_eq!(m.status(), Some(GESTURE_OPEN));
+    assert_eq!(f.gesture_edits().len(), sent);
+    assert!(m.drum_stroke().is_none());
+}
+
+fn bad_extend(
+    _: DrumStrokeRow,
+    _: Vec<DrumHitRow>,
+    _: i64,
+    _: i64,
+    _: Option<u8>,
+    _: DrumGridSettingsRow,
+) -> Result<DrumStrokeRow, VizError> {
+    Err(VizError::Model {
+        message: "bad".into(),
+    })
+}
+
+#[test]
+fn a_failed_extend_on_mouse_up_aborts_the_gesture() {
+    let (f, mut m) = make();
+    m.drum_stroke_began(0, 1, 0, 0, 1, None, false);
+    m.drum_stroke_moved(Q, 1, None);
+    m.set_drum_extend_for_test(bad_extend);
+    m.drum_stroke_ended(Q, 1, None);
+    assert_eq!(
+        edit_calls(&f).last().map(String::as_str),
+        Some("abort_edit")
+    );
+    assert!(m.drum_stroke().is_none() && m.gesture().is_none());
+}
+
+#[test]
+fn a_new_press_cancels_a_stroke_whose_release_was_lost() {
+    let (f, mut m) = make();
+    m.drum_stroke_began(0, 1, 0, 0, 1, None, false);
+    m.drum_stroke_moved(Q, 1, None);
+    assert!(m.gesture().is_some());
+    m.drum_stroke_began(0, 0, 2 * S16, 2 * S16, 1, None, false);
+    assert_eq!(
+        edit_calls(&f).last().map(String::as_str),
+        Some("abort_edit")
+    );
+    assert!(m.gesture().is_none());
+    let s = m.drum_stroke().expect("the new stroke");
+    assert_eq!((s.lane, s.row), (0, 0));
+    assert_eq!(m.drum_selected_row(), Some(DrumRowKey { lane: 40, row: 1 }));
+}
+
+#[test]
+fn a_grid_that_stops_showing_drops_its_stroke() {
+    let (f, mut m) = make();
+    m.drum_stroke_began(0, 1, 0, 0, 1, None, false);
+    m.drum_stroke_moved(Q, 1, None);
+    m.show_detail(DetailEditorKind::List);
+    assert_eq!(
+        edit_calls(&f).last().map(String::as_str),
+        Some("abort_edit")
+    );
+    assert!(m.gesture().is_none() && m.drum_stroke().is_none());
+
+    let (f, mut m) = make();
+    m.drum_stroke_began(0, 1, 0, 0, 1, None, false);
+    m.drum_stroke_moved(Q, 1, None);
+    m.close_detail();
+    assert_eq!(
+        edit_calls(&f).last().map(String::as_str),
+        Some("abort_edit")
+    );
+    assert!(m.gesture().is_none() && m.drum_stroke().is_none());
+
+    // Another target in the grid drops it too; the same one keeps it.
+    let (_f, mut m) = make();
+    m.drum_stroke_began(0, 1, 0, 0, 1, None, false);
+    m.open_detail(lane(3, 40), DRUM);
+    assert!(m.drum_stroke().is_some(), "the same detail keeps it");
+    m.open_detail(lane(3, 41), DRUM);
+    assert!(m.drum_stroke().is_none());
+}
+
+#[test]
+fn a_stroke_paints_the_row_it_began_on_after_the_rows_reorder() {
+    let (f, mut m) = make();
+    m.drum_stroke_began(0, 1, 2 * S16, 2 * S16, 1, None, false);
+    let mut lanes = m.drum_lanes().to_vec();
+    lanes[0].rows.swap(0, 1);
+    f.set_drum_lanes(3, lanes);
+    bump(&mut m, true);
+    assert_eq!(m.drum_row(0, 1).map(|r| r.id), Some(1), "Kick is row 1 now");
+    m.drum_stroke_moved(3 * S16, 1, None);
+    m.drum_stroke_ended(3 * S16, 1, None);
+    let Some(EditCommand::Drum {
+        edit: DrumEdit::Paint { row, .. },
+    }) = f.gesture_edits().last().cloned()
+    else {
+        panic!("a paint")
+    };
+    assert_eq!(row, 2, "Snare's ID");
+    assert_eq!(edit_calls(&f).last().map(String::as_str), Some("end_edit"));
 }

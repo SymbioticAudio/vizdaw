@@ -5,9 +5,12 @@
 
 mod model;
 mod settings;
+mod stroke;
 mod text;
 
 pub use model::{DrumGridModel, DrumRowKey, drum_grid_offers};
+
+pub use stroke::DrumExtend;
 
 pub use settings::{DrumGridSettings, DrumView, LENGTHS, lengths_including, stepped_velocity};
 pub use text::{

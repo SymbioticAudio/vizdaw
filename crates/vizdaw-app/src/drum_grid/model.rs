@@ -56,6 +56,10 @@ pub struct DrumGridModel {
     /// (Ruling 11: reads are `&self`).
     message: Mutex<Option<String>>,
     layout: Mutex<Option<LayoutCache>>,
+    /// The stroke in progress (`stroke.rs`).
+    pub(super) stroke: Option<super::stroke::DrumStroke>,
+    /// The extend strokes call (`None`: the core's).
+    pub(super) extend: Option<super::stroke::DrumExtend>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -316,9 +320,10 @@ impl DocumentModel {
 
     /// The pane's detail changed from `before`: a pane that no longer
     /// shows the Drum Grid forgets its selected row
-    /// (`M/DocumentModel.swift:418-420`). A change of kind or target ends
-    /// the stroke (Task 3).
-    pub(crate) fn drum_detail_changed(&mut self, _before: Option<&DetailState>) {
+    /// (`M/DocumentModel.swift:418-420`). A change of kind or target, or
+    /// closing it, ends the stroke.
+    pub(crate) fn drum_detail_changed(&mut self, before: Option<&DetailState>) {
+        self.drum_stroke_detail_changed(before);
         if !self.drum_showing() {
             self.drum_grid.selected = None;
         }
