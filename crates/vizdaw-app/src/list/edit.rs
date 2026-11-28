@@ -3,7 +3,7 @@
 
 use vizdaw_ffi::edit::{EditCommand, EventEdit, LaneRef, SequenceEdit};
 use vizdaw_ffi::events::{
-    EventKindRow, EventRow, MarkerRow, MeterEntryRow, SequenceInfo, TempoPointRow,
+    AutomationRow, EventKindRow, EventRow, MarkerRow, MeterEntryRow, SequenceInfo, TempoPointRow,
 };
 
 use super::format::{
@@ -13,6 +13,7 @@ use super::format::{
 use super::rows::{ListColumn, ListContext, ListKind, ListRow, ListSource, ListText};
 use crate::arrangement::{PPQ, bar_at};
 use crate::position::{swift_int, swift_uint};
+use crate::strip_chart::{parse_percent, v32};
 
 /// Why typed text was refused; the message goes to the status line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,7 +340,25 @@ impl ListEdit {
                     _ => refuse("Gain must be -144 to 24 dB."),
                 }
             }
-            // Automation values are edited with the automation editors.
+            // Swift `ListEdit.swift:198-208`.
+            EventKindRow::Automation => {
+                let Some(a) = e.automation else {
+                    return Ok(ListChange::Unchanged);
+                };
+                let Some(v) = parse_percent(t) else {
+                    return refuse("Type a value from 0 to 100 %.");
+                };
+                if v == a.value {
+                    return Ok(ListChange::Unchanged);
+                }
+                Ok(Self::replace(e, |n| {
+                    n.automation = Some(AutomationRow {
+                        target: a.target,
+                        value: v,
+                    });
+                    n.value = v32(v);
+                }))
+            }
             _ => Ok(ListChange::Unchanged),
         }
     }

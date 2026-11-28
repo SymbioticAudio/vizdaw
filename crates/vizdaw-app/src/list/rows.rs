@@ -13,6 +13,7 @@ use vizdaw_ffi::events::{
 
 use super::format::{Bbu, Bend14, DurationText, KeyName, PitchName, Smpte, Value7, Velocity7};
 use crate::arrangement::{bar_at, beat_ticks};
+use crate::strip_chart::{percent, short_title};
 
 /// What a list row is: an event kind or a sequence map entry. `ui.json`
 /// and the preferences spell them as Swift does (`note`, `pitchBend`, …).
@@ -671,10 +672,12 @@ impl ListText {
                     .and_then(|s| c.seq_names.get(&s).cloned())
                     .unwrap_or_else(|| "Sequence".into()),
                 EventKindRow::AudioRegion => "Audio".into(),
-                // Automation names come with the automation editors.
-                EventKindRow::Automation
-                | EventKindRow::PitchBend
-                | EventKindRow::ChannelPressure => String::new(),
+                // Swift `ListRows.swift:369`.
+                EventKindRow::Automation => e
+                    .automation
+                    .map(|a| short_title(&a.target))
+                    .unwrap_or_default(),
+                EventKindRow::PitchBend | EventKindRow::ChannelPressure => String::new(),
             },
         }
     }
@@ -713,13 +716,17 @@ impl ListText {
                     format!("{loops} {sign}{}", e.ref_transpose)
                 }
                 EventKindRow::AudioRegion => format!("{:.1} dB", e.gain_db),
-                EventKindRow::Automation => String::new(),
+                // Swift `ListRows.swift:394`.
+                EventKindRow::Automation => {
+                    e.automation.map(|a| percent(a.value)).unwrap_or_default()
+                }
             },
         }
     }
 
-    /// Whether a cell takes typing. References, audio regions and
-    /// automation points are shown but not edited here yet.
+    /// Whether a cell takes typing. References and audio regions are
+    /// shown but not edited here yet; an automation point takes its
+    /// position, mute and value (Swift `ListRows.swift:399-420`).
     pub fn editable(r: &ListRow, col: ListColumn) -> bool {
         match &r.source {
             ListSource::Tempo { index, .. } | ListSource::Meter { index, .. } => {
@@ -730,7 +737,7 @@ impl ListText {
             ListSource::Marker { .. } => col == ListColumn::Position || col == ListColumn::Data2,
             ListSource::Event { row: e, .. } => {
                 use EventKindRow as K;
-                if matches!(e.kind, K::Reference | K::AudioRegion | K::Automation) {
+                if matches!(e.kind, K::Reference | K::AudioRegion) {
                     return false;
                 }
                 match col {
@@ -753,6 +760,7 @@ impl ListText {
                             | K::PolyPressure
                             | K::Program
                             | K::Text
+                            | K::Automation
                     ),
                 }
             }

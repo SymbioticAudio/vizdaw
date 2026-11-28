@@ -11,7 +11,8 @@ use vizdaw_app::list::{
 };
 use vizdaw_ffi::edit::{EditCommand, EventEdit, LaneRef, SequenceEdit};
 use vizdaw_ffi::events::{
-    EventKindRow, EventRow, MarkerRow, MeterEntryRow, TempoPointRow, TextKindRow,
+    AutomationRow, AutomationTargetRow, EventKindRow, EventRow, MarkerRow, MeterEntryRow,
+    TempoPointRow, TextKindRow,
 };
 
 const Q: i64 = 15_360;
@@ -606,4 +607,79 @@ fn hostile_text_never_traps() {
             let _ = ListEdit::commit(text, col, &tempo, &c);
         }
     }
+}
+
+// Swift `AutomationRowsTests`.
+
+fn automation_event(id: u64, target: AutomationTargetRow, value: f64) -> EventRow {
+    EventRow {
+        automation: Some(AutomationRow { target, value }),
+        value: (value * f64::from(u32::MAX)).round() as i64,
+        ..ev(id, 0, EventKindRow::Automation)
+    }
+}
+
+#[test]
+fn automation_rows_show_their_target_and_percent() {
+    let e = automation_event(
+        4,
+        AutomationTargetRow::SendLevel { strip: 3, send: 1 },
+        0.25,
+    );
+    let row = event_row(e);
+    let c = context();
+    assert_eq!(row.kind(), ListKind::Automation);
+    assert_eq!(ListText::cell(&row, ListColumn::Kind, &c), "Automation");
+    assert_eq!(
+        ListText::cell(&row, ListColumn::Data1, &c),
+        "Send 2 · Strip 3"
+    );
+    assert_eq!(ListText::cell(&row, ListColumn::Data2, &c), "25.0%");
+    assert!(ListText::editable(&row, ListColumn::Data2));
+    assert!(!ListText::editable(&row, ListColumn::Data1));
+    assert_eq!(
+        ListText::summary(&row, &c),
+        "Automation, bar 1 beat 1, Send 2 · Strip 3, 25.0%"
+    );
+    assert!(!ListKind::Automation.is_midi());
+    assert_eq!(
+        ListKind::from(EventKindRow::Automation),
+        ListKind::Automation
+    );
+    assert_eq!(
+        ListKind::Automation.event_kind(),
+        Some(EventKindRow::Automation)
+    );
+}
+
+#[test]
+fn typing_a_percent_replaces_the_value() {
+    let e = automation_event(4, AutomationTargetRow::StripFader { strip: 1 }, 0.25);
+    let row = event_row(e);
+    assert_eq!(
+        commit("50", ListColumn::Data2, &row),
+        replaced(&row, |n| {
+            n.automation = Some(AutomationRow {
+                target: AutomationTargetRow::StripFader { strip: 1 },
+                value: 0.5,
+            });
+            n.value = (0.5 * f64::from(u32::MAX)).round() as i64;
+        })
+    );
+    assert_eq!(
+        commit("50 %", ListColumn::Data2, &row),
+        commit("50", ListColumn::Data2, &row)
+    );
+    assert_eq!(commit("25", ListColumn::Data2, &row), ListChange::Unchanged);
+    assert_eq!(
+        message("150", ListColumn::Data2, &row).as_deref(),
+        Some("Type a value from 0 to 100 %.")
+    );
+    assert!(message("nan", ListColumn::Data2, &row).is_some());
+    assert!(message("-1", ListColumn::Data2, &row).is_some());
+    let bare = event_row(ev(5, 0, EventKindRow::Automation));
+    assert_eq!(
+        commit("50", ListColumn::Data2, &bare),
+        ListChange::Unchanged
+    );
 }

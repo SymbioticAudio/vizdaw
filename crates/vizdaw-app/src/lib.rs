@@ -52,6 +52,7 @@ pub mod select_modify;
 pub mod session;
 pub mod step_entry;
 pub mod store;
+pub mod strip_chart;
 pub mod surface_commands;
 pub mod surface_relay;
 pub mod surface_settings;
