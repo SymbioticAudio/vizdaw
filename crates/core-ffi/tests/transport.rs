@@ -370,8 +370,16 @@ fn shutdown_stops_and_drops_the_engine_host() {
     let _g = serial();
     let (s, song) = demo();
     s.play(song).unwrap();
-    ms(20);
-    assert!(engine_active());
+    // The engine comes up on its own thread; a loaded CI runner has taken
+    // longer than a fixed 20 ms (PR #21), so wait for it with a deadline.
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !engine_active() {
+        assert!(
+            std::time::Instant::now() < until,
+            "the engine never started"
+        );
+        ms(5);
+    }
     vizdaw_ffi::shutdown().unwrap();
     assert!(!engine_active());
     // Idempotent, and the session still closes cleanly.

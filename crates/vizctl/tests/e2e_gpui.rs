@@ -6109,8 +6109,24 @@ fn click_role(app: &mut App, w: &Value, role: &str, label: &str) {
 /// the value `value`.
 fn wait_for_role_value(app: &mut App, w: &Value, role: &str, label: &str, value: &str) {
     wait_in_tree(app, w, &format!("{role} {label} = {value:?}"), |t| {
-        find_role(t, role, label).filter(|n| n["value"].as_str() == Some(value))
+        find_role_value(t, role, label, value)
     });
+}
+
+/// The first node with this role, label and value. Off macOS the window
+/// draws its own menu bar, whose "View", "Step" and "Track" menus share a
+/// label with an editor bar's pickers, so the value is part of the match.
+fn find_role_value(nodes: &Value, role: &str, label: &str, value: &str) -> Option<Value> {
+    nodes.as_array().into_iter().flatten().find_map(|n| {
+        if n["role"] == role
+            && n["label"].as_str() == Some(label)
+            && n["value"].as_str() == Some(value)
+        {
+            Some(n.clone())
+        } else {
+            find_role_value(&n["children"], role, label, value)
+        }
+    })
 }
 
 /// Editors › Strip Chart over the demo's Chords block: the chart draws a
