@@ -13,7 +13,7 @@ use support::{
 use vizdaw_app::DocumentModel;
 use vizdaw_app::editor::GESTURE_OPEN;
 use vizdaw_app::editor::{DetailEditorKind, EditorTarget};
-use vizdaw_app::select_modify::GestureOrigin;
+use vizdaw_app::select_modify::{GestureOrigin, PanelTask};
 use vizdaw_app::strip_chart::{
     AutomationTargets, ChartSlot, ERASE_NOTES, MAX_ROWS, StripLane, StripMenu, StripMode, StripOp,
     StripPoint, erase_command, line_command, only_target, opening, v32,
@@ -23,10 +23,10 @@ use vizdaw_ffi::automation::PreviewPointRow;
 use vizdaw_ffi::edit::{EditCommand, LaneRef};
 use vizdaw_ffi::events::{AutomationRow, AutomationTargetRow as T, EventKindRow, EventRow};
 use vizdaw_ffi::mixer::{BusRow, MixerSnapshot, StripKindRow, VcaRow};
-use vizdaw_ffi::modify::SelectModeRow;
+use vizdaw_ffi::modify::{ModifyRow, SelectModeRow};
 use vizdaw_ffi::selection::SelectionRow;
 use vizdaw_ffi::snapshot::ParamRow;
-use vizdaw_ffi::strip::{LineOpRow, LineRow, LineShapeRow};
+use vizdaw_ffi::strip::{LineOpRow, LineRow, LineShapeRow, LineTargetRow, SeriesRow};
 
 const PANE: ChartSlot = ChartSlot::Pane;
 const CONTROLLERS: ChartSlot = ChartSlot::Controllers;
@@ -875,4 +875,65 @@ fn a_chart_that_stops_showing_drops_its_stroke() {
     assert!(m.strip_stroke(PANE).is_some());
     m.open_detail(chords(), Some(DetailEditorKind::PianoRoll));
     assert!(m.strip_stroke(PANE).is_none());
+}
+
+// MARK: Exact Mode (Task 7, `T/StripChartModelTests.swift`)
+
+#[test]
+fn exact_mode_opens_the_panel_instead_of_applying() {
+    let (f, mut m) = stroking();
+    m.set_exact_mode(true);
+    m.set_strip_row(PANE, 0, StripLane::Controller(7));
+    f.clear_calls();
+    m.strip_stroke_began(PANE, 0, pt(0, 0), false);
+    m.strip_stroke_moved(PANE, pt(Q, 99));
+    m.strip_stroke_ended(PANE, pt(Q, 99));
+    // The last edit call (the panel's selection follows it).
+    let edit_calls: Vec<String> = f
+        .calls()
+        .into_iter()
+        .filter(|c| c.starts_with("begin_edit") || c == "edit_gesture" || c.ends_with("_edit"))
+        .collect();
+    assert_eq!(
+        edit_calls.last().map(String::as_str),
+        Some("abort_edit"),
+        "previewed, then put back"
+    );
+    assert!(f.edits().is_empty() && !f.edit_is_open());
+    assert!(m.gesture().is_none() && m.strip_stroke(PANE).is_none());
+    assert!(m.take_modify_present());
+    assert!(m.select_modify().is_open());
+    assert_eq!(m.select_modify().task, PanelTask::Change);
+    match m.select_modify().config.modification() {
+        Some(ModifyRow::Line { target, op, line }) => {
+            assert_eq!(
+                target,
+                LineTargetRow::Series {
+                    series: SeriesRow::Controller { index: 7 }
+                }
+            );
+            assert_eq!(op, LineOpRow::Draw);
+            assert_eq!((line.from, line.to), (0, Q));
+        }
+        other => panic!("no line in the panel: {other:?}"),
+    }
+    // The selection is the stroke's range on the shown track.
+    let sel = m.selection();
+    assert_eq!(sel.lanes, vec![LaneRef { seq: 3, lane: 31 }]);
+    assert_eq!(sel.time_range.map(|r| (r.start, r.end)), Some((0, Q + 1)));
+}
+
+#[test]
+fn escape_during_an_exact_strip_stroke_opens_nothing() {
+    let (f, mut m) = stroking();
+    m.set_exact_mode(true);
+    m.strip_stroke_began(PANE, 0, pt(0, 1), false);
+    m.strip_stroke_moved(PANE, pt(Q, 2));
+    m.strip_stroke_cancelled(PANE);
+    assert_eq!(f.calls().last().map(String::as_str), Some("abort_edit"));
+    assert!(!m.take_modify_present());
+    assert!(!m.select_modify().is_open());
+    // The release that follows opens nothing either.
+    m.strip_stroke_ended(PANE, pt(Q, 2));
+    assert!(!m.take_modify_present() && !m.select_modify().is_open());
 }

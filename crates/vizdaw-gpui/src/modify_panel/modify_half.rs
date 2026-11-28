@@ -411,7 +411,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_operation_picker_offers_no_strip_chart_line(cx: &mut TestAppContext) {
+    fn the_operation_picker_offers_every_kind(cx: &mut TestAppContext) {
         let s = setup(cx);
         let (n, doc) = open_panel(&s, cx, "modify.transpose");
         click_node(&s, cx, n, "menu", OPERATION);
@@ -421,7 +421,7 @@ mod tests {
             .map(|k| k.title().to_owned())
             .collect();
         assert_eq!(labels(&t, "menuitem"), offered);
-        assert!(!has_node(&t, "menuitem", "Strip Chart Line"));
+        assert!(has_node(&t, "menuitem", "Strip Chart Line"));
         // Quantize: its groove field and numbers.
         click_node(&s, cx, n, "menuitem", "Quantize");
         let t = tree(&s, cx, n);
@@ -429,13 +429,16 @@ mod tests {
         node(&t, "textfield", "grid");
         node(&t, "textfield", "strength");
         assert!(!has_node(&t, "textfield", "semitones"));
-        // A loaded Strip Chart line: its title, no editor.
+        // A loaded Strip Chart line: its title and its fields (slice 10c
+        // Task 7; its pickers are the GPUI line editor's).
         edit_doc(cx, doc, |d| {
             d.select_modify_mut().config.modify.op = ModifyKind::Line.default_op();
         });
         let t = tree(&s, cx, n);
         assert_eq!(node(&t, "menu", OPERATION)["value"], "Strip Chart Line");
-        assert_eq!(labels(&t, "textfield"), ["Template name"]);
+        for label in ["from", "to", "start", "end", "step"] {
+            node(&t, "textfield", label);
+        }
     }
 
     #[gpui::test]

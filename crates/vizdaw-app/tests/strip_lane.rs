@@ -616,3 +616,24 @@ fn vca_fader_targets_are_named() {
         "Velocity Scale · Destination 5"
     );
 }
+
+/// Slice 10c Task 7: every lane the panel's Line target picker offers is a
+/// line target that reads back as the same row.
+#[test]
+fn the_line_pickers_lanes_round_trip_their_line_targets() {
+    use vizdaw_app::select_modify::{
+        LINE_TARGET_BASICS, line_target_controllers, line_target_octaves,
+    };
+    let mut lanes: Vec<StripLane> = LINE_TARGET_BASICS.to_vec();
+    lanes.extend(line_target_controllers());
+    lanes.extend(line_target_octaves().into_iter().flat_map(|(_, l)| l));
+    lanes.push(StripLane::Automation(T::StripFader { strip: 1 }));
+    assert_eq!(lanes.len(), 7 + 128 + 128 + 1);
+    for lane in lanes {
+        assert_eq!(
+            StripLane::from_line_target(lane.line_target()),
+            Some(lane),
+            "{lane:?}"
+        );
+    }
+}

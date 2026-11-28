@@ -342,7 +342,7 @@ mod tests {
         assert_eq!(node(&t, "menu", "Result")["value"], "Replace the Selection");
         assert_eq!(node(&t, "menu", "Match")["value"], "All Conditions");
         assert_eq!(nodes(&t, "button", "Remove Condition").len(), 1);
-        // The menu offers every kind but Automation Target.
+        // The menu offers every kind (slice 10c Task 7).
         click_node(&s, cx, n, "menu", ADD_CONDITION);
         let t = tree(&s, cx, n);
         let offered: Vec<String> = ConditionKind::OFFERED
@@ -350,7 +350,7 @@ mod tests {
             .map(|k| k.title().to_owned())
             .collect();
         assert_eq!(labels(&t, "menuitem"), offered);
-        assert!(!has_node(&t, "menuitem", "Automation Target"));
+        assert!(has_node(&t, "menuitem", "Automation Target"));
         let pitch = node(&t, "menuitem", "Pitch")["id"].clone();
         click(&s, cx, n, &pitch);
         let t = tree(&s, cx, n);

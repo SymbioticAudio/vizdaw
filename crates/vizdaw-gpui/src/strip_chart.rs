@@ -1422,6 +1422,8 @@ impl DocumentWindow {
             let pt = strip_point(d, slot, &frame, press.row, p);
             d.strip_stroke_ended(slot, pt);
         });
+        // An Exact Mode stroke opens the panel with its line.
+        self.present_modify_if_wanted(cx);
         cx.notify();
     }
 

@@ -818,3 +818,36 @@ fn a_controllers_stroke_ends_when_the_view_goes(cx: &mut TestAppContext) {
     assert_eq!(s.last_call().as_deref(), Some("abort_edit"));
     assert!(s.model(|d| d.gesture().is_none() && d.strip_stroke(ChartSlot::Controllers).is_none()));
 }
+
+/// Slice 10c Task 7: in Exact Mode a stroke's release puts the preview
+/// back and opens the document's Select and Modify panel with its line.
+#[gpui::test]
+fn an_exact_stroke_opens_the_panel_with_its_line(cx: &mut TestAppContext) {
+    let mut s = chords_chart(cx);
+    s.update_model(|d| {
+        d.set_exact_mode(true);
+        d.set_strip_row(PANE_SLOT, 0, StripLane::Controller(7));
+    });
+    s.fake.clear_calls();
+    let (from, to) = (s.at(START_X, 30.), s.at(160., 48.));
+    s.drag(from, to, Modifiers::none());
+    assert!(s.fake.edits().is_empty(), "no edit was applied");
+    assert!(s.model(|d| d.gesture().is_none() && d.snapshot().undo_label.is_none()));
+    let doc = s.doc();
+    let panels = s.app.read_with(&s.cx, |a, _| {
+        a.windows()
+            .iter()
+            .filter(|w| w.doc == doc && w.kind == vizdaw_gpui::WindowKind::ModifyPanel)
+            .count()
+    });
+    assert_eq!(panels, 1, "the panel opened");
+    let op = s.model(|d| d.select_modify().config.modify.op.clone());
+    match op {
+        ModifyRow::Line { target, op, line } => {
+            assert_eq!(target, StripLane::Controller(7).line_target());
+            assert_eq!(op, LineOpRow::Draw);
+            assert_eq!((line.from, line.to), (0, Q));
+        }
+        other => panic!("no line in the panel: {other:?}"),
+    }
+}

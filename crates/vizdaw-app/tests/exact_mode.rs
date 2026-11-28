@@ -21,6 +21,7 @@ use vizdaw_app::select_modify::{
     GestureOrigin, ModifyConfig, PanelTask, exact_request, select_request,
 };
 use vizdaw_app::session::DocSession;
+use vizdaw_app::strip_chart::{StripLane, line_command};
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::blocks::BlockRow;
 use vizdaw_ffi::edit::{EditCommand, EventEdit, LaneEdit, LaneRef};
@@ -29,6 +30,7 @@ use vizdaw_ffi::modify::{
     AmountRow, ChangeOpRow, ConditionRow, ConditionTest, ModifyRow, SelectModeRow, ValueTargetRow,
 };
 use vizdaw_ffi::selection::SelectionRow;
+use vizdaw_ffi::strip::{LineOpRow, LineRow, LineShapeRow, LineTargetRow, SeriesRow};
 
 const CHORDS: (u64, u64) = (3, 31);
 const Q16: i64 = 15_360 / 4;
@@ -858,4 +860,98 @@ fn exact_mode_selection_is_set_before_the_command() {
     let sel = f.selection().unwrap();
     assert_eq!(sel.events, vec![1]);
     assert_eq!(sel.lanes, vec![LaneRef { seq: 3, lane: 31 }]);
+}
+
+// MARK: The Strip Chart (slice 10c Task 7, `T/StripChartTests.swift`)
+
+fn cc7_line(from: i64, to: i64) -> LineRow {
+    LineRow {
+        from,
+        to,
+        start: 0,
+        end: 100,
+        step: 1,
+        shape: LineShapeRow::Straight,
+    }
+}
+
+#[test]
+fn exact_mode_keeps_the_option_refine() {
+    let l = cc7_line(4 * Q16, 8 * Q16);
+    let cmd = line_command(StripLane::Controller(7), LineOpRow::Add, l.clone(), true);
+    let r = request(&cmd, GestureOrigin::StripChart);
+    assert_eq!(
+        r.config.select.mode,
+        SelectModeRow::Refine,
+        "⌥ stays a refine in the panel"
+    );
+    let plain = line_command(StripLane::Controller(7), LineOpRow::Add, l, false);
+    let r = request(&plain, GestureOrigin::StripChart);
+    assert_eq!(r.config.select.mode, SelectModeRow::Select);
+}
+
+#[test]
+fn exact_mode_opens_the_line_in_the_panel() {
+    let q = 4 * Q16;
+    let l = cc7_line(q, 2 * q);
+    let cmd = line_command(StripLane::Controller(7), LineOpRow::Add, l.clone(), false);
+    let r = request(&cmd, GestureOrigin::StripChart);
+    assert_eq!(r.task, PanelTask::Change);
+    assert_eq!(
+        r.config.modify.op,
+        ModifyRow::Line {
+            target: LineTargetRow::Series {
+                series: SeriesRow::Controller { index: 7 }
+            },
+            op: LineOpRow::Add,
+            line: l,
+        }
+    );
+    assert!(r.config.modify.enabled && !r.config.modify.to_copy);
+    assert!(r.config.select.enabled);
+    assert_eq!(r.config.select.conditions.len(), 1);
+    assert_eq!(r.events, None);
+    assert_eq!(r.lanes, vec![CHORDS]);
+    assert_eq!(r.range, Some((q, 2 * q + 1)));
+    assert_eq!(r.dropped, None);
+    assert_eq!(
+        exact_request(
+            &ev(EventEdit::Delete { events: vec![1] }),
+            &BTreeSet::new(),
+            GestureOrigin::StripChart
+        ),
+        None
+    );
+    // A note drag's command from the chart is not a line either.
+    assert_eq!(
+        exact_request(&move200(), &chords(), GestureOrigin::StripChart),
+        None
+    );
+}
+
+#[test]
+fn a_line_without_a_rule_turns_select_off() {
+    let l = cc7_line(0, 4 * Q16);
+    let EditCommand::SelectAndModify { mode, modify, .. } =
+        line_command(StripLane::Controller(7), LineOpRow::Set, l, false)
+    else {
+        panic!("a line is a select and modify");
+    };
+    let cmd = EditCommand::SelectAndModify {
+        rule: None,
+        mode,
+        modify,
+        to_copy: true,
+    };
+    let r = request(&cmd, GestureOrigin::StripChart);
+    assert!(!r.config.select.enabled && r.config.select.conditions.is_empty());
+    assert!(!r.config.modify.to_copy, "a line never goes to a copy");
+}
+
+#[test]
+fn a_line_request_at_the_last_tick_does_not_overflow() {
+    let l = cc7_line(0, i64::MAX);
+    let cmd = line_command(StripLane::Controller(7), LineOpRow::Set, l, false);
+    let r = request(&cmd, GestureOrigin::StripChart);
+    assert_eq!(r.range, Some((0, i64::MAX)));
 }

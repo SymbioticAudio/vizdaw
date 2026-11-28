@@ -6,13 +6,15 @@ use vizdaw_app::list::{Value7, Velocity7};
 use vizdaw_app::select_modify::{
     AmountKind, ChangeOpKind, ConditionKind, Edge, Field, FieldKind, GROOVE_HELP, GROOVE_LABEL,
     ModifyKind, NOTE_MAP_PLACEHOLDER, condition_fields, condition_numbers, condition_with,
-    field_text, modify_fields, modify_numbers, modify_with, note_map_text, offsets_text,
+    field_text, line_unit, modify_fields, modify_numbers, modify_with, note_map_text, offsets_text,
     parse_field, parse_note_map, parse_offsets,
 };
 use vizdaw_ffi::events::MeterEntryRow;
 use vizdaw_ffi::modify::{
     AmountRow, ChangeOpRow, ConditionTest, ModifyRow, NoteMapEntry, SubstituteRow, ValueTargetRow,
+    WaveRow,
 };
+use vizdaw_ffi::strip::{LineOpRow, LineRow, LineShapeRow, LineTargetRow, PeriodRow, SeriesRow};
 
 const Q: i64 = PPQ;
 
@@ -68,6 +70,29 @@ fn fields_and_numbers_agree() {
     rows.push(ModifyRow::Substitute {
         to: SubstituteRow::PitchBend,
     });
+    for shape in [
+        LineShapeRow::Oscillator {
+            wave: WaveRow::Saw,
+            period: PeriodRow::Bars { bars: 3 },
+            phase: 500,
+        },
+        LineShapeRow::Free {
+            points: vec![vizdaw_ffi::strip::LinePointRow { tick: Q, value: 4 }],
+        },
+    ] {
+        rows.push(ModifyRow::Line {
+            target: LineTargetRow::Tempo,
+            op: LineOpRow::Add,
+            line: LineRow {
+                from: 0,
+                to: 2 * Q,
+                start: -1000,
+                end: 1000,
+                step: Q / 4,
+                shape,
+            },
+        });
+    }
     for op in ChangeOpKind::ALL {
         for a in AmountKind::ALL {
             rows.push(ModifyRow::Change {
@@ -107,10 +132,113 @@ fn fields_and_numbers_agree() {
             kind: FieldKind::Velocity(Edge::Delta)
         }]
     );
-    // The out-of-scope Strip Chart line shows no fields.
+    // The Strip Chart line (slice 10c Task 7).
     let line = ModifyKind::Line.default_op();
-    assert!(modify_fields(&line).is_empty());
-    assert_eq!(modify_with(&line, &[]), Some(line));
+    assert_eq!(
+        modify_fields(&line),
+        vec![
+            Field {
+                label: "from",
+                kind: FieldKind::Position
+            },
+            Field {
+                label: "to",
+                kind: FieldKind::Position
+            },
+            Field {
+                label: "start",
+                kind: FieldKind::Velocity(Edge::Exact)
+            },
+            Field {
+                label: "end",
+                kind: FieldKind::Velocity(Edge::Exact)
+            },
+            Field {
+                label: "step",
+                kind: FieldKind::Length
+            },
+        ]
+    );
+    assert_eq!(modify_numbers(&line), vec![0, 4 * Q, 0, 0xFFFF, Q / 8]);
+    assert_eq!(modify_with(&line, &[]), None);
+}
+
+#[test]
+fn line_units_follow_the_target_and_operation() {
+    let v = |target| LineTargetRow::Value { target };
+    let cc = LineTargetRow::Series {
+        series: SeriesRow::Controller { index: 7 },
+    };
+    assert_eq!(line_unit(&cc, LineOpRow::Scale), FieldKind::Percent);
+    assert_eq!(
+        line_unit(&LineTargetRow::Tempo, LineOpRow::Scale),
+        FieldKind::Percent,
+        "Scale wins over tempo"
+    );
+    assert_eq!(
+        line_unit(&LineTargetRow::Tempo, LineOpRow::Add),
+        FieldKind::Bpm
+    );
+    assert_eq!(
+        line_unit(&v(ValueTargetRow::Velocity), LineOpRow::Add),
+        FieldKind::Velocity(Edge::Delta)
+    );
+    assert_eq!(
+        line_unit(&v(ValueTargetRow::ReleaseVelocity), LineOpRow::Set),
+        FieldKind::Velocity(Edge::Exact)
+    );
+    assert_eq!(
+        line_unit(&v(ValueTargetRow::Duration), LineOpRow::Add),
+        FieldKind::Length
+    );
+    assert_eq!(
+        line_unit(&cc, LineOpRow::Add),
+        FieldKind::Value(Edge::Delta)
+    );
+    assert_eq!(
+        line_unit(&cc, LineOpRow::Draw),
+        FieldKind::Value(Edge::Exact)
+    );
+    let osc = |period| ModifyRow::Line {
+        target: cc,
+        op: LineOpRow::Draw,
+        line: LineRow {
+            from: 0,
+            to: Q,
+            start: 0,
+            end: 1,
+            step: 1,
+            shape: LineShapeRow::Oscillator {
+                wave: WaveRow::Sine,
+                period,
+                phase: 250,
+            },
+        },
+    };
+    let tail = |r: &ModifyRow| {
+        modify_fields(r)
+            .iter()
+            .skip(5)
+            .map(|f| (f.label, f.kind))
+            .collect::<Vec<_>>()
+    };
+    let phase = ("phase (\u{2030})", FieldKind::Bounded(0, 999));
+    assert_eq!(
+        tail(&osc(PeriodRow::Ticks { ticks: Q })),
+        [("period", FieldKind::Length), phase]
+    );
+    assert_eq!(
+        tail(&osc(PeriodRow::Millis { ms: 500 })),
+        [("period (ms)", FieldKind::Bounded(1, 600_000)), phase]
+    );
+    assert_eq!(
+        tail(&osc(PeriodRow::Bars { bars: 2 })),
+        [("period (bars)", FieldKind::Bounded(1, 1_000)), phase]
+    );
+    assert_eq!(
+        modify_numbers(&osc(PeriodRow::Millis { ms: 500 })),
+        vec![0, Q, 0, 1, 1, 500, 250]
+    );
 }
 
 #[test]

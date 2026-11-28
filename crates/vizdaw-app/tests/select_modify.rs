@@ -284,9 +284,6 @@ fn kinds_round_trip_through_their_defaults() {
         assert_eq!(ConditionKind::of(&k.default_test(None)), k, "{k:?}");
     }
     for k in ModifyKind::ALL {
-        if k == ModifyKind::Line {
-            continue;
-        }
         assert_eq!(ModifyKind::of(&k.default_op()), k, "{k:?}");
     }
     assert_eq!(ModifyKind::of(&line_op()), ModifyKind::Line);
@@ -473,11 +470,12 @@ fn condition_defaults_match_swift() {
 }
 
 #[test]
-fn the_line_and_automation_kinds_are_not_offered() {
-    assert!(!ConditionKind::OFFERED.contains(&ConditionKind::Automation));
-    assert_eq!(ConditionKind::OFFERED.len(), ConditionKind::ALL.len() - 1);
-    assert!(!ModifyKind::OFFERED.contains(&ModifyKind::Line));
-    assert_eq!(ModifyKind::OFFERED.len(), ModifyKind::ALL.len() - 1);
+fn the_line_and_automation_kinds_are_offered() {
+    // Swift's `allCases` (Ruling 8).
+    assert_eq!(ConditionKind::OFFERED, ConditionKind::ALL);
+    assert_eq!(ConditionKind::OFFERED.len(), 13);
+    assert_eq!(ModifyKind::OFFERED, ModifyKind::ALL);
+    assert_eq!(ModifyKind::OFFERED.len(), 16);
 }
 
 #[test]
