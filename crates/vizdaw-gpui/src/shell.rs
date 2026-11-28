@@ -55,8 +55,8 @@ use crate::frame_stats::{self, FrameStats};
 use crate::list_editor::{ListEditor, ListState};
 use crate::menu_bar::MenuBar;
 use crate::menus::{
-    self, CloseWindow, FileCommand, MixerMenuItem, PlayStop, RunCommand, Save, SaveAs, StepKey,
-    StopAndReturn,
+    self, CloseWindow, FileCommand, MixerMenuItem, PlayStop, RunCommand, RunModifyTemplate, Save,
+    SaveAs, StepKey, StopAndReturn,
 };
 use crate::mixer_view::{self, MixerView};
 use crate::panes::{self, HostState, PaneDrag};
@@ -783,6 +783,26 @@ impl DocumentWindow {
         self.run_command(&RunCommand::new(action.id.clone()), window, cx);
         // A step moves the transport: the readouts read it now.
         self.after_transport(window, cx);
+    }
+
+    /// Modify › Templates › ‹name›: runs that template on this window's
+    /// document; a refusal is the status line.
+    pub fn run_modify_template(
+        &mut self,
+        action: &RunModifyTemplate,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let doc = self.doc;
+        self.app.update(cx, |s, cx| {
+            cx.notify();
+            s.store.with_document(doc, |d, _| {
+                if let Err(status) = d.run_modify_template(&action.name) {
+                    d.set_status(Some(status));
+                }
+            })
+        });
+        cx.notify();
     }
 
     /// A Mixer menu item, on this window's document and its selected
@@ -1514,7 +1534,7 @@ impl DocumentWindow {
         self._poll = Self::start_polling(self.doc, window, cx);
     }
 
-    fn save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
         self.commit_rename(window, cx);
         match self.save_choice(false, cx) {
             SaveChoice::Save => self.save_then_close(false, window, cx),
@@ -1523,7 +1543,7 @@ impl DocumentWindow {
         }
     }
 
-    fn save_as(&mut self, _: &SaveAs, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn save_as(&mut self, _: &SaveAs, window: &mut Window, cx: &mut Context<Self>) {
         self.commit_rename(window, cx);
         if self.save_choice(true, cx) == SaveChoice::Panel {
             self.prompt_save_as(false, window, cx);
@@ -1974,6 +1994,7 @@ impl DocumentWindow {
             .on_action(cx.listener(Self::run_command))
             .on_action(cx.listener(Self::step_key))
             .on_action(cx.listener(Self::run_mixer_item))
+            .on_action(cx.listener(Self::run_modify_template))
             .on_action(cx.listener(Self::play_stop))
             .on_action(cx.listener(Self::stop_and_return))
             .on_action(cx.listener(Self::save))

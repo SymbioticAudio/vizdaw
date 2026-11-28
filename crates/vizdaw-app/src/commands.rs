@@ -529,6 +529,7 @@ pub fn is_on(id: &str, doc: &DocumentModel) -> bool {
         "transport.overdub" => doc.layout().transport.overdub,
         "transport.punch" => doc.layout().transport.punch,
         "transport.click" => doc.last_transport().click.is_some_and(|c| c.on),
+        "modify.exact_mode" => doc.exact_mode(),
         SUSPEND => automation_suspended(),
         _ if STEP_COMMANDS.contains(&id) => crate::step_entry::step_is_on(id, doc),
         _ => crate::view::is_on(id, doc),

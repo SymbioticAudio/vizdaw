@@ -13,7 +13,7 @@ use core_control::registry;
 use gpui::{Action, App, Global, KeyBinding, Menu, MenuItem, SharedString, actions};
 use vizdaw_app::DocumentModel;
 use vizdaw_app::commands::{
-    self, DOCUMENT_COMMANDS, MIXER_COMMANDS, TRANSPORT_COMMANDS, VIEW_COMMANDS,
+    self, DOCUMENT_COMMANDS, MIXER_COMMANDS, MODIFY_COMMANDS, TRANSPORT_COMMANDS, VIEW_COMMANDS,
 };
 
 use crate::text_input;
@@ -126,6 +126,15 @@ pub struct AppFileCommand {
     pub id: SharedString,
 }
 
+/// Modify › Templates › ‹name›: runs saved template `name` on the
+/// window's document (`modify.template` with its name). The document
+/// window and its Select and Modify panel handle it.
+#[derive(Clone, Debug, PartialEq, Eq, gpui::Action)]
+#[action(namespace = vizdaw, no_json)]
+pub struct RunModifyTemplate {
+    pub name: SharedString,
+}
+
 /// A macOS menu item that cannot run now. It has no handler anywhere, so
 /// AppKit's validation (an action's availability) shows it disabled; a
 /// `RunCommand` item would show enabled whatever its command's state.
@@ -167,8 +176,9 @@ pub const PLUGIN_WINDOW_CONTEXT: &str = "PluginWindow";
 pub const SETTINGS_WINDOW_CONTEXT: &str = "SettingsWindow";
 /// The Plugin Manager window's key context: no document key acts in it.
 pub const PLUGIN_MANAGER_CONTEXT: &str = "PluginManagerWindow";
-/// A Select and Modify panel's key context: Return is Apply, and no
-/// document key acts in it (its menu commands reach its document).
+/// A Select and Modify panel's key context: Return is Apply, and its
+/// document's chords (keys with ⌘ or ⌃) act on that document, as its menu
+/// commands do; its bare keys do not (a field types them).
 pub const MODIFY_PANEL_CONTEXT: &str = "ModifyPanel";
 /// The editor commands (`commands::EDITOR_COMMANDS`) the GPUI app routes
 /// to its menus, keys and control channel: the grid, the Piano Roll, the
@@ -182,13 +192,15 @@ pub const ROUTED_EDITOR_COMMANDS: &[&str] = &[
 ];
 
 /// Whether the menus, keys and control channel route `id` to
-/// `commands::run`: the document, editor, view and mixer commands
-/// (`commands::VIEW_COMMANDS`, `commands::MIXER_COMMANDS`).
+/// `commands::run`: the document, editor, view, mixer and Modify commands
+/// (`commands::VIEW_COMMANDS`, `commands::MIXER_COMMANDS`,
+/// `commands::MODIFY_COMMANDS`).
 pub fn routed(id: &str) -> bool {
     DOCUMENT_COMMANDS.contains(&id)
         || ROUTED_EDITOR_COMMANDS.contains(&id)
         || VIEW_COMMANDS.contains(&id)
         || MIXER_COMMANDS.contains(&id)
+        || MODIFY_COMMANDS.contains(&id)
 }
 
 /// Where unmodified keys act: in a document window, but never while a text
@@ -324,6 +336,11 @@ pub enum ItemSpec {
         enabled: bool,
         items: Vec<ItemSpec>,
     },
+    /// Modify › Templates › `name` ([`RunModifyTemplate`]).
+    Template {
+        name: String,
+        enabled: bool,
+    },
     /// A heading that does nothing ("Selected Strips").
     Heading(String),
     Separator,
@@ -425,8 +442,8 @@ pub fn key_text(id: &str, keymap: &Keymap, mac: bool) -> Option<String> {
 }
 
 /// The commands whose chords the window binds ([`bindings`]): the
-/// document, editor, view and mixer commands, and the transport commands
-/// but the held keys and the slice 1 ones.
+/// document, editor, view, mixer and Modify commands, and the transport
+/// commands but the held keys and the slice 1 ones.
 fn bound_ids() -> Vec<&'static str> {
     let transport = TRANSPORT_COMMANDS.iter().filter(|id| {
         !matches!(
@@ -442,6 +459,7 @@ fn bound_ids() -> Vec<&'static str> {
         .chain(ROUTED_EDITOR_COMMANDS)
         .chain(VIEW_COMMANDS)
         .chain(MIXER_COMMANDS)
+        .chain(MODIFY_COMMANDS)
         .chain(std::iter::once(&"automation.suspend"))
         .chain(transport)
         .copied()
@@ -459,20 +477,37 @@ fn ctrl_folded(mods: u8) -> u8 {
 }
 
 /// The ⌘ chord that owns `chord`'s keystroke on the platform (`mac`:
-/// macOS), if any: off macOS, where ⌘ and ⌃ are both Ctrl, a ⌃ chord
-/// (⌃1 Arrange View) whose keystroke a bound command's ⌘ chord has (⌘1
-/// Piano Roll) is that ⌘ chord's. `None` on macOS, for a chord with ⌘,
-/// and for one no ⌘ chord shares. The key bindings, the menus' keys and
-/// the channel's `ui.key` all follow it.
+/// macOS), if any: off macOS, where ⌘ and ⌃ are both Ctrl, a ⌃ or ⌃⌘
+/// chord (⌃1 Arrange View, ⌃⌘S Select by Rule) whose keystroke a ⌘ chord
+/// without ⌃ has (⌘1 Piano Roll, ⌘S Save) is that ⌘ chord's: a bound
+/// command's, a slice 1 item's or a text field's (⌘V Paste). `None` on
+/// macOS, for a chord without ⌃, and for one no ⌘ chord shares. The key
+/// bindings, the menus' keys and the channel's `ui.key` all follow it.
 pub fn owner(chord: &Chord, keymap: &Keymap, mac: bool) -> Option<Chord> {
-    if mac || chord.mods & CONTROL == 0 || chord.mods & COMMAND != 0 {
+    if mac || chord.mods & CONTROL == 0 {
         return None;
     }
     let folded = ctrl_folded(chord.mods);
+    let fixed = [FILE_NEW, FILE_OPEN, FILE_SAVE, FILE_SAVE_AS, FILE_CLOSE]
+        .into_iter()
+        .chain(FILE_BOUND.iter().copied())
+        .chain(std::iter::once(WINDOW_PLUGIN_MANAGER))
+        .flat_map(|id| keymap.chords(id));
+    // The app menu's and the text fields' own `secondary-` keys.
+    let own = ["q", ",", "x", "c", "v", "a"]
+        .into_iter()
+        .filter_map(|k| Chord::of_slot(k, COMMAND));
     bound_ids()
         .iter()
         .flat_map(|id| keymap.chords(id))
-        .find(|c| c.mods & COMMAND != 0 && c.code == chord.code && ctrl_folded(c.mods) == folded)
+        .chain(fixed)
+        .chain(own)
+        .find(|c| {
+            c.mods & COMMAND != 0
+                && c.mods & CONTROL == 0
+                && c.code == chord.code
+                && ctrl_folded(c.mods) == folded
+        })
 }
 
 /// File menu item `id`: the registry's title, its keys where Swift shows
@@ -557,6 +592,7 @@ fn command(id: &'static str, front: Option<&DocumentModel>, keymap: &Keymap) -> 
     let title = match (id, front) {
         ("edit.undo", Some(d)) => d.undo_title(),
         ("edit.redo", Some(d)) => d.redo_title(),
+        ("modify.again", Some(d)) => vizdaw_app::select_modify::modify_again_title(d.last_modify()),
         _ => registry::find(id).map_or(id, |c| c.title).to_owned(),
     };
     let checked = matches!(
@@ -580,6 +616,7 @@ fn command(id: &'static str, front: Option<&DocumentModel>, keymap: &Keymap) -> 
             | "step.thirty_second"
             | "step.dot"
             | "step.triplet"
+            | "modify.exact_mode"
     )
     .then(|| front.is_some_and(|d| commands::is_on(id, d)));
     ItemSpec::Command {
@@ -665,6 +702,7 @@ pub fn menu_model(front: Option<&DocumentModel>, keymap: &Keymap) -> MenuModel {
                     cmd("editors.snap"),
                 ],
             ),
+            menu("Modify", modify_items(front, keymap)),
             menu(
                 "Track",
                 vec![
@@ -725,6 +763,38 @@ pub fn menu_model(front: Option<&DocumentModel>, keymap: &Keymap) -> MenuModel {
             ),
         ],
     }
+}
+
+/// The Modify menu (Swift `S/AppCommands.swift:228-254`): the five panel
+/// tasks, Modify Again (titled by what it repeats), the saved templates
+/// (off with none), Exact Mode with its check mark.
+fn modify_items(front: Option<&DocumentModel>, keymap: &Keymap) -> Vec<ItemSpec> {
+    let cmd = |id| command(id, front, keymap);
+    let templates: Vec<ItemSpec> = front
+        .map(|d| d.modify_templates())
+        .unwrap_or_default()
+        .iter()
+        .map(|t| ItemSpec::Template {
+            name: t.name.clone(),
+            enabled: true,
+        })
+        .collect();
+    vec![
+        cmd("modify.select_by_rule"),
+        cmd("modify.transpose"),
+        cmd("modify.quantize"),
+        cmd("modify.change"),
+        cmd("modify.move"),
+        ItemSpec::Separator,
+        cmd("modify.again"),
+        ItemSpec::Submenu {
+            title: "Templates".into(),
+            enabled: !templates.is_empty(),
+            items: templates,
+        },
+        ItemSpec::Separator,
+        cmd("modify.exact_mode"),
+    ]
 }
 
 /// The Mixer menu (Swift `AppCommands.mixerMenu`): Group, Ungroup, New
@@ -960,38 +1030,30 @@ pub fn bindings(keymap: &Keymap) -> Vec<KeyBinding> {
         crate::modify_panel::Apply,
         Some(MODIFY_PANEL_CONTEXT),
     ));
-    fixed_keys(&mut keys, keymap, FILE_SAVE, Some(WINDOW_CONTEXT), || Save);
-    fixed_keys(
-        &mut keys,
-        keymap,
-        FILE_SAVE_AS,
-        Some(WINDOW_CONTEXT),
-        || SaveAs,
-    );
-    fixed_keys(&mut keys, keymap, PLAY_STOP, Some(WINDOW_CONTEXT), || {
-        PlayStop
-    });
-    fixed_keys(
-        &mut keys,
-        keymap,
-        STOP_AND_RETURN,
-        Some(WINDOW_CONTEXT),
-        || StopAndReturn,
-    );
-    // The File items Swift binds from the keymap (⇧⌘I Import Audio…).
-    for &id in FILE_BOUND {
-        for chord in keymap.chords(id) {
-            if chord.mods & (COMMAND | CONTROL) == 0 {
-                continue;
+    // The document's keys, in its window and (keys with ⌘ or ⌃ only) in
+    // its Select and Modify panel, which hands them to the window.
+    for ctx in [WINDOW_CONTEXT, MODIFY_PANEL_CONTEXT] {
+        fixed_keys(&mut keys, keymap, FILE_SAVE, Some(ctx), || Save);
+        fixed_keys(&mut keys, keymap, FILE_SAVE_AS, Some(ctx), || SaveAs);
+        fixed_keys(&mut keys, keymap, PLAY_STOP, Some(ctx), || PlayStop);
+        fixed_keys(&mut keys, keymap, STOP_AND_RETURN, Some(ctx), || {
+            StopAndReturn
+        });
+        // The File items Swift binds from the keymap (⇧⌘I Import Audio…).
+        for &id in FILE_BOUND {
+            for chord in keymap.chords(id) {
+                if chord.mods & (COMMAND | CONTROL) == 0 {
+                    continue;
+                }
+                let Some(k) = keystroke(&chord) else { continue };
+                keys.push(KeyBinding::new(
+                    interned(k),
+                    FileCommand {
+                        id: SharedString::new_static(id),
+                    },
+                    Some(ctx),
+                ));
             }
-            let Some(k) = keystroke(&chord) else { continue };
-            keys.push(KeyBinding::new(
-                interned(k),
-                FileCommand {
-                    id: SharedString::new_static(id),
-                },
-                Some(WINDOW_CONTEXT),
-            ));
         }
     }
     keys.extend(text_input::bindings());
@@ -1015,11 +1077,19 @@ pub fn bindings(keymap: &Keymap) -> Vec<KeyBinding> {
             // A chord without ⌘ or ⌃ (bare, ⇧ or ⌥) waits while a text
             // field has the keyboard, which types it (Swift's bare-key
             // rule, as the control channel's `bound_command`).
-            let context = if chord.mods & (COMMAND | CONTROL) == 0 {
-                UNMODIFIED_KEYS
-            } else {
+            let modified = chord.mods & (COMMAND | CONTROL) != 0;
+            let context = if modified {
                 WINDOW_CONTEXT
+            } else {
+                UNMODIFIED_KEYS
             };
+            if modified {
+                keys.push(KeyBinding::new(
+                    interned(k.clone()),
+                    RunCommand::new(id),
+                    Some(MODIFY_PANEL_CONTEXT),
+                ));
+            }
             if let Some(alias) = delivered(&k, &chord) {
                 let us = format!("{context} && {US_LAYOUT_CONTEXT}");
                 keys.push(KeyBinding::new(
@@ -1107,6 +1177,13 @@ fn menu_item(i: &ItemSpec) -> MenuItem {
             Menu::new(title.clone())
                 .items(items.iter().map(menu_item))
                 .disabled(!enabled),
+        ),
+        ItemSpec::Template { name, enabled } if !enabled => unavailable_item(name),
+        ItemSpec::Template { name, .. } => MenuItem::action(
+            name.clone(),
+            RunModifyTemplate {
+                name: name.clone().into(),
+            },
         ),
         ItemSpec::Mixer { title, enabled, .. } if !enabled => unavailable_item(title),
         ItemSpec::Mixer { op, title, .. } => {
@@ -1201,6 +1278,10 @@ pub fn blocked_model(model: &MenuModel) -> MenuModel {
             ItemSpec::Mixer { op, title, .. } => ItemSpec::Mixer {
                 op: *op,
                 title: title.clone(),
+                enabled: false,
+            },
+            ItemSpec::Template { name, .. } => ItemSpec::Template {
+                name: name.clone(),
                 enabled: false,
             },
             ItemSpec::Submenu { title, items, .. } => ItemSpec::Submenu {

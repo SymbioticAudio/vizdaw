@@ -331,6 +331,7 @@ fn editors_piano_roll_opens_the_roll(cx: &mut TestAppContext) {
             "Keyboard",
             "Tracks",
             "Insert Into: Chords",
+            "Exact",
             "Shorter Rows",
             "Taller Rows",
             "Zoom Out",
@@ -1369,4 +1370,33 @@ fn an_unported_last_editor_double_click_opens_the_roll(cx: &mut TestAppContext) 
         let saved = s.saved_layout(&format!("vizdaw-unported-{json}.vizdaw"));
         assert_eq!(saved["lastKind"], json);
     }
+}
+
+/// Swift `S/PianoRollPane.swift:68-69`: the bar's Exact toggle, the Modify
+/// menu's check mark and ⌃⌘E are one setting.
+#[gpui::test]
+fn exact_mode_shows_a_check_mark_that_matches_the_roll_toggle(cx: &mut TestAppContext) {
+    let mut s = chords_roll(cx);
+    let exact = s.roll_control("button", "Exact");
+    assert_eq!(exact.value.as_deref(), Some("off"));
+    assert_eq!(s.menu_item("Modify", "Exact Mode"), (true, Some(false)));
+
+    s.click("button", "Exact");
+    assert!(s.model(|d| d.exact_mode()));
+    assert_eq!(
+        s.roll_control("button", "Exact").value.as_deref(),
+        Some("on")
+    );
+    assert_eq!(s.menu_item("Modify", "Exact Mode"), (true, Some(true)));
+
+    // ⌃⌘E turns it off again.
+    let chord = core_control::bindings::Chord::parse("⌃⌘E").unwrap();
+    let key = menus::keystroke(&chord).unwrap();
+    s.keys(&key);
+    assert!(!s.model(|d| d.exact_mode()));
+    assert_eq!(
+        s.roll_control("button", "Exact").value.as_deref(),
+        Some("off")
+    );
+    assert_eq!(s.menu_item("Modify", "Exact Mode"), (true, Some(false)));
 }

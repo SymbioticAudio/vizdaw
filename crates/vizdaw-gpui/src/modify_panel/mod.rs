@@ -32,8 +32,12 @@ use vizdaw_ffi::mixer::DestRow;
 use vizdaw_ffi::modify::{ConditionTest, ModifyRow};
 
 use crate::app_state::{AppState, WindowKind, modify_panel_title};
-use crate::menus::{CloseWindow, MODIFY_PANEL_CONTEXT, RunCommand};
+use crate::menus::{
+    CloseWindow, FileCommand, MODIFY_PANEL_CONTEXT, MixerMenuItem, PlayStop, RunCommand,
+    RunModifyTemplate, Save, SaveAs, StepKey, StopAndReturn,
+};
 use crate::registry::{RegistryScope, SharedRegistry};
+use crate::shell::DocumentWindow;
 use crate::strip_palette::tokens;
 use crate::text_input::{TextInput, TextInputEvent};
 
@@ -328,10 +332,14 @@ impl ModifyPanel {
         self.with_doc(cx, |d| d.save_modify_template());
     }
 
-    /// A menu command while the panel is key: its document's, as the
-    /// document window runs it (after this dispatch).
-    fn run_command(&mut self, action: &RunCommand, _: &mut Window, cx: &mut Context<Self>) {
-        let (app, doc, action) = (self.app.clone(), self.doc, action.clone());
+    /// A menu command or document key while the panel is key: its
+    /// document's, as the document window runs it (after this dispatch).
+    fn forward(
+        &self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut DocumentWindow, &mut Window, &mut Context<DocumentWindow>) + 'static,
+    ) {
+        let (app, doc) = (self.app.clone(), self.doc);
         cx.defer(move |cx| {
             let Some(h) = app
                 .read(cx)
@@ -340,9 +348,51 @@ impl ModifyPanel {
             else {
                 return;
             };
-            h.update(cx, |v, window, cx| v.run_command(&action, window, cx))
-                .ok();
+            h.update(cx, |v, window, cx| f(v, window, cx)).ok();
         });
+    }
+
+    /// The document window's menu actions and keys, on the panel's
+    /// document.
+    fn forwarded(
+        &self,
+        root: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        root.on_action(cx.listener(|this, a: &RunCommand, _, cx| {
+            let a = a.clone();
+            this.forward(cx, move |v, w, cx| v.run_command(&a, w, cx));
+        }))
+        .on_action(cx.listener(|this, a: &RunModifyTemplate, _, cx| {
+            let a = a.clone();
+            this.forward(cx, move |v, w, cx| v.run_modify_template(&a, w, cx));
+        }))
+        .on_action(cx.listener(|this, a: &StepKey, _, cx| {
+            let a = a.clone();
+            this.forward(cx, move |v, w, cx| v.step_key(&a, w, cx));
+        }))
+        .on_action(cx.listener(|this, a: &MixerMenuItem, _, cx| {
+            let a = a.clone();
+            this.forward(cx, move |v, w, cx| v.run_mixer_item(&a, w, cx));
+        }))
+        .on_action(cx.listener(|this, _: &Save, _, cx| {
+            this.forward(cx, |v, w, cx| v.save(&Save, w, cx));
+        }))
+        .on_action(cx.listener(|this, _: &SaveAs, _, cx| {
+            this.forward(cx, |v, w, cx| v.save_as(&SaveAs, w, cx));
+        }))
+        .on_action(cx.listener(|this, _: &PlayStop, _, cx| {
+            this.forward(cx, |v, w, cx| v.play_stop(&PlayStop, w, cx));
+        }))
+        .on_action(cx.listener(|this, _: &StopAndReturn, _, cx| {
+            this.forward(cx, |v, w, cx| v.stop_and_return(&StopAndReturn, w, cx));
+        }))
+        .on_action(cx.listener(|this, a: &FileCommand, _, cx| {
+            let a = a.clone();
+            this.forward(cx, move |v, w, cx| {
+                crate::file_menu::run_in_window(&a, v, w, cx)
+            });
+        }))
     }
 
     fn toggle_menu(&mut self, menu: PanelMenu, cx: &mut Context<Self>) {
@@ -932,8 +982,9 @@ impl Render for ModifyPanel {
             .track_focus(&self.focus)
             .key_context(MODIFY_PANEL_CONTEXT)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
-            .on_action(cx.listener(Self::apply))
-            .on_action(cx.listener(Self::run_command))
+            .on_action(cx.listener(Self::apply));
+        let root = self
+            .forwarded(root, cx)
             .size_full()
             .flex()
             .flex_col()

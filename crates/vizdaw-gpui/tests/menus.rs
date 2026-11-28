@@ -40,6 +40,18 @@ fn item<'a>(
         .unwrap_or_else(|| panic!("no item {title} in {menu}"))
 }
 
+/// The key bindings but the Select and Modify panel's copies of the
+/// document's chords (`the_panel_binds_the_documents_chords_but_no_bare_keys`).
+fn window_bindings(keymap: &Keymap) -> Vec<gpui::KeyBinding> {
+    let panel = KeyBindingContextPredicate::parse(menus::MODIFY_PANEL_CONTEXT).unwrap();
+    menus::bindings(keymap)
+        .into_iter()
+        .filter(|b| {
+            b.predicate().as_deref() != Some(&panel) || b.action().name() == "modify_panel::Apply"
+        })
+        .collect()
+}
+
 fn demo_doc() -> DocumentModel {
     DocumentModel::new(Arc::new(demo_fake())).expect("a document")
 }
@@ -58,6 +70,7 @@ fn the_menu_model_follows_the_swift_order() {
                 "Edit",
                 "View",
                 "Editors",
+                "Modify",
                 "Track",
                 "Transport",
                 "Step",
@@ -88,7 +101,7 @@ fn the_menu_model_follows_the_swift_order() {
             Some("Select All"),
         ]
     );
-    let track: Vec<Option<&str>> = m.menus[5]
+    let track: Vec<Option<&str>> = m.menus[6]
         .items
         .iter()
         .map(|i| match i {
@@ -144,12 +157,12 @@ fn the_menu_model_follows_the_swift_order() {
         assert!(enabled);
     }
     assert_eq!(
-        ids(10),
+        ids(11),
         [Some("window.mixer"), Some("window.plugin_manager")]
     );
     // Swift `AppCommands.swift:354-365`.
     assert_eq!(
-        ids(7),
+        ids(8),
         [
             Some("step.entry"),
             None,
@@ -168,7 +181,7 @@ fn the_menu_model_follows_the_swift_order() {
         ]
     );
     assert!(
-        m.menus[7]
+        m.menus[8]
             .items
             .iter()
             .all(|i| matches!(i, ItemSpec::Command { .. } | ItemSpec::Separator)),
@@ -209,7 +222,7 @@ fn track_items_take_their_titles_and_keys_from_the_registry() {
     }
     let shortcut = registry::find("track.new_audio").unwrap().shortcut.unwrap();
     let chord = Chord::parse(shortcut).unwrap();
-    let bound: Vec<gpui::Keystroke> = menus::bindings(&keymap)
+    let bound: Vec<gpui::Keystroke> = window_bindings(&keymap)
         .iter()
         .filter(|b| {
             b.action()
@@ -272,7 +285,7 @@ fn track_items_need_a_selected_track() {
 #[test]
 fn single_keys_are_off_in_text_fields() {
     let want = KeyBindingContextPredicate::parse(UNMODIFIED_KEYS).unwrap();
-    let all = menus::bindings(&Keymap::default());
+    let all = window_bindings(&Keymap::default());
     let mut checked = 0;
     for b in &all {
         // A text field's own editing keys act only inside it, the List
@@ -512,7 +525,7 @@ fn the_view_menu_checks_the_main_view_and_the_shown_panes() {
 #[test]
 fn main_view_keys_do_not_collide_with_the_editor_keys() {
     let keymap = Keymap::default();
-    let all = menus::bindings(&keymap);
+    let all = window_bindings(&keymap);
     let strokes = |id: &str| -> Vec<String> {
         all.iter()
             .filter(|b| {
@@ -1037,7 +1050,7 @@ fn import_audio_is_bound_to_its_registry_key() {
     };
     let want = gpui::Keystroke::parse_with_os(&keystroke(&chord).unwrap(), os).unwrap();
     let context = KeyBindingContextPredicate::parse(menus::WINDOW_CONTEXT).unwrap();
-    let bound: Vec<_> = menus::bindings(&keymap)
+    let bound: Vec<_> = window_bindings(&keymap)
         .into_iter()
         .filter(|b| {
             b.action().partial_eq(&vizdaw_gpui::FileCommand {
@@ -1777,4 +1790,236 @@ fn the_step_menu_enables_as_step_entry_runs() {
     );
     doc.end_text_editing("track-rename");
     assert_eq!(step_enabled(&menu_model(Some(&doc), &keymap)), [true; 12]);
+}
+
+mod modify_menu {
+    use std::sync::Arc;
+
+    use core_control::bindings::{Chord, Keymap};
+    use gpui::KeyBindingContextPredicate;
+    use vizdaw_app::DocumentModel;
+    use vizdaw_app::testing::demo_fake;
+    use vizdaw_ffi::modify::{ModifyRow, ModifyTemplateRow, SelectModeRow};
+    use vizdaw_gpui::menus::{self, ItemSpec, MenuModel, RunCommand, menu_model};
+
+    use super::{checked, item, menu_of};
+
+    fn up_template() -> ModifyTemplateRow {
+        ModifyTemplateRow {
+            name: "Up".into(),
+            rule: None,
+            mode: SelectModeRow::Select,
+            modify: Some(ModifyRow::TransposeInterval { semitones: 12 }),
+            to_copy: false,
+        }
+    }
+
+    fn templates(m: &MenuModel) -> (bool, Vec<ItemSpec>) {
+        menu_of(m, "Modify")
+            .iter()
+            .find_map(|i| match i {
+                ItemSpec::Submenu {
+                    title,
+                    enabled,
+                    items,
+                } if title == "Templates" => Some((*enabled, items.clone())),
+                _ => None,
+            })
+            .expect("a Templates submenu")
+    }
+
+    /// Swift `S/AppCommands.swift:228-254`: the five panel items, a
+    /// divider, Modify Again, Templates, a divider, Exact Mode; the
+    /// registry's keys, which off macOS leave ⌃⌘S and ⌃⌘V to Save and
+    /// Paste (both are Ctrl+S and Ctrl+V there).
+    #[test]
+    fn the_modify_menu_lists_every_item_with_its_key() {
+        let keymap = Keymap::default();
+        let doc = DocumentModel::new(Arc::new(demo_fake())).unwrap();
+        let m = menu_model(Some(&doc), &keymap);
+        let shape: Vec<Option<&str>> = menu_of(&m, "Modify")
+            .iter()
+            .map(|i| match i {
+                ItemSpec::Command { id, .. } => Some(*id),
+                ItemSpec::Submenu { title, .. } => Some(title.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                Some("modify.select_by_rule"),
+                Some("modify.transpose"),
+                Some("modify.quantize"),
+                Some("modify.change"),
+                Some("modify.move"),
+                None,
+                Some("modify.again"),
+                Some("Templates"),
+                None,
+                Some("modify.exact_mode"),
+            ]
+        );
+        let mac = cfg!(target_os = "macos");
+        let rows = [
+            (
+                "modify.select_by_rule",
+                "Select by Rule\u{2026}",
+                "⌃⌘S",
+                false,
+            ),
+            ("modify.transpose", "Transpose\u{2026}", "⌃⌘T", true),
+            ("modify.quantize", "Quantize\u{2026}", "⌃⌘U", true),
+            ("modify.change", "Change Values\u{2026}", "⌃⌘M", true),
+            ("modify.move", "Move\u{2026}", "⌃⌘V", false),
+            ("modify.exact_mode", "Exact Mode", "⌃⌘E", true),
+        ];
+        for (id, title, key, off_mac) in rows {
+            let (got, _, keys, enabled) = item(&m, "Modify", title);
+            assert_eq!(got, id);
+            assert!(enabled, "{title}");
+            assert_eq!(menus::key_text(id, &keymap, true).as_deref(), Some(key));
+            let linux = menus::key_text(id, &keymap, false);
+            assert_eq!(linux.as_deref(), off_mac.then_some(key), "{id} off macOS");
+            assert_eq!(keys, if mac { Some(key) } else { linux.as_deref() });
+        }
+        let (_, _, keys, _) = item(&m, "Modify", "Modify Again");
+        assert_eq!(keys, Some("⌃⌘R"));
+        assert_eq!(checked(&m, "Modify", "Exact Mode"), Some(false));
+        // Off macOS ⌃⌘S runs Save, as Ctrl+S does on the keyboard.
+        let c = |s: &str| Chord::parse(s).unwrap();
+        assert_eq!(menus::owner(&c("⌃⌘S"), &keymap, false), Some(c("⌘S")));
+        assert_eq!(menus::owner(&c("⌃⌘V"), &keymap, false), Some(c("⌘V")));
+        assert_eq!(menus::owner(&c("⌃⌘T"), &keymap, false), None);
+        assert_eq!(menus::owner(&c("⌃⌘S"), &keymap, true), None);
+        // Each shown key is bound, in the window and in the panel.
+        let all = menus::bindings(&keymap);
+        for (id, ..) in rows {
+            let contexts: Vec<String> = all
+                .iter()
+                .filter(|b| b.action().partial_eq(&RunCommand::new(id)))
+                .map(|b| format!("{:?}", b.predicate()))
+                .collect();
+            let want = if menus::key_text(id, &keymap, mac).is_some() {
+                2
+            } else {
+                0
+            };
+            assert_eq!(contexts.len(), want, "{id}: {contexts:?}");
+        }
+        // With no document every item is off.
+        let none = menu_model(None, &keymap);
+        for (_, title, ..) in rows {
+            assert!(!item(&none, "Modify", title).3, "{title}");
+        }
+        assert!(!item(&none, "Modify", "Modify Again").3);
+        assert!(!templates(&none).0);
+    }
+
+    #[test]
+    fn modify_again_is_titled_by_the_last_modify() {
+        let keymap = Keymap::default();
+        let fake = Arc::new(demo_fake());
+        let doc = DocumentModel::new(fake.clone()).unwrap();
+        let m = menu_model(Some(&doc), &keymap);
+        let (id, _, _, enabled) = item(&m, "Modify", "Modify Again");
+        assert_eq!(id, "modify.again");
+        assert!(!enabled, "nothing to repeat");
+
+        fake.set_last_modify(Some(ModifyRow::TransposeInterval { semitones: 12 }));
+        let doc = DocumentModel::new(fake.clone()).unwrap();
+        let m = menu_model(Some(&doc), &keymap);
+        let (id, _, keys, enabled) = item(&m, "Modify", "Modify Again: Transpose");
+        assert_eq!(id, "modify.again");
+        assert_eq!(keys, Some("⌃⌘R"));
+        assert!(enabled);
+    }
+
+    #[test]
+    fn the_templates_submenu_runs_a_template_by_name_and_is_disabled_when_empty() {
+        let keymap = Keymap::default();
+        let fake = Arc::new(demo_fake());
+        let doc = DocumentModel::new(fake.clone()).unwrap();
+        let (enabled, items) = templates(&menu_model(Some(&doc), &keymap));
+        assert!(!enabled);
+        assert!(items.is_empty());
+
+        fake.set_templates(vec![up_template()]);
+        let doc = DocumentModel::new(fake.clone()).unwrap();
+        let m = menu_model(Some(&doc), &keymap);
+        let (enabled, items) = templates(&m);
+        assert!(enabled);
+        assert_eq!(
+            items,
+            [ItemSpec::Template {
+                name: "Up".into(),
+                enabled: true,
+            }]
+        );
+        // Its item runs the template by its name.
+        let platform = menus::menus(&m);
+        let modify = platform
+            .iter()
+            .find(|p| p.name.as_ref() == "Modify")
+            .unwrap();
+        let sub = modify
+            .items
+            .iter()
+            .find_map(|i| match i {
+                gpui::MenuItem::Submenu(s) if s.name.as_ref() == "Templates" => Some(s),
+                _ => None,
+            })
+            .unwrap();
+        match &sub.items[0] {
+            gpui::MenuItem::Action { name, action, .. } => {
+                assert_eq!(name.as_ref(), "Up");
+                assert!(action.partial_eq(&menus::RunModifyTemplate { name: "Up".into() }));
+            }
+            _ => panic!("an action"),
+        }
+        // A file panel turns it off as every item.
+        let (enabled, items) = templates(&menus::blocked_model(&m));
+        assert!(!enabled);
+        assert_eq!(
+            items,
+            [ItemSpec::Template {
+                name: "Up".into(),
+                enabled: false,
+            }]
+        );
+    }
+
+    /// While the panel is key its document's chords act on it (Swift's
+    /// menus did); its bare keys stay off, so a field types them.
+    #[test]
+    fn the_panel_binds_the_documents_chords_but_no_bare_keys() {
+        let all = menus::bindings(&Keymap::default());
+        let panel = KeyBindingContextPredicate::parse(menus::MODIFY_PANEL_CONTEXT).unwrap();
+        let in_panel: Vec<&gpui::KeyBinding> = all
+            .iter()
+            .filter(|b| b.predicate().as_deref() == Some(&panel))
+            .collect();
+        for b in &in_panel {
+            let modified = b.keystrokes().iter().all(|k| k.modifiers().modified());
+            assert!(
+                modified || b.action().name() == "modify_panel::Apply",
+                "{} {:?} is bare in the panel",
+                b.action().name(),
+                b.keystrokes()
+            );
+        }
+        for id in ["edit.undo", "edit.redo", "modify.transpose"] {
+            assert!(
+                in_panel
+                    .iter()
+                    .any(|b| b.action().partial_eq(&RunCommand::new(id))),
+                "{id}"
+            );
+        }
+        assert!(in_panel.iter().any(|b| b.action().name() == "vizdaw::Save"));
+        assert!(!in_panel.iter().any(|b| {
+            b.action()
+                .partial_eq(&RunCommand::new("transport.play_stop"))
+        }));
+    }
 }

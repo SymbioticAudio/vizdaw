@@ -614,3 +614,87 @@ pub(super) fn edit_doc(
     });
     cx.run_until_parked();
 }
+
+/// Off macOS there is no menu bar: while the panel is key, its document's
+/// chords (⌘Z here) act on its document, as Swift's menus did; its bare
+/// keys stay off (Space does not play).
+#[gpui::test]
+fn undo_in_the_panel_reaches_its_document(cx: &mut TestAppContext) {
+    let s = setup(cx);
+    let (n, _) = open_panel(&s, cx, "modify.transpose");
+    let fake = s.made.lock().unwrap()[0].clone();
+    fake.set_undo_label(Some("Transpose"));
+    // Apply: the core's answer carries the undo step.
+    ok(call(
+        &s,
+        cx,
+        "ui.key",
+        json!({"window": n, "key": "return"}),
+    ));
+    fake.clear_calls();
+    ok(call(
+        &s,
+        cx,
+        "ui.key",
+        json!({"window": n, "key": "z", "modifiers": [SECONDARY]}),
+    ));
+    assert_eq!(fake.calls(), ["undo"], "⌘Z undid in the panel's document");
+    fake.clear_calls();
+    ok(call(&s, cx, "ui.key", json!({"window": n, "key": "space"})));
+    assert!(
+        fake.calls().iter().all(|c| !c.starts_with("play")),
+        "Space plays nothing: {:?}",
+        fake.calls()
+    );
+}
+
+/// Modify › Templates › ‹name› runs that template, from the document
+/// window and from its panel (`RunModifyTemplate`).
+#[gpui::test]
+fn a_template_item_runs_from_the_document_and_its_panel(cx: &mut TestAppContext) {
+    use vizdaw_ffi::modify::{ModifyRow, ModifyTemplateRow, SelectModeRow};
+    let s = setup(cx);
+    let (h, doc) = new_document(cx);
+    let fake = s.made.lock().unwrap()[0].clone();
+    fake.set_templates(vec![ModifyTemplateRow {
+        name: "Up".into(),
+        rule: None,
+        mode: SelectModeRow::Select,
+        modify: Some(ModifyRow::TransposeInterval { semitones: 12 }),
+        to_copy: false,
+    }]);
+    run_in(&s, cx, "modify.transpose", h);
+    // An Apply: a new snapshot, so the templates are read again.
+    let panel = panel_of(cx, doc).unwrap();
+    ok(call(
+        &s,
+        cx,
+        "ui.key",
+        json!({"window": control::number(panel), "key": "return"}),
+    ));
+    assert_eq!(with_doc(cx, doc, |d| d.modify_templates().len()), 1);
+    let before = fake.filtered_edits().len();
+    let run = crate::menus::RunModifyTemplate { name: "Up".into() };
+    let action = run.clone();
+    cx.update(|cx| {
+        h.update(cx, |_, window, cx| {
+            window.dispatch_action(Box::new(action), cx)
+        })
+        .unwrap()
+    });
+    cx.run_until_parked();
+    assert_eq!(fake.filtered_edits().len(), before + 1, "from the window");
+    assert_eq!(
+        with_doc(cx, doc, |d| d.select_modify().template_name.clone()),
+        "Up"
+    );
+    cx.update(|cx| {
+        panel
+            .update(cx, |_, window, cx| {
+                window.dispatch_action(Box::new(run), cx)
+            })
+            .unwrap()
+    });
+    cx.run_until_parked();
+    assert_eq!(fake.filtered_edits().len(), before + 2, "from the panel");
+}
