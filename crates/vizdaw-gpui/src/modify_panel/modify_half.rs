@@ -1,23 +1,28 @@
 //! The panel's Modify half (`S/ModifyPanel.swift:249-392`): the
 //! operation, In Place or To a Copy, the operation's own pickers and its
 //! numeric fields. Every change goes through the document's
-//! [`SelectModifyModel`]; this file only lays out. A loaded Strip Chart
-//! line (out of scope here) shows its title and no editor.
+//! [`SelectModifyModel`]; this file only lays out. A Strip Chart line has
+//! its target, operation and shape pickers (`S/LineModifyEditor.swift`).
 //!
 //! [`SelectModifyModel`]: vizdaw_app::select_modify::model::SelectModifyModel
 
-use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div};
+use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px, rgb};
 use vizdaw_app::editing_prefs::{ROOT_NAMES, ScaleKind};
 use vizdaw_app::select_modify::{
-    AmountKind, ChangeOpKind, ChangeTarget, CurveKind, GROOVE_HELP, GROOVE_LABEL, ModifyHalf,
-    ModifyKind, NOTE_MAP_PLACEHOLDER, SubstituteChoice, WaveKind, modify_fields,
+    AmountKind, ChangeOpKind, ChangeTarget, CurveKind, GROOVE_HELP, GROOVE_LABEL, LINE_OPS,
+    LINE_TARGET_BASICS, ModifyHalf, ModifyKind, NOTE_MAP_PLACEHOLDER, SubstituteChoice, WaveKind,
+    line_target_controllers, line_target_octaves, modify_fields,
 };
+use vizdaw_app::strip_chart::{AutomationTargets, LineCurve, PeriodKind, ShapeKind, StripLane};
 use vizdaw_ffi::mixer::DestRow;
 use vizdaw_ffi::modify::{AmountRow, ChangeOpRow, ModifyRow};
+use vizdaw_ffi::strip::{LineOpRow, LineRow, LineShapeRow, LineTargetRow};
 
 use super::select_half::{DEST_WIDTH, DESTINATION, FIELD_WIDTH, dest_rows, dest_text};
 use super::{ModifyPanel, PanelMenu};
+use crate::cascade_menu::CascadeEntry;
 use crate::registry::RegistryScope;
+use crate::strip_palette::tokens;
 
 /// The labels (`S/ModifyPanel.swift:254-386`); each is also its control's
 /// accessibility label.
@@ -33,6 +38,21 @@ pub const AMOUNT: &str = "Amount";
 pub const CURVE: &str = "Curve";
 pub const WAVE: &str = "Wave";
 pub const SUBSTITUTE_WITH: &str = "Substitute With";
+/// The Strip Chart line's (`S/LineModifyEditor.swift:22-102`).
+pub const LINE_TARGET: &str = "Line Target";
+pub const SHAPE: &str = "Shape";
+pub const PERIOD_KIND: &str = "Period Kind";
+/// The Line Target's face for a plain value (`:19`).
+pub const ANY_VALUE: &str = "Any Value";
+/// Its submenus (`:28,33,42`).
+pub const CONTROLLER: &str = "Controller";
+pub const POLY_PRESSURE: &str = "Poly Pressure";
+pub const AUTOMATION: &str = "Automation";
+
+/// A Free line's caption (`S/LineModifyEditor.swift:98`).
+pub fn drawn_line(points: usize) -> String {
+    format!("Drawn line ({points} points)")
+}
 
 /// The widths (`S/ModifyPanel.swift:254-386`).
 const OPERATION_WIDTH: f32 = 260.;
@@ -47,6 +67,13 @@ const AMOUNT_WIDTH: f32 = 130.;
 const CURVE_WIDTH: f32 = 110.;
 const WAVE_WIDTH: f32 = 100.;
 const SUBSTITUTE_WIDTH: f32 = 150.;
+/// The line's (`S/LineModifyEditor.swift:52-95`).
+const LINE_TARGET_WIDTH: f32 = 210.;
+const LINE_OP_WIDTH: f32 = 110.;
+const SHAPE_WIDTH: f32 = 110.;
+const LINE_CURVE_WIDTH: f32 = 100.;
+const LINE_WAVE_WIDTH: f32 = 90.;
+const PERIOD_KIND_WIDTH: f32 = 150.;
 
 impl ModifyPanel {
     /// The Modify half, while Modify is on.
@@ -54,6 +81,7 @@ impl ModifyPanel {
         &mut self,
         h: &ModifyHalf,
         dests: &[DestRow],
+        targets: &AutomationTargets,
         scope: &mut RegistryScope,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -85,7 +113,7 @@ impl ModifyPanel {
             |d, n| d.select_modify_mut().config.modify.to_copy = n == 1,
         );
         let mut line = div().flex().flex_row().flex_wrap().items_center().gap_1();
-        for el in self.specials(&h.op, dests, &mut sc, window, cx) {
+        for el in self.specials(&h.op, dests, targets, &mut sc, window, cx) {
             line = line.child(el);
         }
         for (j, f) in modify_fields(&h.op).iter().enumerate() {
@@ -124,6 +152,7 @@ impl ModifyPanel {
         &mut self,
         op: &ModifyRow,
         dests: &[DestRow],
+        targets: &AutomationTargets,
         sc: &mut RegistryScope,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -310,27 +339,217 @@ impl ModifyPanel {
                     cx,
                 ));
             }
-            // The Strip Chart line has no editor in this slice; the rest
-            // have only their numbers.
+            ModifyRow::Line { target, op, line } => {
+                out.extend(self.line_editor(*target, *op, line, targets, sc, window, cx));
+            }
+            // The rest have only their numbers.
             _ => {}
         }
         out
+    }
+
+    /// The Strip Chart line's pickers (`S/LineModifyEditor.swift:22-102`):
+    /// Line Target, Operation and Shape, then the shape's own; its numbers
+    /// are the half's fields.
+    #[allow(clippy::too_many_arguments)]
+    fn line_editor(
+        &mut self,
+        target: LineTargetRow,
+        op: LineOpRow,
+        line: &LineRow,
+        targets: &AutomationTargets,
+        sc: &mut RegistryScope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let names = &targets.names;
+        let face = StripLane::from_line_target(target)
+            .map_or_else(|| ANY_VALUE.to_owned(), |l| l.title(names));
+        let entries = if self.menu_open(PanelMenu::LineTarget) {
+            self.line_target_entries(targets, cx)
+        } else {
+            Vec::new()
+        };
+        let mut out = vec![self.cascade_picker(
+            PanelMenu::LineTarget,
+            LINE_TARGET,
+            LINE_TARGET_WIDTH,
+            &face,
+            entries,
+            sc,
+            cx,
+        )];
+        let op_title = |o: LineOpRow| {
+            LINE_OPS
+                .iter()
+                .find(|(_, x)| *x == o)
+                .map_or("", |(t, _)| t)
+                .to_owned()
+        };
+        let ops: Vec<LineOpRow> = LINE_OPS.iter().map(|(_, o)| *o).collect();
+        out.push(self.picker(
+            PanelMenu::LineOp,
+            OPERATION,
+            LINE_OP_WIDTH,
+            &op_title(op),
+            Self::choice_rows(&ops, Some(op), op_title, |d, o| d.set_modify_line_op(o)),
+            sc,
+            window,
+            cx,
+        ));
+        let shape = ShapeKind::of(&line.shape);
+        out.push(self.picker(
+            PanelMenu::LineShape,
+            SHAPE,
+            SHAPE_WIDTH,
+            shape.title(),
+            Self::choice_rows(
+                &ShapeKind::ALL,
+                Some(shape),
+                |k| k.title().to_owned(),
+                |d, k| d.set_modify_line_shape(k),
+            ),
+            sc,
+            window,
+            cx,
+        ));
+        match &line.shape {
+            LineShapeRow::Curved { curve } => {
+                let c = LineCurve::ALL.into_iter().find(|c| c.row() == *curve);
+                out.push(self.picker(
+                    PanelMenu::LineCurve,
+                    CURVE,
+                    LINE_CURVE_WIDTH,
+                    c.map_or("", LineCurve::title),
+                    Self::choice_rows(
+                        &LineCurve::ALL,
+                        c,
+                        |k| k.title().to_owned(),
+                        |d, k| d.set_modify_line_curve(k.row()),
+                    ),
+                    sc,
+                    window,
+                    cx,
+                ));
+            }
+            LineShapeRow::Oscillator { wave, period, .. } => {
+                let w = WaveKind::of(*wave);
+                out.push(self.picker(
+                    PanelMenu::LineWave,
+                    WAVE,
+                    LINE_WAVE_WIDTH,
+                    w.title(),
+                    Self::choice_rows(
+                        &WaveKind::ALL,
+                        Some(w),
+                        |k| k.title().to_owned(),
+                        |d, k| d.set_modify_line_wave(k.row()),
+                    ),
+                    sc,
+                    window,
+                    cx,
+                ));
+                let k = PeriodKind::of(period);
+                out.push(self.picker(
+                    PanelMenu::LinePeriodKind,
+                    PERIOD_KIND,
+                    PERIOD_KIND_WIDTH,
+                    k.title(),
+                    Self::choice_rows(
+                        &PeriodKind::ALL,
+                        Some(k),
+                        |k| k.title().to_owned(),
+                        |d, k| d.set_modify_line_period_kind(k),
+                    ),
+                    sc,
+                    window,
+                    cx,
+                ));
+            }
+            LineShapeRow::Free { points } => {
+                let t = tokens();
+                let text = drawn_line(points.len());
+                out.push(
+                    div()
+                        .relative()
+                        .flex_none()
+                        .px_1()
+                        .text_size(px(11.))
+                        .text_color(rgb(t.text_secondary))
+                        .child(text.clone())
+                        .child(sc.control("text", &text, true))
+                        .into_any_element(),
+                );
+            }
+            LineShapeRow::Straight | LineShapeRow::Flat | LineShapeRow::Random { .. } => {}
+        }
+        out
+    }
+
+    /// The Line Target menu (`S/LineModifyEditor.swift:23-51`): the basic
+    /// values, then Controller ▸, Poly Pressure ▸ octaves ▸ and
+    /// Automation ▸ groups ▸.
+    fn line_target_entries(
+        &self,
+        targets: &AutomationTargets,
+        cx: &Context<Self>,
+    ) -> Vec<CascadeEntry> {
+        let names = &targets.names;
+        let item = |lane: StripLane| {
+            self.cascade_item(
+                lane.title(names),
+                move |d| d.set_modify_line_target(lane),
+                cx,
+            )
+        };
+        let mut menu: Vec<CascadeEntry> = LINE_TARGET_BASICS.iter().map(|&l| item(l)).collect();
+        menu.push(CascadeEntry::submenu(
+            CONTROLLER,
+            line_target_controllers().into_iter().map(item).collect(),
+        ));
+        menu.push(CascadeEntry::submenu(
+            POLY_PRESSURE,
+            line_target_octaves()
+                .into_iter()
+                .map(|(title, lanes)| {
+                    CascadeEntry::submenu(title, lanes.into_iter().map(item).collect())
+                })
+                .collect(),
+        ));
+        let groups: Vec<CascadeEntry> = targets
+            .menus
+            .iter()
+            .map(|g| {
+                CascadeEntry::submenu(g.title.clone(), g.lanes.iter().map(|&l| item(l)).collect())
+            })
+            .collect();
+        // An empty menu, as Swift's, cannot open.
+        menu.push(CascadeEntry::Submenu {
+            title: AUTOMATION.into(),
+            enabled: !groups.is_empty(),
+            help: None,
+            items: groups,
+        });
+        menu
     }
 }
 
 #[cfg(test)]
 mod tests {
     use gpui::TestAppContext;
-    use vizdaw_app::select_modify::ModifyKind;
     use vizdaw_app::select_modify::model::FIX_FIELDS;
+    use vizdaw_app::select_modify::{LINE_OPS, ModifyKind};
+    use vizdaw_app::testing::mixer_fake;
     use vizdaw_ffi::edit::EditCommand;
+    use vizdaw_ffi::events::AutomationTargetRow;
     use vizdaw_ffi::modify::{AmountRow, CurveRow, ModifyRow};
+    use vizdaw_ffi::strip::{LineOpRow, LineTargetRow, SeriesRow};
 
     use super::super::tests::{
-        Setup, click_node, edit_doc, has_node, labels, node, open_panel, panel_of, setup, tree,
-        type_into, with_doc,
+        Setup, click, click_node, edit_doc, has_node, labels, node, nodes, open_panel, panel_of,
+        setup, setup_with, tree, type_into, with_doc,
     };
-    use super::{AMOUNT, CURVE, OPERATION, TO_A_COPY};
+    use super::{AMOUNT, CURVE, LINE_TARGET, OPERATION, PERIOD_KIND, SHAPE, TO_A_COPY, WAVE};
     use crate::modify_panel::ModifyPanel;
 
     /// The SelectAndModify commands Apply sent so far.
@@ -410,8 +629,15 @@ mod tests {
         );
     }
 
+    /// The panel's operation (the line, once picked).
+    fn line_of(cx: &mut TestAppContext, doc: vizdaw_app::DocId) -> ModifyRow {
+        with_doc(cx, doc, |d| d.select_modify().config.modify.op.clone())
+    }
+
     #[gpui::test]
-    fn the_operation_picker_offers_every_kind(cx: &mut TestAppContext) {
+    fn the_operation_picker_offers_strip_chart_line_and_its_editor_edits_the_line(
+        cx: &mut TestAppContext,
+    ) {
         let s = setup(cx);
         let (n, doc) = open_panel(&s, cx, "modify.transpose");
         click_node(&s, cx, n, "menu", OPERATION);
@@ -421,24 +647,173 @@ mod tests {
             .map(|k| k.title().to_owned())
             .collect();
         assert_eq!(labels(&t, "menuitem"), offered);
-        assert!(has_node(&t, "menuitem", "Strip Chart Line"));
-        // Quantize: its groove field and numbers.
-        click_node(&s, cx, n, "menuitem", "Quantize");
-        let t = tree(&s, cx, n);
-        node(&t, "textfield", "Groove offsets");
-        node(&t, "textfield", "grid");
-        node(&t, "textfield", "strength");
-        assert!(!has_node(&t, "textfield", "semitones"));
-        // A loaded Strip Chart line: its title and its fields (slice 10c
-        // Task 7; its pickers are the GPUI line editor's).
-        edit_doc(cx, doc, |d| {
-            d.select_modify_mut().config.modify.op = ModifyKind::Line.default_op();
-        });
+        click_node(&s, cx, n, "menuitem", "Strip Chart Line");
         let t = tree(&s, cx, n);
         assert_eq!(node(&t, "menu", OPERATION)["value"], "Strip Chart Line");
+        assert_eq!(node(&t, "menu", LINE_TARGET)["value"], "Velocity");
+        // The half's Operation, then the line's.
+        let ops = nodes(&t, "menu", OPERATION);
+        assert_eq!(ops.len(), 2);
+        assert_eq!(ops[1]["value"], "Set");
+        assert_eq!(node(&t, "menu", SHAPE)["value"], "Straight");
         for label in ["from", "to", "start", "end", "step"] {
             node(&t, "textfield", label);
         }
+        // Line Target › Tempo.
+        click_node(&s, cx, n, "menu", LINE_TARGET);
+        click_node(&s, cx, n, "menuitem", "Tempo");
+        let t = tree(&s, cx, n);
+        assert_eq!(node(&t, "menu", LINE_TARGET)["value"], "Tempo");
+        assert!(labels(&t, "menuitem").is_empty(), "the menu closed");
+        // The line's Operation is its own picker.
+        click(&s, cx, n, &nodes(&t, "menu", OPERATION)[1]["id"]);
+        let t = tree(&s, cx, n);
+        let ops: Vec<String> = LINE_OPS.iter().map(|(t, _)| (*t).to_owned()).collect();
+        assert_eq!(labels(&t, "menuitem"), ops);
+        click_node(&s, cx, n, "menuitem", "Add");
+        assert!(
+            matches!(
+                line_of(cx, doc),
+                ModifyRow::Line {
+                    target: LineTargetRow::Tempo,
+                    op: LineOpRow::Add,
+                    ..
+                }
+            ),
+            "{:?}",
+            line_of(cx, doc)
+        );
+        // Shape › Oscillator: its wave, period kind and fields.
+        click_node(&s, cx, n, "menu", SHAPE);
+        click_node(&s, cx, n, "menuitem", "Oscillator");
+        let t = tree(&s, cx, n);
+        assert_eq!(node(&t, "menu", SHAPE)["value"], "Oscillator");
+        node(&t, "textfield", "period");
+        node(&t, "textfield", "phase (\u{2030})");
+        assert_eq!(node(&t, "menu", WAVE)["value"], "Sine");
+        assert_eq!(node(&t, "menu", PERIOD_KIND)["value"], "Musical");
+        assert!(!has_node(&t, "menu", CURVE));
+        click_node(&s, cx, n, "menu", WAVE);
+        click_node(&s, cx, n, "menuitem", "Saw");
+        click_node(&s, cx, n, "menu", PERIOD_KIND);
+        click_node(&s, cx, n, "menuitem", "Clock");
+        let t = tree(&s, cx, n);
+        assert_eq!(node(&t, "menu", WAVE)["value"], "Saw");
+        assert_eq!(node(&t, "menu", PERIOD_KIND)["value"], "Clock");
+        node(&t, "textfield", "period (ms)");
+        // Shape › Curved: its curve.
+        click_node(&s, cx, n, "menu", SHAPE);
+        click_node(&s, cx, n, "menuitem", "Curved");
+        click_node(&s, cx, n, "menu", CURVE);
+        let t = tree(&s, cx, n);
+        assert_eq!(labels(&t, "menuitem"), ["Ease In", "Ease Out", "S-Curve"]);
+        click_node(&s, cx, n, "menuitem", "S-Curve");
+        let t = tree(&s, cx, n);
+        assert_eq!(node(&t, "menu", CURVE)["value"], "S-Curve");
+        assert!(!has_node(&t, "menu", WAVE));
+        // Every picker is its own element.
+        let panel = panel_of(cx, doc)
+            .unwrap()
+            .downcast::<ModifyPanel>()
+            .unwrap();
+        let ids = cx.update(|cx| panel.read(cx).unwrap().picker_ids.clone());
+        let unique: std::collections::BTreeSet<&String> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "duplicate picker ids: {ids:?}");
+    }
+
+    #[gpui::test]
+    fn the_line_target_menu_reaches_a_poly_pressure_pitch_and_an_automation_target(
+        cx: &mut TestAppContext,
+    ) {
+        let s = setup_with(cx, mixer_fake);
+        let (n, doc) = open_panel(&s, cx, "modify.transpose");
+        edit_doc(cx, doc, |d| {
+            d.select_modify_mut().config.modify.op = ModifyKind::Line.default_op();
+        });
+        click_node(&s, cx, n, "menu", LINE_TARGET);
+        let t = tree(&s, cx, n);
+        assert_eq!(
+            labels(&t, "menuitem"),
+            [
+                "Velocity",
+                "Release Velocity",
+                "Length",
+                "Pitch Bend",
+                "Channel Pressure",
+                "Program",
+                "Tempo",
+                "Controller",
+                "Poly Pressure",
+                "Automation",
+            ]
+        );
+        click_node(&s, cx, n, "menuitem", "Poly Pressure");
+        click_node(&s, cx, n, "menuitem", "C4\u{2013}B4");
+        click_node(&s, cx, n, "menuitem", "Poly Pressure C4");
+        let t = tree(&s, cx, n);
+        assert_eq!(node(&t, "menu", LINE_TARGET)["value"], "Poly Pressure C4");
+        assert!(labels(&t, "menuitem").is_empty(), "the menu closed");
+        click_node(&s, cx, n, "menu", LINE_TARGET);
+        click_node(&s, cx, n, "menuitem", "Automation");
+        click_node(&s, cx, n, "menuitem", "Synth");
+        click_node(&s, cx, n, "menuitem", "Mute \u{b7} Synth");
+        let t = tree(&s, cx, n);
+        assert_eq!(node(&t, "menu", LINE_TARGET)["value"], "Mute \u{b7} Synth");
+        assert!(
+            matches!(
+                line_of(cx, doc),
+                ModifyRow::Line {
+                    target: LineTargetRow::Series {
+                        series: SeriesRow::Automation {
+                            target: AutomationTargetRow::StripMute { strip: 1 }
+                        }
+                    },
+                    ..
+                }
+            ),
+            "{:?}",
+            line_of(cx, doc)
+        );
+    }
+
+    #[gpui::test]
+    fn a_free_line_shows_its_point_count(cx: &mut TestAppContext) {
+        let s = setup(cx);
+        let (n, doc) = open_panel(&s, cx, "modify.transpose");
+        edit_doc(cx, doc, |d| {
+            d.select_modify_mut().config.modify.op = ModifyKind::Line.default_op();
+        });
+        click_node(&s, cx, n, "menu", SHAPE);
+        click_node(&s, cx, n, "menuitem", "Free");
+        let t = tree(&s, cx, n);
+        assert_eq!(node(&t, "menu", SHAPE)["value"], "Free");
+        node(&t, "text", "Drawn line (2 points)");
+    }
+
+    #[gpui::test]
+    fn apply_sends_the_line_from_the_panel(cx: &mut TestAppContext) {
+        let s = setup(cx);
+        let (n, _) = open_panel(&s, cx, "modify.transpose");
+        click_node(&s, cx, n, "menu", OPERATION);
+        click_node(&s, cx, n, "menuitem", "Strip Chart Line");
+        click_node(&s, cx, n, "menu", LINE_TARGET);
+        click_node(&s, cx, n, "menuitem", "Tempo");
+        click_node(&s, cx, n, "button", "Apply");
+        let sent = applied(&s);
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert!(
+            matches!(
+                &sent[0],
+                (
+                    Some(ModifyRow::Line {
+                        target: LineTargetRow::Tempo,
+                        ..
+                    }),
+                    false
+                )
+            ),
+            "{sent:?}"
+        );
     }
 
     #[gpui::test]

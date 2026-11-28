@@ -8,11 +8,13 @@
 use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px, rgb};
 use vizdaw_app::list::ListKind;
 use vizdaw_app::select_modify::{Comparison, ConditionKind, SelectHalf, condition_fields};
+use vizdaw_app::strip_chart::{AutomationTargets, StripLane};
 use vizdaw_ffi::events::EventKindRow;
 use vizdaw_ffi::mixer::DestRow;
 use vizdaw_ffi::modify::{ConditionRow, ConditionTest, SelectModeRow};
 
 use super::{MenuRow, ModifyPanel, PanelMenu};
+use crate::cascade_menu::CascadeEntry;
 use crate::registry::RegistryScope;
 use crate::strip_palette::tokens;
 
@@ -25,6 +27,8 @@ pub const KINDS: &str = "Kinds";
 pub const DESTINATION: &str = "Destination";
 pub const NO_KIND: &str = "No Kind";
 pub const NO_DESTINATION: &str = "No Destination";
+/// An Automation Target condition's picker (`S/LineModifyEditor.swift:127`).
+pub const AUTOMATION_TARGET: &str = "Automation Target";
 
 /// The Result picker's items (`:129-131`).
 const MODES: [(SelectModeRow, &str); 3] = [
@@ -60,6 +64,8 @@ const KIND_TITLE_WIDTH: f32 = 120.;
 const COMPARISON_WIDTH: f32 = 90.;
 const KINDS_WIDTH: f32 = 220.;
 pub(super) const DEST_WIDTH: f32 = 180.;
+/// `S/LineModifyEditor.swift:126`.
+const AUTOMATION_TARGET_WIDTH: f32 = 220.;
 pub(super) const FIELD_WIDTH: f32 = 84.;
 
 /// The list title of event kind `k`.
@@ -112,6 +118,7 @@ impl ModifyPanel {
         &mut self,
         h: &SelectHalf,
         dests: &[DestRow],
+        targets: &AutomationTargets,
         scope: &mut RegistryScope,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -178,7 +185,7 @@ impl ModifyPanel {
                 .child(match_picker),
         );
         for (i, c) in h.conditions.iter().enumerate() {
-            let row = self.condition_row(i, c, dests, &mut sc, window, cx);
+            let row = self.condition_row(i, c, dests, targets, &mut sc, window, cx);
             col = col.child(row);
         }
         let add = self.picker(
@@ -199,14 +206,16 @@ impl ModifyPanel {
         col.child(add).into_any_element()
     }
 
-    /// Condition `i`'s row: its kind, how it compares, its value and the
-    /// remove button. An Automation Target condition (out of scope here)
-    /// shows only its title and the remove button.
+    /// Condition `i`'s row (`S/ModifyPanel.swift:155-200`): its kind, how
+    /// it compares, its value and the remove button. An Automation Target
+    /// condition's value is its target picker.
+    #[allow(clippy::too_many_arguments)]
     fn condition_row(
         &mut self,
         i: usize,
         c: &ConditionRow,
         dests: &[DestRow],
+        targets: &AutomationTargets,
         scope: &mut RegistryScope,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -228,25 +237,25 @@ impl ModifyPanel {
                     .child(kind.title())
                     .child(scope.control("text", kind.title(), true)),
             );
-        if kind != ConditionKind::Automation {
-            let current = Comparison::of(c);
-            let comparison = self.picker(
-                PanelMenu::Comparison(i),
-                COMPARISON,
-                COMPARISON_WIDTH,
-                current.title(),
-                Self::choice_rows(
-                    Comparison::choices(&c.test),
-                    Some(current),
-                    |x| x.title().to_owned(),
-                    move |d, x| d.set_modify_comparison(i, x),
-                ),
-                scope,
-                window,
-                cx,
-            );
-            row = row.child(comparison);
-        }
+        // Every kind has its Comparison, Automation Target too (Is / Is
+        // Not), as in Swift.
+        let current = Comparison::of(c);
+        let comparison = self.picker(
+            PanelMenu::Comparison(i),
+            COMPARISON,
+            COMPARISON_WIDTH,
+            current.title(),
+            Self::choice_rows(
+                Comparison::choices(&c.test),
+                Some(current),
+                |x| x.title().to_owned(),
+                move |d, x| d.set_modify_comparison(i, x),
+            ),
+            scope,
+            window,
+            cx,
+        );
+        row = row.child(comparison);
         match &c.test {
             ConditionTest::Kinds { kinds } => {
                 let rows = PANEL_KINDS
@@ -294,7 +303,24 @@ impl ModifyPanel {
                 );
                 row = row.child(picker);
             }
-            ConditionTest::Automation { .. } => {}
+            ConditionTest::Automation { target } => {
+                let menu = PanelMenu::AutomationTarget(i);
+                let entries = if self.menu_open(menu) {
+                    self.automation_target_entries(i, targets, cx)
+                } else {
+                    Vec::new()
+                };
+                let picker = self.cascade_picker(
+                    menu,
+                    AUTOMATION_TARGET,
+                    AUTOMATION_TARGET_WIDTH,
+                    &targets.names.title(target),
+                    entries,
+                    scope,
+                    cx,
+                );
+                row = row.child(picker);
+            }
             test => {
                 for (j, f) in condition_fields(test).iter().enumerate() {
                     let label = format!("{} {}", kind.title(), f.label);
@@ -316,6 +342,36 @@ impl ModifyPanel {
             .child(Self::remove_button(i, scope, cx))
             .into_any_element()
     }
+
+    /// Condition `i`'s Automation Target menu: the groups ▸ each group's
+    /// targets (`S/LineModifyEditor.swift:111-124`).
+    fn automation_target_entries(
+        &self,
+        i: usize,
+        targets: &AutomationTargets,
+        cx: &Context<Self>,
+    ) -> Vec<CascadeEntry> {
+        let names = &targets.names;
+        targets
+            .menus
+            .iter()
+            .map(|g| {
+                let items = g
+                    .lanes
+                    .iter()
+                    .filter_map(|l| match *l {
+                        StripLane::Automation(t) => Some(self.cascade_item(
+                            names.title(&t),
+                            move |d| d.set_modify_condition_target(i, t),
+                            cx,
+                        )),
+                        _ => None,
+                    })
+                    .collect();
+                CascadeEntry::submenu(g.title.clone(), items)
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -325,15 +381,19 @@ mod tests {
     use vizdaw_ffi::events::AutomationTargetRow;
     use vizdaw_ffi::modify::{ConditionRow, ConditionTest};
 
+    use vizdaw_app::testing::mixer_fake;
+
     use super::super::tests::{
-        click, click_node, edit_doc, has_node, labels, node, nodes, open_panel, setup, tree,
+        click, click_node, has_node, labels, node, nodes, open_panel, setup, setup_with, tree,
         with_doc,
     };
-    use super::{ADD_CONDITION, KINDS};
+    use super::{ADD_CONDITION, AUTOMATION_TARGET, KINDS};
 
     #[gpui::test]
-    fn add_condition_offers_no_automation_target_and_remove_drops_the_row(cx: &mut TestAppContext) {
-        let s = setup(cx);
+    fn add_condition_offers_automation_target_and_its_picker_sets_the_target(
+        cx: &mut TestAppContext,
+    ) {
+        let s = setup_with(cx, mixer_fake);
         let (n, doc) = open_panel(&s, cx, "modify.select_by_rule");
         // Select by Rule: Select on, Kind is Note.
         let t = tree(&s, cx, n);
@@ -374,19 +434,46 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         assert_eq!(kinds, [ConditionKind::Kind]);
-        // A loaded Automation Target condition shows its title and the
-        // remove button only.
-        edit_doc(cx, doc, |d| {
-            d.select_modify_mut().config.select.conditions = vec![ConditionRow {
-                test: ConditionTest::Automation {
-                    target: AutomationTargetRow::StripFader { strip: 0 },
-                },
-                negate: false,
-            }];
-        });
+        // Add Condition › Automation Target: its title, Comparison (Is /
+        // Is Not, as Swift) and its target picker.
+        click_node(&s, cx, n, "menu", ADD_CONDITION);
+        click_node(&s, cx, n, "menuitem", "Automation Target");
         let t = tree(&s, cx, n);
         node(&t, "text", "Automation Target");
-        assert!(!has_node(&t, "menu", "Comparison"));
+        let comparisons = nodes(&t, "menu", "Comparison");
+        assert_eq!(comparisons.len(), 2);
+        click(&s, cx, n, &comparisons[1]["id"]);
+        assert_eq!(labels(&tree(&s, cx, n), "menuitem"), ["is", "is not"]);
+        click_node(&s, cx, n, "menuitem", "is not");
+        click_node(&s, cx, n, "menu", AUTOMATION_TARGET);
+        let t = tree(&s, cx, n);
+        assert_eq!(labels(&t, "menuitem"), ["Synth", "Bus 1", "Master"]);
+        click_node(&s, cx, n, "menuitem", "Synth");
+        click_node(&s, cx, n, "menuitem", "Fader \u{b7} Synth");
+        let t = tree(&s, cx, n);
+        assert_eq!(
+            node(&t, "menu", AUTOMATION_TARGET)["value"],
+            "Fader \u{b7} Synth"
+        );
+        assert!(labels(&t, "menuitem").is_empty(), "the menu closed");
+        let last = with_doc(cx, doc, |d| {
+            d.select_modify().config.select.conditions.last().cloned()
+        });
+        assert_eq!(
+            last,
+            Some(ConditionRow {
+                test: ConditionTest::Automation {
+                    target: AutomationTargetRow::StripFader { strip: 1 },
+                },
+                negate: true,
+            })
+        );
+        // Remove Condition still drops the row.
+        let removes = nodes(&t, "button", "Remove Condition");
+        assert_eq!(removes.len(), 2);
+        click(&s, cx, n, &removes[1]["id"]);
+        let t = tree(&s, cx, n);
+        assert!(!has_node(&t, "menu", AUTOMATION_TARGET));
         assert_eq!(nodes(&t, "button", "Remove Condition").len(), 1);
     }
 
