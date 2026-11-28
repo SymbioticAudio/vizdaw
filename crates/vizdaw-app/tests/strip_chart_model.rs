@@ -596,3 +596,41 @@ fn a_vca_named_vca_is_not_named_twice() {
         "VCA 1 Fader"
     );
 }
+
+/// Fix round 1 (review Minor 2, data loss): while the targets have never
+/// been read, saved automation rows are unknown, not gone, and an edit
+/// in that window keeps them.
+#[test]
+fn a_busy_first_read_keeps_saved_automation_rows_through_an_edit() {
+    let f = Arc::new(mixer_fake());
+    let mut m = DocumentModel::new(f.clone()).unwrap();
+    m.open_detail(chords(), Some(DetailEditorKind::StripChart));
+    let saved = vec![
+        auto(T::StripFader { strip: 1 }),
+        auto(T::PluginParam { slot: 77, param: 1 }),
+        StripLane::Controller(7),
+    ];
+    m.update_layout(|l| {
+        if let Some(d) = l.detail.as_mut() {
+            d.set_strip_rows(Some(saved.clone()));
+        }
+    });
+    f.set_call_error("mixer", Some(busy()));
+    assert_eq!(m.strip_rows(PANE), saved, "unknown yet, not gone");
+    m.set_strip_row(PANE, 2, StripLane::PitchBend);
+    let written = m.layout().detail.as_ref().and_then(|d| d.strip_rows());
+    assert_eq!(
+        written,
+        Some(vec![
+            auto(T::StripFader { strip: 1 }),
+            auto(T::PluginParam { slot: 77, param: 1 }),
+            StripLane::PitchBend,
+        ])
+    );
+    f.set_call_error("mixer", None);
+    assert_eq!(
+        m.strip_rows(PANE),
+        vec![auto(T::StripFader { strip: 1 }), StripLane::PitchBend],
+        "once read, a gone target's row is dropped"
+    );
+}

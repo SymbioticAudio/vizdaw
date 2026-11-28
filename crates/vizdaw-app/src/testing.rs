@@ -716,12 +716,12 @@ impl FakeSession {
         self.st().idle_snapshot = s;
     }
 
-    /// Makes the next `idle()` say the slots changed (once).
     /// What `automation_preview` answers from now on.
     pub fn set_preview_rows(&self, rows: Vec<PreviewPointRow>) {
         self.st().preview_rows = rows;
     }
 
+    /// Makes the next `idle()` say the slots changed (once).
     pub fn set_idle_slots_changed(&self) {
         self.st().idle_slots_changed = true;
     }

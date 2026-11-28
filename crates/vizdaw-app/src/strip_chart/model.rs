@@ -231,7 +231,10 @@ impl DocumentModel {
         }
     }
 
-    /// `saved` without automation rows the mixer no longer has.
+    /// `saved` without automation rows the mixer no longer has. Targets
+    /// never read (a Busy first read) have no strips, and such names know
+    /// every target (`StripNames::knows`): the rows are unknown yet, not
+    /// gone, so an edit then keeps them (fix round 1).
     fn known(&self, saved: &[StripLane]) -> Vec<StripLane> {
         if !saved.iter().any(|l| matches!(l, StripLane::Automation(_))) {
             return saved.to_vec();
