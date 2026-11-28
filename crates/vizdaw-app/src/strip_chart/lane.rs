@@ -206,14 +206,15 @@ impl StripNames {
                     .unwrap_or_else(|| format!("Destination {dest}"));
                 format!("Velocity Scale · {d}")
             }
-            // As the core names the VCA's new track ("VCA ‹name› Fader").
+            // As the core names the VCA's new track ("VCA ‹name› Fader",
+            // a name already "VCA …" not doubled: `vca_label`).
             T::VcaFader { vca } => {
                 let n = self
                     .vcas
                     .get(&vca)
                     .cloned()
                     .unwrap_or_else(|| vca.to_string());
-                format!("VCA {n} Fader")
+                format!("{} Fader", crate::mixer::VcaStripLabels::title(&n))
             }
         }
     }
