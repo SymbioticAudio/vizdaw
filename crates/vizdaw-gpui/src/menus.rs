@@ -182,13 +182,17 @@ pub const PLUGIN_MANAGER_CONTEXT: &str = "PluginManagerWindow";
 pub const MODIFY_PANEL_CONTEXT: &str = "ModifyPanel";
 /// The editor commands (`commands::EDITOR_COMMANDS`) the GPUI app routes
 /// to its menus, keys and control channel: the grid, the Piano Roll, the
-/// List, closing the detail and Insert Event (the List's).
+/// List, closing the detail, Insert Event (the List's) and the nudges.
 pub const ROUTED_EDITOR_COMMANDS: &[&str] = &[
     "editors.snap",
     "editors.piano_roll",
     "editors.list",
     "editors.close_detail",
     "editors.insert_event",
+    "editors.nudge_earlier",
+    "editors.nudge_later",
+    "editors.nudge_up",
+    "editors.nudge_down",
 ];
 
 /// Whether the menus, keys and control channel route `id` to
@@ -688,8 +692,8 @@ pub fn menu_model(front: Option<&DocumentModel>, keymap: &Keymap) -> MenuModel {
                     ),
                 ],
             ),
-            // The other detail editors, their windows and the nudges come
-            // with their views.
+            // The other detail editors and their windows come with their
+            // views. Swift `AppCommands.swift:455-467`.
             menu(
                 "Editors",
                 vec![
@@ -698,6 +702,11 @@ pub fn menu_model(front: Option<&DocumentModel>, keymap: &Keymap) -> MenuModel {
                     ItemSpec::Separator,
                     cmd("editors.close_detail"),
                     cmd("editors.insert_event"),
+                    ItemSpec::Separator,
+                    cmd("editors.nudge_earlier"),
+                    cmd("editors.nudge_later"),
+                    cmd("editors.nudge_up"),
+                    cmd("editors.nudge_down"),
                     ItemSpec::Separator,
                     cmd("editors.snap"),
                 ],

@@ -171,6 +171,9 @@ pub struct DocumentModel {
     pub learn: crate::learn::LearnModel,
     /// The Select and Modify panel (slice 10b).
     pub(crate) select_modify: crate::select_modify::model::SelectModifyModel,
+    /// The app's nudge steps, as the UI last handed them before a command
+    /// (the nudges' arm reads them; Swift passes `host.nudge`).
+    pub(crate) nudge_settings: crate::editing_prefs::NudgeSettings,
 }
 
 /// What the arrangement reads of one track, read when first asked for.
@@ -306,6 +309,7 @@ impl DocumentModel {
             surface_acting: false,
             learn,
             select_modify: Default::default(),
+            nudge_settings: Default::default(),
         };
         model.refresh_project_info();
         // The time left reads the core's free space from the start.

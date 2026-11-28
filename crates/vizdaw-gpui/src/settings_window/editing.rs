@@ -2,7 +2,8 @@
 //! two nudge steps, the default crossfade, zero-crossing snapping and the
 //! external sample editor. A change goes to the app's [`EditingPrefs`]
 //! and is saved in the preferences; a failed write shows on the tab's
-//! problem line. Nothing reads these settings yet.
+//! problem line. The nudges read the nudge steps; nothing reads the
+//! others yet.
 //!
 //! [`EditingPrefs`]: vizdaw_app::editing_prefs::EditingPrefs
 

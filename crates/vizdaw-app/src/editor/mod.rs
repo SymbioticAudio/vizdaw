@@ -7,6 +7,7 @@
 mod detail;
 mod gesture;
 mod layout;
+mod nudge;
 mod snap;
 
 pub use detail::{DetailEditorKind, DetailState, EditorTarget, ListFilter};
@@ -15,6 +16,7 @@ pub use layout::{
     BlockRuleSetting, EditorLayout, LightMode, MainView, PaneSetup, PaneSide, PaneState, PaneView,
     TransportMarks, ViewLayouts, off_list,
 };
+pub use nudge::NudgeDirection;
 pub use snap::{Division, Snap};
 
 use vizdaw_ffi::snapshot::DocSnapshot;

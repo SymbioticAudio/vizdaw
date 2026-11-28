@@ -3,16 +3,19 @@
 //! crossing snapping and the external sample editor. They belong to the
 //! machine, so they live in the preferences (keys `nudge`, `crossfadeMs`,
 //! `zeroCrossings`, `externalEditor`), never in a project. Decoding is
-//! tolerant: a missing or damaged field keeps its default. Nothing reads
-//! them yet: nudge, crossfade length, zero-crossing snapping and Open in
-//! External Editor arrive with their features.
+//! tolerant: a missing or damaged field keeps its default. The nudges
+//! read the nudge steps ([`NudgeSettings::ticks`], [`NudgeSettings::key`]);
+//! crossfade length, zero-crossing snapping and Open in External Editor
+//! arrive with their features.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::arrangement::PPQ;
-use crate::editor::Division;
+use vizdaw_ffi::events::MeterEntryRow;
+
+use crate::arrangement::{PPQ, bar_at};
+use crate::editor::{Division, Snap};
 use crate::prefs::Prefs;
 
 pub const NUDGE_KEY: &str = "nudge";
@@ -133,6 +136,13 @@ impl ScaleKind {
     }
 }
 
+/// The root pitch class of a key signature: (7 × sharps) mod 12, plus 9
+/// for a minor key (Swift `ScaleMath.keyRoot`, `PitchMath.swift:49-54`).
+pub fn key_root(sharps: i8, minor: bool) -> u8 {
+    let major = (7 * i32::from(sharps)).rem_euclid(12);
+    ((major + if minor { 9 } else { 0 }) % 12) as u8
+}
+
 /// The time step of a nudge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NudgeTime {
@@ -190,6 +200,44 @@ fn case<'a>(v: &'a Value, name: &str) -> Option<&'a Value> {
 }
 
 impl NudgeSettings {
+    /// The time step at `tick` in `meter`, at least 1 (Swift
+    /// `NudgeSettings.ticks(at:meter:snap:)`, `Nudge.swift:51-66`): the
+    /// edit grid's step even with snap off, a note value's step, or a
+    /// number of ticks.
+    pub fn ticks(&self, tick: i64, meter: &[MeterEntryRow], snap: &Snap) -> i64 {
+        let m = bar_at(tick, meter).meter;
+        match self.time {
+            NudgeTime::Grid => Snap {
+                enabled: true,
+                ..*snap
+            }
+            .step(&m),
+            NudgeTime::Division(division, triplet) => Snap {
+                division,
+                triplet,
+                ..Snap::default()
+            }
+            .step(&m),
+            NudgeTime::Ticks(n) => i64::from(n).max(1),
+        }
+    }
+
+    /// The key scale steps follow at `tick` (Swift `NudgeSettings.key`,
+    /// `Nudge.swift:68-73`): the key signature's root with the major or
+    /// natural minor mask, else the fixed `root` and `scale`.
+    pub fn key(&self, tick: i64, meter: &[MeterEntryRow]) -> (u8, u16) {
+        if !self.follow_key_signature {
+            return (self.root % 12, self.scale.mask());
+        }
+        let e = bar_at(tick, meter).meter;
+        let scale = if e.minor {
+            ScaleKind::NaturalMinor
+        } else {
+            ScaleKind::Major
+        };
+        (key_root(e.sharps, e.minor), scale.mask())
+    }
+
     /// The settings in `v`; each damaged field keeps its default.
     pub fn from_value(v: &Value) -> Self {
         let d = NudgeSettings::default();

@@ -56,11 +56,16 @@ pub(super) struct Setup {
 }
 
 pub(super) fn setup(cx: &mut TestAppContext) -> Setup {
+    setup_with(cx, || FakeSession::new(vec![]))
+}
+
+/// [`setup`] whose new documents are `make`'s sessions.
+pub(super) fn setup_with(cx: &mut TestAppContext, make: fn() -> FakeSession) -> Setup {
     let made: Made = Arc::default();
     let m = made.clone();
     let store = DocumentStore::new(
         Box::new(move || {
-            let s = Arc::new(FakeSession::new(vec![]));
+            let s = Arc::new(make());
             m.lock().unwrap().push(s.clone());
             Ok(s)
         }),
@@ -697,4 +702,94 @@ fn a_template_item_runs_from_the_document_and_its_panel(cx: &mut TestAppContext)
     });
     cx.run_until_parked();
     assert_eq!(fake.filtered_edits().len(), before + 2, "from the panel");
+}
+
+/// The nudges' ⌥-arrows (slice 10b Task 9): in the document window they
+/// nudge by the app's Settings › Editing steps; while a text field there
+/// has the keyboard they do not (⌥-arrows move its cursor); while the
+/// panel is key they do not either (its fields type, and Swift's menu
+/// items are off while the panel is key).
+#[gpui::test]
+fn the_nudge_keys_act_in_the_document_window_and_wait_while_a_field_types(cx: &mut TestAppContext) {
+    use vizdaw_app::editing_prefs::{NudgeSettings, NudgeTime};
+    use vizdaw_ffi::edit::{EditCommand, EventEdit, LaneRef};
+    use vizdaw_ffi::selection::SelectionRow;
+    let nudge = |ticks| EditCommand::Event {
+        edit: EventEdit::Nudge {
+            events: vec![1],
+            ticks,
+            semitones: 0,
+        },
+    };
+    let s = setup_with(cx, vizdaw_app::testing::roll_fake);
+    let (h, doc) = new_document(cx);
+    let fake = s.made.lock().unwrap()[0].clone();
+    cx.update(|cx| {
+        AppState::global(cx).update(cx, |s, _| {
+            let n = NudgeSettings {
+                time: NudgeTime::Ticks(240),
+                ..NudgeSettings::default()
+            };
+            let _ = s.editing.set_nudge(n, &mut s.prefs);
+        })
+    });
+    edit_doc(cx, doc, |d| {
+        d.set_selection(SelectionRow {
+            time_range: None,
+            lanes: vec![LaneRef { seq: 3, lane: 31 }],
+            events: vec![1],
+        })
+    });
+    cx.simulate_keystrokes(h.into(), "alt-right");
+    assert_eq!(fake.edits().last(), Some(&nudge(240)), "the app's step");
+    cx.simulate_keystrokes(h.into(), "alt-left");
+    assert_eq!(fake.edits().last(), Some(&nudge(-240)));
+    // The channel hands the arm the same steps.
+    run_in(&s, cx, "editors.nudge_later", h);
+    assert_eq!(fake.edits().last(), Some(&nudge(240)));
+    let count = fake.edits().len();
+
+    // Go to Position: the transport bar's field takes the keyboard.
+    run_in(&s, cx, "transport.go_position", h);
+    assert!(!with_doc(cx, doc, |d| d.transport_keys_enabled()));
+    cx.simulate_keystrokes(h.into(), "alt-right");
+    assert_eq!(fake.edits().len(), count, "the field has the keyboard");
+    cx.simulate_keystrokes(h.into(), "escape");
+    assert!(with_doc(cx, doc, |d| d.transport_keys_enabled()));
+
+    // The panel key: no nudge from it.
+    run_in(&s, cx, "modify.transpose", h);
+    let panel = panel_of(cx, doc).unwrap();
+    cx.update(|cx| panel.update(cx, |_, w, _| w.activate_window()).unwrap());
+    cx.run_until_parked();
+    cx.simulate_keystrokes(panel, "alt-right");
+    assert_eq!(fake.edits().len(), count, "the panel is key");
+    // Its menu item (forwarded to the window) says why.
+    cx.update(|cx| {
+        panel
+            .update(cx, |_, w, cx| {
+                w.dispatch_action(Box::new(RunCommand::new("editors.nudge_later")), cx)
+            })
+            .unwrap()
+    });
+    cx.run_until_parked();
+    assert_eq!(fake.edits().len(), count);
+    assert_eq!(
+        with_doc(cx, doc, |d| d.status().map(String::from)).as_deref(),
+        Some("Nudge needs selected events and no text being edited.")
+    );
+    // The document window key again: the keys nudge.
+    cx.update(|cx| h.update(cx, |_, w, _| w.activate_window()).unwrap());
+    cx.run_until_parked();
+    cx.simulate_keystrokes(h.into(), "alt-up");
+    assert_eq!(
+        fake.edits().last(),
+        Some(&EditCommand::Event {
+            edit: EventEdit::Nudge {
+                events: vec![1],
+                ticks: 0,
+                semitones: 1,
+            },
+        })
+    );
 }

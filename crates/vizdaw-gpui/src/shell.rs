@@ -727,8 +727,11 @@ impl DocumentWindow {
         let doc = self.doc;
         let (result, lane) = self.app.update(cx, |s, cx| {
             cx.notify();
+            // The nudges read the app's Settings › Editing steps.
+            let nudge = s.editing.nudge().clone();
             s.store
                 .with_document(doc, |d, _| {
+                    d.set_nudge_settings(nudge);
                     (
                         commands::perform_from_menu(&action.id, d),
                         d.selected_lane(),

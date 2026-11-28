@@ -196,9 +196,79 @@ fn the_menu_model_follows_the_swift_order() {
             Some("editors.close_detail"),
             Some("editors.insert_event"),
             None,
+            Some("editors.nudge_earlier"),
+            Some("editors.nudge_later"),
+            Some("editors.nudge_up"),
+            Some("editors.nudge_down"),
+            None,
             Some("editors.snap"),
         ]
     );
+}
+
+/// Swift `AppCommands.swift:461-467`: the nudges, ⌥←→↑↓ from the registry,
+/// enabled with selected events in sight and no text being typed in.
+/// Their keys are bare chords: they act in the document window only where
+/// no text field has the keyboard (there ⌥-arrows move its cursor), and
+/// the Select and Modify panel does not take them.
+#[test]
+fn the_editors_menu_lists_the_four_nudges_with_their_keys() {
+    let keymap = Keymap::default();
+    let nudges = [
+        ("editors.nudge_earlier", "Nudge Earlier", "⌥←"),
+        ("editors.nudge_later", "Nudge Later", "⌥→"),
+        ("editors.nudge_up", "Nudge Up", "⌥↑"),
+        ("editors.nudge_down", "Nudge Down", "⌥↓"),
+    ];
+    let f = Arc::new(vizdaw_app::testing::roll_fake());
+    let mut doc = DocumentModel::new(f).unwrap();
+    let enabled = |doc: Option<&DocumentModel>| -> Vec<bool> {
+        let m = menu_model(doc, &keymap);
+        nudges
+            .iter()
+            .map(|(_, title, _)| item(&m, "Editors", title).3)
+            .collect()
+    };
+    assert_eq!(enabled(None), [false; 4], "no document");
+    assert_eq!(enabled(Some(&doc)), [false; 4], "no selected events");
+    doc.set_selection(vizdaw_ffi::selection::SelectionRow {
+        time_range: None,
+        lanes: vec![vizdaw_ffi::edit::LaneRef { seq: 3, lane: 31 }],
+        events: vec![1],
+    });
+    let m = menu_model(Some(&doc), &keymap);
+    for (id, title, key) in nudges {
+        let (got, _, keys, on) = item(&m, "Editors", title);
+        assert_eq!((got, keys, on), (id, Some(key), true), "{id}");
+        assert_eq!(registry::find(id).unwrap().shortcut, Some(key), "{id}");
+    }
+    doc.begin_text_editing("field");
+    assert_eq!(enabled(Some(&doc)), [false; 4], "a field types");
+    doc.end_text_editing("field");
+    doc.update_layout(|l| {
+        l.views.main = vizdaw_app::editor::MainView::Mix;
+        l.views.mix.bottom.shown = false;
+    });
+    assert_eq!(enabled(Some(&doc)), [false; 4], "the Mix view hides them");
+
+    let all = menus::bindings(&keymap);
+    let bare = KeyBindingContextPredicate::parse(UNMODIFIED_KEYS).unwrap();
+    for (id, _, key) in nudges {
+        let bound: Vec<_> = all
+            .iter()
+            .filter(|b| b.action().partial_eq(&menus::RunCommand::new(id)))
+            .collect();
+        assert_eq!(bound.len(), 1, "{id}");
+        assert_eq!(bound[0].predicate().as_deref(), Some(&bare), "{id}");
+        let os = if cfg!(target_os = "macos") {
+            gpui::OperatingSystem::Mac
+        } else {
+            gpui::OperatingSystem::Linux
+        };
+        let stroke = keystroke(&Chord::parse(key).unwrap()).unwrap();
+        let want = gpui::Keystroke::parse_with_os(&stroke, os).unwrap();
+        assert_eq!(bound[0].keystrokes()[0].inner(), &want, "{id}");
+    }
 }
 
 #[test]

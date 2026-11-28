@@ -685,10 +685,13 @@ fn run_command(
         _ if menus::routed(id) || MODIFY_COMMANDS.contains(&id) => {
             let ran = app.update(cx, |s, cx| {
                 cx.notify();
+                // The nudges read the app's Settings › Editing steps.
+                let nudge = s.editing.nudge().clone();
                 s.store.with_document(doc, |d, _| {
                     // A result's `status` is this command's own: what an
                     // earlier action left is cleared first.
                     d.set_status(None);
+                    d.set_nudge_settings(nudge);
                     commands::run(id, args, d)
                 })
             });
