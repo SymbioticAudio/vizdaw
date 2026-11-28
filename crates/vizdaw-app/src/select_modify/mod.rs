@@ -14,8 +14,11 @@ use vizdaw_ffi::strip::{LineOpRow, LineRow, LineShapeRow, LineTargetRow, SeriesR
 use crate::arrangement::PPQ;
 use crate::editing_prefs::ScaleKind;
 
+pub mod exact;
 mod fields;
 pub mod model;
+
+pub use exact::{GestureOrigin, exact_request, select_request};
 
 pub use fields::{
     Edge, Field, FieldKind, GROOVE_HELP, GROOVE_LABEL, NOTE_MAP_PLACEHOLDER, condition_fields,

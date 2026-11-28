@@ -1801,6 +1801,8 @@ impl DocumentWindow {
         self.arrangement._auto_scroll = None;
         let events = self.arrangement.machine.up(at, machine_modifiers(m));
         self.machine_events(events, cx);
+        // An Exact Mode drag opens the panel.
+        self.present_modify_if_wanted(cx);
         cx.notify();
     }
 

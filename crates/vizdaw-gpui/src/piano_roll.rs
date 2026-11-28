@@ -1383,6 +1383,8 @@ impl DocumentWindow {
         let m = machine_modifiers(m);
         self.piano_roll.drag_at = None;
         self.with_roll_pointer(cx, |d, p, f| d.roll_mouse_up(p, f, at, m));
+        // An Exact Mode drag or band opens the panel.
+        self.present_modify_if_wanted(cx);
         // Only a gesture this press opened is the roll's.
         let open_at_down = self.piano_roll.open_at_down.take();
         self.piano_roll.released = self

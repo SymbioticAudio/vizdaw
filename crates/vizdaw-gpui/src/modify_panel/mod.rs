@@ -1187,6 +1187,13 @@ impl Render for ModifyPanel {
 /// outside `AppState::update`.
 pub fn open_modify_panel(doc: DocId, cx: &mut App) {
     let app = AppState::global(cx);
+    // This open answers the document's request: the next poll does not
+    // bring the panel forward again.
+    app.update(cx, |s, _| {
+        if let Some(d) = s.store.document_mut(doc) {
+            d.take_modify_present();
+        }
+    });
     let open = app.read(cx).modify_panel_of(doc).cloned();
     if let Some(w) = open {
         if w.handle

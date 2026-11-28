@@ -539,6 +539,9 @@ impl DocumentWindow {
                     // What this document's session took from the surfaces
                     // runs here, in its own window, whichever is in front.
                     this.run_surface_steps(steps, window, cx);
+                    // A drag's Exact Mode revert that met Busy succeeded on
+                    // this tick: its panel opens now.
+                    this.present_modify_if_wanted(cx);
                     // A job the poll ended may close a project the store
                     // made (or open one): outside this window's update.
                     if this.app.read(cx).store.settling() {
@@ -1124,6 +1127,21 @@ impl DocumentWindow {
             cx.notify();
             s.store.with_document(doc, |d, _| f(d))
         })
+    }
+
+    /// The document asked for its Select and Modify panel (an Exact Mode
+    /// drag, at once or on the tick after a Busy revert): it opens after
+    /// this update.
+    pub(crate) fn present_modify_if_wanted(&mut self, cx: &mut Context<Self>) {
+        let doc = self.doc;
+        let wanted = self.app.update(cx, |s, _| {
+            s.store
+                .document_mut(doc)
+                .is_some_and(DocumentModel::take_modify_present)
+        });
+        if wanted {
+            cx.defer(move |cx| crate::modify_panel::open_modify_panel(doc, cx));
+        }
     }
 
     /// Track `lane` of the shown sequence, as last fetched.

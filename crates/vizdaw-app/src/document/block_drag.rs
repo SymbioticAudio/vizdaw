@@ -7,6 +7,7 @@ use crate::arrangement::{
     ArrangementFrame, ArrangementHit, BlockDrag, BlockDragState, MachineEvent, Point, ToolMachine,
 };
 use crate::editor::Tool;
+use crate::select_modify::GestureOrigin;
 use vizdaw_ffi::edit::{EditCommand, LaneRef};
 
 impl DocumentModel {
@@ -107,7 +108,7 @@ impl DocumentModel {
             start_tick: frame.axis.tick_at(from.x),
         };
         let lanes = d.touched(frame, &self.lane_ids(), to);
-        self.begin_gesture(BlockDrag::label(copy), lanes)
+        self.begin_gesture_from(BlockDrag::label(copy), lanes, GestureOrigin::Blocks)
             .then_some(d)
     }
 

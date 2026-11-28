@@ -13,7 +13,7 @@ use vizdaw_ffi::modify::{
     AmountRow, ConditionRow, CurveRow, ModifyRow, ModifyTemplateRow, SelectModeRow, SettingsEdit,
     SubstituteRow, ValueTargetRow, WaveRow,
 };
-use vizdaw_ffi::selection::SelectionRow;
+use vizdaw_ffi::selection::{SelectionRow, TickRange};
 
 use super::{
     AmountKind, ChangeOpKind, Comparison, ConditionKind, ModifyConfig, ModifyKind, PanelTask,
@@ -275,6 +275,36 @@ impl DocumentModel {
     #[doc(hidden)]
     pub fn set_modify_request_for_test(&mut self, r: ModifyRequest) {
         self.hold_modify_request(r);
+    }
+
+    /// Exact Mode (Swift `EditorModel.requestExact`): the request's range,
+    /// tracks and events (none: the selection's own) become the
+    /// selection, then the panel opens for it.
+    pub fn request_exact(&mut self, r: ModifyRequest) {
+        let events = r
+            .events
+            .clone()
+            .unwrap_or_else(|| self.selection().events.clone());
+        self.set_selection(SelectionRow {
+            time_range: r.range.map(|(start, end)| TickRange { start, end }),
+            lanes: r
+                .lanes
+                .iter()
+                .map(|&(seq, lane)| LaneRef { seq, lane })
+                .collect(),
+            events,
+        });
+        self.open_modify_request(r);
+    }
+
+    /// The panel shown for Exact Mode request `r` (Swift
+    /// `open(_ request:)`): the task, the config, `pending` when it has
+    /// events, the notice, and the selection as its baseline.
+    pub fn open_modify_request(&mut self, r: ModifyRequest) {
+        self.hold_modify_request(r);
+        let s = &mut self.select_modify;
+        s.is_open = true;
+        s.wants_present = true;
     }
 
     pub(crate) fn hold_modify_request(&mut self, r: ModifyRequest) {
