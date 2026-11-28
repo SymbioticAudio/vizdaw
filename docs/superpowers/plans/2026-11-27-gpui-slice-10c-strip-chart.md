@@ -709,3 +709,16 @@
 
 - Confirm Ruling 1 (`automation.write` waits for the Co-Producer slice) and Ruling 2 (the Controllers pane is in 10c).
 - Ruling 11: if the owner's Linux desktop takes Alt-drag, which modifier should "selected only" use there?
+
+## Outcome (2026-11-27)
+
+Nine tasks, 11 commits (8c8f9325..f14168ef), each task reviewed; final whole-branch review: ready to merge, no Critical or Important findings. Controller rulings:
+
+1. Ruling 1 confirmed: `automation.write` waits for the Co-Producer slice. Ruling 2 confirmed: the Controllers view is in 10c.
+2. A bad `controllers` entry in `ui.json` is dropped on its own, not the whole map as Swift did (Review Focus 2). An old non-Swift entry is lost on the next save, which the no-compatibility rule allows.
+3. A VCA already named "VCA 1" reads "VCA 1 Fader", not Swift's doubled "VCA VCA 1 Fader".
+4. A Busy first read of the automation targets keeps the saved automation rows: `StripNames::knows` answers true while no strips are read. Guarded by `a_busy_first_read_keeps_saved_automation_rows_through_an_edit`.
+5. Strokes carry the serial of the gesture they opened and touch only that gesture, so a stroke whose gesture was cancelled under it cannot end another editor's.
+6. Duplicated helper code, a stale picker index after a row removal, and a destinations read error that drops saved Velocity Scale rows were graded minor (no events touched) and backlogged as "GPUI slice 10c: review leftovers".
+7. Modify strokes edit the selection's tracks when there is a selection, as Plan 4d Ruling 22 and Swift do.
+
