@@ -29,6 +29,7 @@ use gpui::{
 use vizdaw_app::DocumentModel;
 use vizdaw_app::editor::EditorTarget;
 use vizdaw_app::list::{ListColumn, ListColumns, ListKind, ListSource, ListText, Smpte};
+use vizdaw_app::select_modify::PanelTask;
 
 use crate::detail_pane;
 use crate::registry::RegistryScope;
@@ -52,6 +53,9 @@ pub const SHOW: &str = "Show";
 pub const SHOW_EVERYTHING: &str = "Show Everything";
 pub const SAVE_AS_DEFAULT: &str = "Save as Default";
 pub const FRAME_RATE: &str = "SMPTE Frame Rate";
+/// The bar's Select and Modify button (Swift `S/ListEditorPane.swift:102`).
+pub const MODIFY: &str = "Modify\u{2026}";
+const MODIFY_HELP: &str = "Select and Modify, hiding the kinds this list hides";
 
 /// The Columns menu's toggles, in Swift's order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -566,6 +570,20 @@ fn bar(
             cx,
         ));
     }
+    // Swift `S/ListEditorPane.swift:102-103`.
+    let modify = crate::sheet_host::with_help(
+        bar_button("list-modify", MODIFY, MODIFY, 70., scope),
+        MODIFY_HELP,
+    )
+    .on_click(cx.listener(|this, _, _, cx| {
+        this.list_editor.menu = None;
+        let doc = this.doc();
+        this.with_model(cx, |d| {
+            let filter = d.list_filter().view_filter();
+            d.open_modify(PanelTask::Change, filter);
+        });
+        cx.defer(move |cx| crate::modify_panel::open_modify_panel(doc, cx));
+    }));
     let count = format!("{} rows", state.count);
     div()
         .flex()
@@ -587,6 +605,7 @@ fn bar(
         )
         .child(columns)
         .child(show)
+        .child(modify)
         .child(div().flex_1())
         .child(
             div()

@@ -16,6 +16,7 @@ use crate::arrangement::{
 };
 use crate::document::DocumentModel;
 use crate::editor::{GESTURE_OPEN, Snap, Tool};
+use crate::select_modify::{GestureOrigin, select_request};
 
 /// Ticks held within the time axis's reach, so sums cannot overflow.
 fn clamp_tick(t: i64) -> i64 {
@@ -641,7 +642,12 @@ impl DocumentModel {
                 let Some(lane) = self.roll_edit_lane() else {
                     return;
                 };
-                if !self.open_roll_gesture(Pencil::LABEL, vec![(lane.seq, lane.lane)], out) {
+                if !self.open_roll_gesture(
+                    Pencil::LABEL,
+                    vec![(lane.seq, lane.lane)],
+                    GestureOrigin::Other,
+                    out,
+                ) {
                     return;
                 }
                 let snap = self.layout().snap;
@@ -674,7 +680,7 @@ impl DocumentModel {
                     .iter()
                     .map(|l| (l.seq, l.lane))
                     .collect();
-                if !self.open_roll_gesture(Eraser::LABEL, lanes, out) {
+                if !self.open_roll_gesture(Eraser::LABEL, lanes, GestureOrigin::Other, out) {
                     return None;
                 }
                 self.update_gesture(Eraser::command(&erased));
@@ -715,7 +721,7 @@ impl DocumentModel {
                     highest,
                     modifiers.option,
                 );
-                if !self.open_roll_gesture(d.label(), touched, out) {
+                if !self.open_roll_gesture(d.label(), touched, GestureOrigin::Notes, out) {
                     return None;
                 }
                 Some(RollDragState::Notes {
@@ -726,7 +732,12 @@ impl DocumentModel {
             }
             (Tool::Pencil, RollHit::Empty { tick, pitch }) => {
                 let lane = self.roll_edit_lane()?;
-                if !self.open_roll_gesture(Pencil::LABEL, vec![(lane.seq, lane.lane)], out) {
+                if !self.open_roll_gesture(
+                    Pencil::LABEL,
+                    vec![(lane.seq, lane.lane)],
+                    GestureOrigin::Other,
+                    out,
+                ) {
                     return None;
                 }
                 let start = Pencil::start(*tick, &self.layout().snap, &self.roll_meter());
@@ -751,10 +762,11 @@ impl DocumentModel {
         &mut self,
         label: &str,
         lanes: Vec<(u64, u64)>,
+        origin: GestureOrigin,
         out: &mut RollOutcome,
     ) -> bool {
         let pending = self.gesture_open();
-        if self.begin_gesture(label, lanes) {
+        if self.begin_gesture_from(label, lanes, origin) {
             return true;
         }
         if pending {
@@ -814,6 +826,26 @@ impl DocumentModel {
     fn roll_end(&mut self, frame: &RollFrame, d: RollDragState, to: Point) {
         if let RollDragState::Band { from, adding, .. } = d {
             let rect = band_rect(from, to);
+            // Exact Mode: the band is a Select by Rule over the shown
+            // tracks (`VizDAWEditors/PianoRollView.swift:405-411`).
+            if self.exact_mode() {
+                let start = frame.axis.tick_at(rect.x);
+                let end = frame.axis.tick_at(rect.max_x()).max(start + 1);
+                let a = frame.pitch.pitch_at(rect.y);
+                let b = frame.pitch.pitch_at(rect.y + rect.height);
+                let lanes = self
+                    .roll_shown_lanes()
+                    .into_iter()
+                    .map(|l| (l.seq, l.lane))
+                    .collect();
+                self.request_exact(select_request(
+                    (start, end),
+                    (a.min(b), a.max(b)),
+                    lanes,
+                    adding,
+                ));
+                return;
+            }
             let found =
                 RollGeometry::notes_in(&rect, &self.roll_lane_notes(), &frame.axis, &frame.pitch);
             self.roll_select(&found, adding);

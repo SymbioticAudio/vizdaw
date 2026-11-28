@@ -5856,3 +5856,223 @@ fn gpui_x11_sdk_again_embeds_under_the_plugin_window() {
     }
     x11_editor_embeds(&[], &[again], "84E8DE5F92554F5396FAE4133C935A18", &[], None);
 }
+
+// ---- Slice 10b: Select and Modify, templates, Modify Again, Exact Mode
+// and the nudges. The control channel has no `ui.drag`, so Exact Mode's
+// drags are left to the GPUI tests and M27.
+
+/// Polls `state.get windows` until a "modify_panel" window is listed; its
+/// row.
+fn wait_for_modify_panel(app: &mut App) -> Value {
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        let w = app.call("state.get", json!({"target": "windows"}));
+        if let Some(row) = w["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["kind"] == "modify_panel")
+        {
+            return row.clone();
+        }
+        assert!(Instant::now() < deadline, "no Modify panel opened: {w}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// The platform's command modifier (the key bindings' `secondary-`).
+const SECONDARY: &str = if cfg!(target_os = "macos") {
+    "command"
+} else {
+    "control"
+};
+
+/// Replaces the text of the panel's textfield `label` with `text`: a
+/// select-all on the field, then the text.
+fn type_into_field(app: &mut App, panel: &Value, label: &str, text: &str) {
+    let field = wait_in_tree(app, panel, label, |n| find_role(n, "textfield", label));
+    app.call(
+        "ui.key",
+        json!({"window": panel, "element": field["id"], "key": "a", "modifiers": [SECONDARY]}),
+    );
+    app.call("ui.key", json!({"window": panel, "text": text}));
+}
+
+/// Clicks the panel's button `label`.
+fn click_button(app: &mut App, panel: &Value, label: &str) {
+    let b = wait_in_tree(app, panel, label, |n| find_role(n, "button", label));
+    app.call("ui.click", json!({"window": panel, "element": b["id"]}));
+}
+
+/// Selects the demo's Chords block in document window `w`.
+fn select_chords(app: &mut App, w: &Value) {
+    let (chords, _) = wait_in_tree(app, w, "the Chords block", |n| {
+        labelled_like(n, "Block on Chords")
+    });
+    app.call("ui.click", json!({"window": w, "element": chords}));
+    let s = selection(app, w);
+    assert!(!s["events"].as_array().unwrap().is_empty(), "{s}");
+}
+
+/// The Modify panel over the demo: Transpose +12 applies as one
+/// "Transpose" step, is saved as the template "Octave Up", which runs by
+/// name (an unknown name is refused), Modify Again repeats it, the
+/// template survives Save As and reopen, and bad text in a field is
+/// refused at Apply.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_modify_panel_transposes_saves_a_template_and_repeats() {
+    use core_control::ErrorCode;
+    let home = temp_home();
+    let (mut app, w) = start_demo(home.path());
+    select_chords(&mut app, &w);
+
+    // 2. The panel opens over its document, titled after it.
+    run_in(&mut app, &w, "modify.transpose", json!({}));
+    let row = wait_for_modify_panel(&mut app);
+    let panel = row["number"].clone();
+    let windows = app.call("state.get", json!({"target": "windows"}));
+    let doc_title = windows["windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["number"] == w)
+        .and_then(|x| x["title"].as_str())
+        .unwrap_or_else(|| panic!("no document window in {windows}"))
+        .to_string();
+    assert_eq!(
+        row["title"].as_str(),
+        Some(format!("Select and Modify \u{2014} {doc_title}").as_str()),
+        "{row}"
+    );
+
+    // 3. +12 semitones, applied.
+    type_into_field(&mut app, &panel, "semitones", "12");
+    click_button(&mut app, &panel, "Apply");
+    wait_for_undo(&mut app, &w, "Transpose");
+
+    // 4. Saved as a template.
+    type_into_field(&mut app, &panel, "Template name", "Octave Up");
+    click_button(&mut app, &panel, "Save as Template");
+
+    // 5. The template runs by name; an unknown one is refused by name.
+    let template =
+        |name: &str| json!({"id": "modify.template", "params": {"name": name}, "window": w});
+    let deadline = Instant::now() + Duration::from_millis(WAIT_MS);
+    loop {
+        match app.client.call(
+            "command.run",
+            template("Octave Up"),
+            Duration::from_millis(WAIT_MS),
+        ) {
+            Ok(_) => break,
+            Err(e) => assert!(Instant::now() < deadline, "the template never ran: {e:?}"),
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let e = app.call_err("command.run", template("Nope"));
+    assert_eq!(e.code, ErrorCode::InvalidParams, "{e}");
+    assert!(e.message.contains("Nope"), "{e}");
+
+    // 6. Modify Again repeats the Transpose: a new step, the same label.
+    let version = |app: &mut App, w: &Value| {
+        app.call("state.get", json!({"target": "document", "window": w}))["version"].clone()
+    };
+    let v0 = version(&mut app, &w);
+    run_in(&mut app, &w, "modify.again", json!({}));
+    wait_for_state(&mut app, &w, "document", |d| {
+        d["version"] != v0 && d["undo"] == "Transpose"
+    });
+
+    // 7. The template survives Save As and reopen.
+    let path = home.path().join("modify.vizdaw");
+    run_in(&mut app, &w, "file.save_as", json!({"path": path}));
+    app.call("command.run", json!({"id": "file.close", "window": w}));
+    let w2 = app.call("app.open", json!({"path": path}))["window"].clone();
+    app.wait(&w2, json!({"condition": "documents_at_least", "count": 1}));
+    select_chords(&mut app, &w2);
+    let v0 = version(&mut app, &w2);
+    app.call(
+        "command.run",
+        json!({"id": "modify.template", "params": {"name": "Octave Up"}, "window": w2}),
+    );
+    wait_for_state(&mut app, &w2, "document", |d| {
+        d["version"] != v0 && d["undo"] == "Transpose"
+    });
+
+    // 8. Bad text in a field is refused at Apply.
+    run_in(&mut app, &w2, "modify.transpose", json!({}));
+    let panel = wait_for_modify_panel(&mut app)["number"].clone();
+    type_into_field(&mut app, &panel, "semitones", "abc");
+    click_button(&mut app, &panel, "Apply");
+    wait_for_editor(&mut app, &w2, "the red-field refusal", |e| {
+        e["status"] == "Fix the fields marked in red first."
+    });
+    app.quit();
+}
+
+/// Exact Mode's toggle reads back through `state.get editor`, Modify
+/// Again says why it cannot run in a fresh demo, and the panel's Move
+/// applies one "Move" step.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_modify_exact_mode_toggles_and_move_applies() {
+    use core_control::ErrorCode;
+    let home = temp_home();
+    let (mut app, w) = start_demo(home.path());
+
+    // 1. Nothing to repeat yet.
+    let e = app.call_err("command.run", json!({"id": "modify.again", "window": w}));
+    assert_eq!(e.code, ErrorCode::Unavailable, "{e}");
+    assert_eq!(e.message, "There is no modification to repeat.", "{e}");
+
+    // 2-3. Exact Mode on, then toggled off.
+    run_in(&mut app, &w, "modify.exact_mode", json!({"on": true}));
+    wait_for_editor(&mut app, &w, "exact mode on", |e| e["exact_mode"] == true);
+    run_in(&mut app, &w, "modify.exact_mode", json!({}));
+    wait_for_editor(&mut app, &w, "exact mode off", |e| e["exact_mode"] == false);
+
+    // 4. Move opens the panel on its task.
+    select_chords(&mut app, &w);
+    run_in(&mut app, &w, "modify.move", json!({}));
+    let panel = wait_for_modify_panel(&mut app)["number"].clone();
+    wait_for_value(&mut app, &panel, "Task", "Move");
+
+    // 5. Moved by one beat.
+    type_into_field(&mut app, &panel, "by", "1.0");
+    click_button(&mut app, &panel, "Apply");
+    wait_for_undo(&mut app, &w, "Move");
+    app.quit();
+}
+
+/// A nudge with events selected is one "Nudge Events" step; with nothing
+/// selected it says why not.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_nudge_moves_the_selection_and_says_why_not() {
+    use core_control::ErrorCode;
+    let home = temp_home();
+    let (mut app, w) = start_demo(home.path());
+    select_chords(&mut app, &w);
+    run_in(&mut app, &w, "editors.nudge_later", json!({}));
+    wait_for_undo(&mut app, &w, "Nudge Events");
+
+    // A click on the empty canvas below the tracks clears the selection.
+    let canvas = wait_for_node(&mut app, &w, "Arrangement");
+    let f = &canvas["frame"];
+    let x = f["x"].as_f64().unwrap() + 30.;
+    let y = f["y"].as_f64().unwrap() + f["height"].as_f64().unwrap() - 10.;
+    app.call("ui.click", json!({"window": w, "point": {"x": x, "y": y}}));
+    let s = selection(&mut app, &w);
+    assert!(s["events"].as_array().unwrap().is_empty(), "{s}");
+    let e = app.call_err(
+        "command.run",
+        json!({"id": "editors.nudge_later", "window": w}),
+    );
+    assert_eq!(e.code, ErrorCode::Unavailable, "{e}");
+    assert_eq!(
+        e.message, "Nudge needs selected events and no text being edited.",
+        "{e}"
+    );
+    app.quit();
+}

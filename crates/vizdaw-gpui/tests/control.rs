@@ -1771,6 +1771,43 @@ fn the_wait_reads_the_detail_kind(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn state_get_editor_reports_exact_mode(cx: &mut TestAppContext) {
+    let s = setup(cx, demo_fake());
+    ok(call(&s, cx, "app.new_demo", json!({})));
+    let exact = |s: &Setup, cx: &mut TestAppContext| {
+        ok(call(s, cx, "state.get", json!({"target": "editor"})))["exact_mode"].clone()
+    };
+    assert_eq!(exact(&s, cx), json!(false));
+    // `modify.exact_mode`: absent toggles, `on` sets.
+    ok(call(
+        &s,
+        cx,
+        "command.run",
+        json!({"id": "modify.exact_mode"}),
+    ));
+    assert_eq!(exact(&s, cx), json!(true));
+    let on = |v: bool| json!({"id": "modify.exact_mode", "params": {"on": v}});
+    ok(call(&s, cx, "command.run", on(true)));
+    assert_eq!(exact(&s, cx), json!(true));
+    ok(call(&s, cx, "command.run", on(false)));
+    assert_eq!(exact(&s, cx), json!(false));
+    let doc_exact = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let a = AppState::global(cx).read(cx);
+            let doc = a.windows()[0].doc;
+            a.store.document(doc).unwrap().editor().exact_mode()
+        })
+    };
+    assert!(!doc_exact(cx));
+    ok(call(&s, cx, "command.run", on(true)));
+    assert!(doc_exact(cx), "the model and the channel agree");
+    // Modify Again with nothing to repeat is refused, not `not_yet`.
+    let e = call(&s, cx, "command.run", json!({"id": "modify.again"})).unwrap_err();
+    assert_eq!(e.code, ErrorCode::Unavailable);
+    assert_eq!(e.message, "There is no modification to repeat.");
+}
+
+#[gpui::test]
 fn state_get_editor_reports_the_detail(cx: &mut TestAppContext) {
     let s = setup(cx, demo_fake());
     let opened = ok(call(&s, cx, "app.new_demo", json!({})));

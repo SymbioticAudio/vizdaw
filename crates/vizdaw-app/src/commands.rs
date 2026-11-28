@@ -14,11 +14,13 @@ use vizdaw_ffi::automation::automation_suspended;
 
 use crate::alerts::error_message;
 use crate::document::DocumentModel;
-use crate::editor::{DetailEditorKind, GESTURE_OPEN};
+use crate::editor::{DetailEditorKind, GESTURE_OPEN, NudgeDirection};
 pub use crate::lane_inputs::LANE_INPUT_COMMANDS;
 use crate::mixer::commands::{SELECTION_FILLED, SUSPEND, mode_of, suspend};
 use crate::mixer::strips_text;
+pub use crate::modify_commands::MODIFY_COMMANDS;
 use crate::prefs::Prefs;
+use crate::select_modify::model::HIDDEN_SELECTION;
 use crate::step_entry::STEP_COMMANDS;
 use crate::transport_bar::TransportLayout;
 use crate::transport_fields::TransportField;
@@ -36,14 +38,18 @@ pub const DOCUMENT_COMMANDS: &[&str] = &[
 ];
 
 /// The registry IDs of the editor commands `run` handles (the detail pane,
-/// the bottom pane that holds it, and the grid). The menus, keys and
-/// channel route them once their views exist.
+/// the bottom pane that holds it, the grid and the nudges). The menus, keys
+/// and channel route them once their views exist.
 pub const EDITOR_COMMANDS: &[&str] = &[
     "editors.snap",
     "editors.piano_roll",
     "editors.list",
     "editors.close_detail",
     "editors.insert_event",
+    "editors.nudge_earlier",
+    "editors.nudge_later",
+    "editors.nudge_up",
+    "editors.nudge_down",
 ];
 
 /// The registry IDs of the View menu's commands `run` handles: the main
@@ -109,6 +115,9 @@ pub const MIXER_COMMANDS: &[&str] = &[
 
 const NO_DETAIL: &str = "No detail editor is open.";
 const NO_LIST: &str = "Insert Event needs a list editor that has the keyboard.";
+/// The nudges' refusals (`M/ControlCommands.swift:643-647`).
+const NUDGE_NEEDS: &str = "Nudge needs selected events and no text being edited.";
+const NUDGE_REFUSED: &str = "The nudge was refused.";
 
 /// The registry IDs of the transport commands `run` handles: the keys,
 /// Record and its loop passes, the record modes, the click, arming, the
@@ -233,6 +242,9 @@ pub struct Ran {
     /// The UI is to open this document's Mixer window, or bring it to the
     /// front (`window.mixer`).
     pub open_mixer_window: bool,
+    /// The UI is to show this document's Select and Modify panel, or
+    /// bring it to the front (a Modify menu task).
+    pub open_modify_panel: bool,
 }
 
 /// A transport bar field a command asks the UI to focus. The UI answers
@@ -276,6 +288,7 @@ pub fn run_app(
         status: Some(s.into()),
         focus: None,
         open_mixer_window: false,
+        open_modify_panel: false,
     };
     let write = |r: Result<(), String>| r.map_err(failed);
     match id {
@@ -308,6 +321,7 @@ pub fn run_app(
                 status: None,
                 focus: None,
                 open_mixer_window: false,
+                open_modify_panel: false,
             })
         }
         _ => Err(ControlError::new(
@@ -396,10 +410,14 @@ pub fn enabled(id: &str, doc: &DocumentModel) -> bool {
     if STEP_COMMANDS.contains(&id) {
         return crate::step_entry::step_enabled(id, doc);
     }
+    if MODIFY_COMMANDS.contains(&id) {
+        return crate::modify_commands::enabled(id, doc);
+    }
     if EDITOR_COMMANDS.contains(&id) {
         return match id {
             "editors.close_detail" => doc.layout().detail.is_some(),
             "editors.insert_event" => insert_event_ready(doc),
+            _ if NudgeDirection::of_command(id).is_some() => nudge_ready(doc),
             _ => true,
         };
     }
@@ -446,6 +464,9 @@ pub fn perform_from_menu(id: &str, doc: &mut DocumentModel) -> Result<Ran, Contr
     }
     if STEP_COMMANDS.contains(&id) {
         return crate::step_entry::run_step(id, &[], doc).map_err(|e| refused(doc, e));
+    }
+    if MODIFY_COMMANDS.contains(&id) {
+        return crate::modify_commands::perform_from_menu(id, doc);
     }
     if EDITOR_COMMANDS.contains(&id) {
         return run_editor(id, &[], doc).map_err(|e| refused(doc, e));
@@ -505,6 +526,7 @@ pub(crate) fn ran(doc: &DocumentModel) -> Ran {
         status: doc.status().map(String::from),
         focus: None,
         open_mixer_window: false,
+        open_modify_panel: false,
     }
 }
 
@@ -516,6 +538,7 @@ pub fn is_on(id: &str, doc: &DocumentModel) -> bool {
         "transport.overdub" => doc.layout().transport.overdub,
         "transport.punch" => doc.layout().transport.punch,
         "transport.click" => doc.last_transport().click.is_some_and(|c| c.on),
+        "modify.exact_mode" => doc.exact_mode(),
         SUSPEND => automation_suspended(),
         _ if STEP_COMMANDS.contains(&id) => crate::step_entry::step_is_on(id, doc),
         _ => crate::view::is_on(id, doc),
@@ -575,6 +598,9 @@ pub fn run(
     }
     if STEP_COMMANDS.contains(&id) {
         return crate::step_entry::run_step(id, args, doc);
+    }
+    if MODIFY_COMMANDS.contains(&id) {
+        return crate::modify_commands::run(id, args, doc);
     }
     if EDITOR_COMMANDS.contains(&id) {
         return run_editor(id, args, doc);
@@ -741,7 +767,8 @@ pub(crate) fn on_flag(id: &str, args: &[(String, ArgValue)]) -> Result<Option<bo
 
 /// An editor command: Snap to Grid (`on`, absent toggles), List (opens on
 /// the open detail's target or the selection; nothing to show opens
-/// nothing) and Close Detail Editor.
+/// nothing), Close Detail Editor, Insert Event and the nudges (with the
+/// settings the UI handed the document).
 fn run_editor(
     id: &str,
     args: &[(String, ArgValue)],
@@ -761,6 +788,21 @@ fn run_editor(
             }
             doc.list_insert(None);
         }
+        _ if NudgeDirection::of_command(id).is_some() => {
+            let dir = NudgeDirection::of_command(id).unwrap_or(NudgeDirection::Later);
+            // Owner decision 5 (plan release-fixes Task 5).
+            if doc.selection_hidden() {
+                return Err(unavailable(HIDDEN_SELECTION));
+            }
+            if !doc.transport_keys_enabled() || doc.selection().events.is_empty() {
+                return Err(unavailable(NUDGE_NEEDS));
+            }
+            let settings = doc.nudge_settings().clone();
+            if !doc.nudge(dir, &settings) {
+                let why = doc.status().filter(|s| !s.is_empty());
+                return Err(failed(why.unwrap_or(NUDGE_REFUSED)));
+            }
+        }
         _ => {
             if doc.layout().detail.is_none() {
                 return Err(unavailable(NO_DETAIL));
@@ -769,6 +811,12 @@ fn run_editor(
         }
     }
     Ok(ran(doc))
+}
+
+/// The nudges work with selected events in sight and no text being typed
+/// in (Swift `AppCommands.swift:463-467`).
+fn nudge_ready(doc: &DocumentModel) -> bool {
+    doc.transport_keys_enabled() && !doc.selection().events.is_empty() && !doc.selection_hidden()
 }
 
 /// Insert Event works with a list open and no text being typed in.

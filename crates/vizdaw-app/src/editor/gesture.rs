@@ -10,6 +10,8 @@ use vizdaw_ffi::VizError;
 use vizdaw_ffi::edit::EditCommand;
 
 use crate::DocumentModel;
+use crate::select_modify::model::ModifyRequest;
+use crate::select_modify::{GestureOrigin, exact_request};
 
 /// The status when a drag's track went away under it.
 pub const LANE_REMOVED: &str = "The track was removed; the drag was cancelled.";
@@ -18,6 +20,8 @@ pub const LANE_REMOVED: &str = "The track was removed; the drag was cancelled.";
 #[derive(Debug, Clone, PartialEq)]
 pub struct Gesture {
     pub label: String,
+    /// The gesture that opened it; only note and block drags go exact.
+    pub origin: GestureOrigin,
     /// The `(seq, lane)` tracks it edits; it is cancelled when one
     /// disappears.
     pub lanes: BTreeSet<(u64, u64)>,
@@ -37,13 +41,17 @@ pub struct Gesture {
     /// Which gesture this is: each one begun gets the next number, so a
     /// view can tell its own drag from another's.
     pub serial: u64,
+    /// Exact Mode: the panel opens once the revert has succeeded.
+    pub(crate) then_exact: Option<ModifyRequest>,
 }
 
 impl Gesture {
-    fn new(label: &str, lanes: Vec<(u64, u64)>, serial: u64) -> Self {
+    fn new(label: &str, lanes: Vec<(u64, u64)>, origin: GestureOrigin, serial: u64) -> Self {
         Gesture {
             serial,
             label: label.to_owned(),
+            origin,
+            then_exact: None,
             lanes: lanes.into_iter().collect(),
             applied: None,
             pending_final: None,
@@ -69,6 +77,18 @@ impl DocumentModel {
     /// `(seq, lane)` tracks `lanes`. False when one is already open or the
     /// session refused (the refusal is the status).
     pub fn begin_gesture(&mut self, label: &str, lanes: Vec<(u64, u64)>) -> bool {
+        self.begin_gesture_from(label, lanes, GestureOrigin::Other)
+    }
+
+    /// [`begin_gesture`](Self::begin_gesture) for a drag from `origin`:
+    /// in Exact Mode, note and block drags open the panel instead of
+    /// applying.
+    pub fn begin_gesture_from(
+        &mut self,
+        label: &str,
+        lanes: Vec<(u64, u64)>,
+        origin: GestureOrigin,
+    ) -> bool {
         if self.editor.gesture.is_some() {
             return false;
         }
@@ -76,7 +96,7 @@ impl DocumentModel {
             Ok(()) => {
                 self.editor.gestures_begun += 1;
                 let serial = self.editor.gestures_begun;
-                self.editor.gesture = Some(Gesture::new(label, lanes, serial));
+                self.editor.gesture = Some(Gesture::new(label, lanes, origin, serial));
                 true
             }
             Err(e) => {
@@ -136,11 +156,27 @@ impl DocumentModel {
     /// Mouse-up: `final_` becomes the gesture's content and the edit closes
     /// as one undo step; Busy leaves it pending for [`tick`](Self::tick).
     /// A refused final cancels the drag and its message is the status.
+    /// In Exact Mode a note or block drag is put back instead, and once
+    /// the revert succeeded (at once, or on a later tick after Busy) the
+    /// panel opens with its amounts; a failed revert opens none.
     pub fn end_gesture(&mut self, final_: Option<EditCommand>) {
+        let exact = self.exact_mode();
         let Some(g) = &mut self.editor.gesture else {
             return;
         };
         if g.reverting {
+            return;
+        }
+        if exact
+            && !g.finishing
+            && let Some(r) = final_
+                .as_ref()
+                .and_then(|f| exact_request(f, &g.lanes, g.origin))
+        {
+            // The drag was a preview: put it back (before the panel takes
+            // its baseline), then ask instead of applying.
+            g.then_exact = Some(r);
+            self.revert_gesture();
             return;
         }
         g.finishing = true;
@@ -152,7 +188,19 @@ impl DocumentModel {
     /// and the edit closes without an undo step. Busy keeps the gesture
     /// reverting for [`tick`](Self::tick) to retry, so an open session
     /// edit never outlives its gesture. Whether the start state is back.
+    /// An Exact Mode drag cancelled so opens no panel, even one whose
+    /// revert still waits on Busy.
     pub fn cancel_gesture(&mut self) -> bool {
+        if let Some(g) = &mut self.editor.gesture {
+            g.then_exact = None;
+        }
+        self.revert_gesture()
+    }
+
+    /// Puts the start state back and closes the edit; then, when the
+    /// gesture holds an Exact Mode request, opens the panel for it. Busy
+    /// keeps the gesture (and its request) reverting for the tick.
+    fn revert_gesture(&mut self) -> bool {
         let Some(mut g) = self.editor.gesture.clone() else {
             return false;
         };
@@ -162,6 +210,9 @@ impl DocumentModel {
                 self.editor.gesture = None;
                 self.apply(s);
                 self.refresh_selection();
+                if let Some(r) = g.then_exact.take() {
+                    self.request_exact(r);
+                }
                 true
             }
             Err(VizError::Busy { .. }) => {
@@ -192,7 +243,7 @@ impl DocumentModel {
             return;
         };
         if g.reverting {
-            self.cancel_gesture();
+            self.revert_gesture();
         } else if g.finishing {
             self.finish();
         }

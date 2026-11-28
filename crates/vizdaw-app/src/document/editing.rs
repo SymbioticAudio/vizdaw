@@ -4,7 +4,7 @@
 
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::blocks::BlockRow;
-use vizdaw_ffi::edit::{EditCommand, LaneRef};
+use vizdaw_ffi::edit::{EditCommand, LaneRef, ViewFilterRow};
 use vizdaw_ffi::selection::{SelectionRow, TickRange};
 use vizdaw_ffi::snapshot::DocSnapshot;
 
@@ -53,6 +53,12 @@ impl DocumentModel {
     /// drag is open. Whether it applied.
     pub fn edit(&mut self, cmd: EditCommand) -> bool {
         self.change(|s| s.edit(cmd))
+    }
+
+    /// [`DocumentModel::edit`] through a view's filter (`None`: nothing
+    /// hidden): what it hides is left alone.
+    pub fn edit_filtered(&mut self, cmd: EditCommand, filter: Option<ViewFilterRow>) -> bool {
+        self.change(|s| s.edit_filtered(cmd, filter))
     }
 
     /// Runs `cmds` as one undo step named `label`: all of them or none.

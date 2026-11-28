@@ -74,7 +74,7 @@ use gpui::{
 use serde_json::{Value, json};
 use vizdaw_app::audio_prefs;
 use vizdaw_app::commands::{
-    self, APP_COMMANDS, LANE_INPUT_COMMANDS, RECORD_COMMANDS, TRANSPORT_COMMANDS,
+    self, APP_COMMANDS, LANE_INPUT_COMMANDS, MODIFY_COMMANDS, RECORD_COMMANDS, TRANSPORT_COMMANDS,
 };
 use vizdaw_app::key_prefs as keys_prefs;
 use vizdaw_app::step_entry::STEP_COMMANDS;
@@ -607,6 +607,12 @@ fn answer(command: &Command, cx: &mut App) -> Result<Value, ControlError> {
                 return manager_keys(handle, &registry, focus, strokes, cx);
             }
             let entry = target(window.as_ref(), cx)?;
+            // The Select and Modify panel types into its fields, and its
+            // Return is Apply: no stroke runs a document key there.
+            if entry.kind == WindowKind::ModifyPanel {
+                let registry = entry.registry(cx).ok_or_else(gone)?;
+                return manager_keys(entry.handle, &registry, focus, strokes, cx);
+            }
             key_strokes(&entry, focus, strokes, cx)
         }
         Command::UiScreenshot {
@@ -674,13 +680,18 @@ fn run_command(
         _ => None,
     });
     match id {
-        _ if menus::routed(id) => {
+        // The Modify commands run as the document's; a panel task opens
+        // the panel afterwards.
+        _ if menus::routed(id) || MODIFY_COMMANDS.contains(&id) => {
             let ran = app.update(cx, |s, cx| {
                 cx.notify();
+                // The nudges read the app's Settings › Editing steps.
+                let nudge = s.editing.nudge().clone();
                 s.store.with_document(doc, |d, _| {
                     // A result's `status` is this command's own: what an
                     // earlier action left is cleared first.
                     d.set_status(None);
+                    d.set_nudge_settings(nudge);
                     commands::run(id, args, d)
                 })
             });
@@ -694,6 +705,12 @@ fn run_command(
                 // not open it again.
                 if let Err(m) = DocumentWindow::open_mixer(&app, doc, cx) {
                     return Err(failure(before, &m, cx));
+                }
+            }
+            if ran.open_modify_panel {
+                crate::modify_panel::open_modify_panel(doc, cx);
+                if alert_id(cx) != before {
+                    return Err(failure(before, "the panel did not open", cx));
                 }
             }
             return Ok(ran_json(id, doc, entry, ran.undo, ran.status));
@@ -1011,7 +1028,7 @@ fn editor_state(doc: DocId, cx: &App) -> Result<Value, ControlError> {
             tool: d.tool().name().to_owned(),
             snap_enabled: snap.enabled,
             snap_division: snap.division.name().to_owned(),
-            exact_mode: false,
+            exact_mode: d.editor().exact_mode(),
             gesture: d.gesture_open(),
             status: d.status().map(String::from),
             step: d.step_state_row(),
@@ -1454,9 +1471,10 @@ fn key_strokes(
     Ok(json!({ "window": number(entry.handle), "events": sent, "x": 0.0, "y": 0.0 }))
 }
 
-/// `ui.key` in the Plugin Manager, which is no document's: each stroke
-/// goes to the window through GPUI's own dispatch (its ⌘W, the focused
-/// search field), after a click on `focus` when given.
+/// `ui.key` in the Plugin Manager, which is no document's, or in a Select
+/// and Modify panel: each stroke goes to the window through GPUI's own
+/// dispatch (its ⌘W, the focused field, the panel's Return), after a click
+/// on `focus` when given.
 fn manager_keys(
     handle: AnyWindowHandle,
     registry: &SharedRegistry,

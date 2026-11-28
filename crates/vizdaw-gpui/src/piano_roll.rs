@@ -72,6 +72,9 @@ pub const KEYBOARD: &str = "Keyboard";
 /// The bar's menus and buttons (Swift's titles and help texts).
 pub const TRACKS: &str = "Tracks";
 pub const INSERT_INTO: &str = "Insert Into";
+/// The bar's Exact Mode toggle (Swift `S/PianoRollPane.swift:68`).
+pub const EXACT: &str = "Exact";
+const EXACT_HELP: &str = "Exact mode: a drag opens Select and Modify with its amounts (⌃⌘E)";
 pub const SHORTER_ROWS: &str = "Shorter Rows";
 pub const TALLER_ROWS: &str = "Taller Rows";
 pub const ZOOM_OUT: &str = "Zoom Out";
@@ -403,6 +406,8 @@ struct LaneDraw {
 pub struct RollState {
     tool: Tool,
     show_keyboard: bool,
+    /// Exact Mode: a drag opens Select and Modify with its amounts.
+    exact: bool,
     lanes: Vec<LaneDraw>,
     selected: HashSet<u64>,
     bars: MeterBars,
@@ -481,6 +486,7 @@ impl RollState {
         Some(RollState {
             tool: doc.tool(),
             show_keyboard: doc.layout().piano_roll.show_keyboard,
+            exact: doc.exact_mode(),
             lanes,
             selected: doc.selection().events.iter().copied().collect(),
             bars: MeterBars::new(
@@ -647,6 +653,24 @@ fn bar(
             cx,
         ));
     }
+    // Swift `S/PianoRollPane.swift:68-69`: the editor's Exact Mode, as
+    // Modify › Exact Mode and ⌃⌘E.
+    let exact = crate::sheet_host::with_help(
+        bar_button(
+            "roll-exact",
+            EXACT,
+            EXACT,
+            60.,
+            state.exact,
+            Some(if state.exact { "on" } else { "off" }),
+            scope,
+        ),
+        EXACT_HELP,
+    )
+    .on_click(cx.listener(|this, _, _, cx| {
+        this.piano_roll.menu = None;
+        this.with_model(cx, |d| d.set_exact_mode(!d.exact_mode()));
+    }));
     let button = |id: &'static str, glyph: &str, label: &str, scope: &mut RegistryScope| {
         transport_bar::cluster_button(id, glyph, label, true, bar_colors::button(), scope)
     };
@@ -671,6 +695,7 @@ fn bar(
         .child(keyboard)
         .child(tracks)
         .child(insert)
+        .child(exact)
         .child(div().flex_1())
         .child(
             div()
@@ -1358,6 +1383,8 @@ impl DocumentWindow {
         let m = machine_modifiers(m);
         self.piano_roll.drag_at = None;
         self.with_roll_pointer(cx, |d, p, f| d.roll_mouse_up(p, f, at, m));
+        // An Exact Mode drag or band opens the panel.
+        self.present_modify_if_wanted(cx);
         // Only a gesture this press opened is the roll's.
         let open_at_down = self.piano_roll.open_at_down.take();
         self.piano_roll.released = self

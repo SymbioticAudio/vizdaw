@@ -80,27 +80,27 @@ item (false: keys, the Keys settings and the control channel only).
 | editors.drum_grid_window | Editors | Open Drum Grid in Window | ⌥⌘4 | true | | |
 | editors.close_detail | Editors | Close Detail Editor |  | true | S4 | S4 |
 | editors.insert_event | Editors | Insert Event | ⌘I | true | S4 | S4 |
-| editors.nudge_earlier | Editors | Nudge Earlier | ⌥← | true | | |
-| editors.nudge_later | Editors | Nudge Later | ⌥→ | true | | |
-| editors.nudge_up | Editors | Nudge Up | ⌥↑ | true | | |
-| editors.nudge_down | Editors | Nudge Down | ⌥↓ | true | | |
+| editors.nudge_earlier | Editors | Nudge Earlier | ⌥← | true | S10b | |
+| editors.nudge_later | Editors | Nudge Later | ⌥→ | true | S10b (`gpui_nudge_moves_the_selection_and_says_why_not`) | |
+| editors.nudge_up | Editors | Nudge Up | ⌥↑ | true | S10b | |
+| editors.nudge_down | Editors | Nudge Down | ⌥↓ | true | S10b | |
 | editors.snap | Editors | Snap to Grid | G | true | S4 | S4 |
 
 ### Modify
 
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
-| modify.select_by_rule | Modify | Select by Rule… | ⌃⌘S | true | | |
-| modify.transpose | Modify | Transpose… | ⌃⌘T | true | | |
-| modify.quantize | Modify | Quantize… | ⌃⌘U | true | | |
-| modify.change | Modify | Change Values… | ⌃⌘M | true | | |
-| modify.move | Modify | Move… | ⌃⌘V | true | | |
-| modify.again | Modify | Modify Again | ⌃⌘R | true | | |
-| modify.template | Modify | Templates |  | true | | |
-| modify.exact_mode | Modify | Exact Mode | ⌃⌘E | true | | |
-| modify.quantize_notes | Modify | Quantize Notes |  | false | | |
-| modify.transpose_notes | Modify | Transpose Notes |  | false | | |
-| modify.velocity_notes | Modify | Change Velocity |  | false | | |
+| modify.select_by_rule | Modify | Select by Rule… | ⌃⌘S | true | S10b | |
+| modify.transpose | Modify | Transpose… | ⌃⌘T | true | S10b (`gpui_modify_panel_transposes_saves_a_template_and_repeats`) | |
+| modify.quantize | Modify | Quantize… | ⌃⌘U | true | S10b | |
+| modify.change | Modify | Change Values… | ⌃⌘M | true | S10b | |
+| modify.move | Modify | Move… | ⌃⌘V | true | S10b (`gpui_modify_exact_mode_toggles_and_move_applies`) | |
+| modify.again | Modify | Modify Again | ⌃⌘R | true | S10b (`gpui_modify_panel_transposes_saves_a_template_and_repeats`, `gpui_modify_exact_mode_toggles_and_move_applies`) | |
+| modify.template | Modify | Templates |  | true | S10b (`gpui_modify_panel_transposes_saves_a_template_and_repeats`) | |
+| modify.exact_mode | Modify | Exact Mode | ⌃⌘E | true | S10b (`gpui_modify_exact_mode_toggles_and_move_applies`) | |
+| modify.quantize_notes | Modify | Quantize Notes |  | false | S10b | |
+| modify.transpose_notes | Modify | Transpose Notes |  | false | S10b | |
+| modify.velocity_notes | Modify | Change Velocity |  | false | S10b | |
 
 ### Sequence
 
@@ -200,7 +200,7 @@ item (false: keys, the Keys settings and the control channel only).
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
 | window.mixer | Window | Mixer | ⌥⌘M | true | S6a | S6a |
-| window.plugin_manager | Window | Plugin Manager | ⌥⌘P | true | S10a (`gpui_plugin_manager_lists_toggles_and_rescans`; on screen: M26) | |
+| window.plugin_manager | Window | Plugin Manager | ⌥⌘P | true | S10a (`gpui_plugin_manager_lists_toggles_and_rescans`; on screen: M26) | S10a (CI run 46060100604; on screen: L32) |
 | window.media_pool | Window | Media Pool |  | true | | |
 | window.song_notes | Window | Song Notes |  | true | | |
 
@@ -224,7 +224,7 @@ item (false: keys, the Keys settings and the control channel only).
 | track.choose_take | Track | Choose Take |  | true | | |
 | track.rename_take | Track | Rename Take |  | true | | |
 | track.delete_take | Track | Delete Take |  | true | | |
-| track.new_plugin_instrument | Track | New Plug-in Instrument Track |  | false | S10a | |
+| track.new_plugin_instrument | Track | New Plug-in Instrument Track |  | false | S10a | S10a (CI run 46060100604) |
 
 ### Mixer
 
@@ -242,12 +242,12 @@ item (false: keys, the Keys settings and the control channel only).
 | mixer.add_send | Mixer | Add Send |  | false | S6b | S6b |
 | mixer.set_send | Mixer | Set Send |  | false | S6b | S6b |
 | mixer.remove_send | Mixer | Remove Send |  | false | S6b | S6b |
-| mixer.add_insert | Mixer | Add Insert |  | false | S10a (`gpui_plugin_inserts_and_eq_over_the_channel`) | |
-| mixer.remove_insert | Mixer | Remove Insert |  | false | S10a (`gpui_plugin_inserts_and_eq_over_the_channel`) | |
-| mixer.move_insert | Mixer | Move Insert |  | false | S10a (`gpui_plugin_inserts_and_eq_over_the_channel`) | |
-| mixer.set_bypass | Mixer | Bypass Insert |  | false | S10a (`gpui_plugin_inserts_and_eq_over_the_channel`) | |
-| mixer.set_eq | Mixer | Set EQ |  | false | S10a (`gpui_plugin_inserts_and_eq_over_the_channel`) | |
-| mixer.set_param | Mixer | Set Plug-in Parameter |  | false | S10a (`gpui_plugin_inserts_and_eq_over_the_channel`) | |
+| mixer.add_insert | Mixer | Add Insert |  | false | S10a (`gpui_plugin_inserts_and_eq_over_the_channel`) | S10a (CI run 46060100604) |
+| mixer.remove_insert | Mixer | Remove Insert |  | false | S10a (`gpui_plugin_inserts_and_eq_over_the_channel`) | S10a (CI run 46060100604) |
+| mixer.move_insert | Mixer | Move Insert |  | false | S10a (`gpui_plugin_inserts_and_eq_over_the_channel`) | S10a (CI run 46060100604) |
+| mixer.set_bypass | Mixer | Bypass Insert |  | false | S10a (`gpui_plugin_inserts_and_eq_over_the_channel`) | S10a (CI run 46060100604) |
+| mixer.set_eq | Mixer | Set EQ |  | false | S10a (`gpui_plugin_inserts_and_eq_over_the_channel`) | S10a (CI run 46060100604; the test plug-in stands in for Multi-Q, which is macOS only) |
+| mixer.set_param | Mixer | Set Plug-in Parameter |  | false | S10a (`gpui_plugin_inserts_and_eq_over_the_channel`) | S10a (CI run 46060100604) |
 | mixer.remove_bus | Mixer | Remove Bus |  | false | S6b | S6b |
 | mixer.new_group | Mixer | Group |  | true | S6b | S6b |
 | mixer.rename_group | Mixer | Rename Group |  | false | S6b | S6b |
@@ -386,10 +386,10 @@ editors). The record popover is a popover, not a window.
 | Torn-off editor: Drum Grid | `DetailEditorKind.drumGrid` (⌥⌘4) | | |
 | Plug-in editor window (one per insert or instrument slot) | `PluginWindows.show`, AppKit `NSWindow` (`PluginWindows.swift`) | H2 (CLAP editor and parameter list by e2e; AU and VST3 editors open in `manual-checks.md`) | H2 (CLAP and VST3 X11 editors, parameter list and Built-in Synth by CI e2e under Xvfb; real-session checks in `manual-checks.md`) |
 | Built-in Synth window | `BuiltinSynthWindow.swift`, AppKit `NSWindow` | H2 | H2 |
-| Modify panel (floating, one per document) | `ModifyPanels.show`, AppKit `NSPanel` (`ModifyPanel.swift`) | | |
-| Mixer | `mixer` | S6a + S6b (strips, master, buses, meters, sends, groups, VCAs, slots without editors, MIDI strips), S10a (slots with the browser) | S6a + S6b (same) |
+| Modify panel (floating, one per document) | `ModifyPanels.show`, AppKit `NSPanel` (`ModifyPanel.swift`) | S10b (`gpui_modify_panel_transposes_saves_a_template_and_repeats`; on screen: M27) | |
+| Mixer | `mixer` | S6a + S6b (strips, master, buses, meters, sends, groups, VCAs, slots without editors, MIDI strips), S10a (slots with the browser) | S6a + S6b (same), S10a (CI run 46060100604) |
 | Media Pool | `media-pool` | | |
-| Plugin Manager | `plugins` | S10a (`gpui_plugin_manager_lists_toggles_and_rescans`; on screen: M26) | |
+| Plugin Manager | `plugins` | S10a (`gpui_plugin_manager_lists_toggles_and_rescans`; on screen: M26) | S10a (CI run 46060100604; on screen: L32) |
 | Song Notes | `window.song_notes` (opens the notes file in the system's editor, not a window of its own) | | |
 | Licences | `licences` | | |
 | Settings: Appearance | Settings tab | S9b (user themes: later) | S9b (CI; on screen: L27) |
@@ -498,10 +498,10 @@ a group of by-eye steps the GPUI app must pass.
 
 | Heading | Mac | Linux |
 |---|---|---|
-| Plugins (plan 3c) | S10a (browser, inserts, EQ, Manager, launch scan, control verbs) | |
+| Plugins (plan 3c) | S10a (browser, inserts, EQ, Manager, launch scan, control verbs) | S10a (CI run 46060100604) |
 | Editors (plan 4a) | | |
 | Piano roll (plan 4b) | | |
-| List editor and Select and Modify (plan 4c) | partial S4 (List editor; Select and Modify later) | partial S4 |
+| List editor and Select and Modify (plan 4c) | S4 (List editor), S10b (Select and Modify; Strip Chart Line and Automation Target wait for the Strip Chart) | partial S4 |
 | Strip Chart and automation (plan 4d) | | |
 | Control channel (plan CC) | | |
 | Drum grid (plan 4e) | | |

@@ -15,7 +15,9 @@ use vizdaw_ffi::automation::{
 };
 use vizdaw_ffi::blocks::{BlockKind, BlockRow, BlockRule};
 use vizdaw_ffi::control::{ControlArg, ControlValue};
-use vizdaw_ffi::edit::{EditCommand, LaneEdit, LaneInputRow, LaneRef, MonitorModeRow};
+use vizdaw_ffi::edit::{
+    EditCommand, LaneEdit, LaneInputRow, LaneRef, MonitorModeRow, ViewFilterRow,
+};
 use vizdaw_ffi::events::AutomationTargetRow;
 use vizdaw_ffi::events::{
     EventKindRow, EventRow, LaneEvents, MarkerRow, MeterEntryRow, SequenceInfo, TempoPointRow,
@@ -25,6 +27,7 @@ use vizdaw_ffi::mixer::{
     BusRow, DestRow, GroupRow, MidiMixRow, MixerLevels, MixerSnapshot, StripColourRow,
     StripKindRow, StripRow, SwatchRow, VcaRow,
 };
+use vizdaw_ffi::modify::{ModifyRow, ModifyTemplateRow, SettingsEdit};
 use vizdaw_ffi::record::{RecordLaneRow, RecordSpecRow, RecordStateRow, RecoveredFileRow};
 use vizdaw_ffi::revs::LaneRev;
 use vizdaw_ffi::selection::{SelectionRow, TickRange};
@@ -154,6 +157,22 @@ struct State {
     windows: Windows,
     /// Control surfaces and MIDI learn (slice 9d).
     surfaces: Surfaces,
+    /// Select and Modify templates and Modify Again (slice 10b).
+    modify: Modify,
+}
+
+/// The fake's Select and Modify side (slice 10b): the templates by name,
+/// what Modify Again repeats, and the filtered edits.
+#[derive(Default)]
+struct Modify {
+    templates: std::collections::BTreeMap<String, ModifyTemplateRow>,
+    last: Option<ModifyRow>,
+    /// Every `edit_filtered` that went through, with its filter.
+    filtered: Vec<(EditCommand, Option<ViewFilterRow>)>,
+    /// What `modify_templates` and `last_modify` fail with, while set.
+    read_error: Option<VizError>,
+    template_reads: usize,
+    last_reads: usize,
 }
 
 /// The fake's surface side (slice 9d): scripted events, state and learn
@@ -615,6 +634,7 @@ impl FakeSession {
             rec: Rec::default(),
             windows: Windows::default(),
             surfaces: Surfaces::default(),
+            modify: Modify::default(),
         }))
     }
 
@@ -834,6 +854,38 @@ impl FakeSession {
     /// Every `edit` command received, in order.
     pub fn edits(&self) -> Vec<EditCommand> {
         self.st().edits.clone()
+    }
+
+    /// Every `edit_filtered` that went through, with its filter (each is
+    /// in [`FakeSession::edits`] too).
+    pub fn filtered_edits(&self) -> Vec<(EditCommand, Option<ViewFilterRow>)> {
+        self.st().modify.filtered.clone()
+    }
+
+    /// Scripts the saved templates (kept by name).
+    pub fn set_templates(&self, rows: Vec<ModifyTemplateRow>) {
+        self.st().modify.templates = rows.into_iter().map(|t| (t.name.clone(), t)).collect();
+    }
+
+    /// Scripts what Modify Again repeats.
+    pub fn set_last_modify(&self, m: Option<ModifyRow>) {
+        self.st().modify.last = m;
+    }
+
+    /// What `modify_templates` and `last_modify` fail with (`None`: they
+    /// answer).
+    pub fn set_fail_template_reads(&self, e: Option<VizError>) {
+        self.st().modify.read_error = e;
+    }
+
+    /// How often `modify_templates` was read.
+    pub fn template_reads(&self) -> usize {
+        self.st().modify.template_reads
+    }
+
+    /// How often `last_modify` was read.
+    pub fn last_modify_reads(&self) -> usize {
+        self.st().modify.last_reads
     }
 
     /// Every call, in order, as `name` or `name(arg)`.
@@ -2322,6 +2374,31 @@ impl DocSession for FakeSession {
                 message: vizdaw_ffi::session::RECORDING_LANES.into(),
             });
         }
+        // Select and Modify, as the core's: templates by name, the last
+        // modification for Modify Again.
+        match &cmd {
+            EditCommand::ModifyAgain if s.modify.last.is_none() => {
+                return Err(VizError::Model {
+                    message: crate::select_modify::model::NO_MODIFICATION.into(),
+                });
+            }
+            EditCommand::SelectAndModify {
+                modify: Some(m), ..
+            } => s.modify.last = Some(m.clone()),
+            EditCommand::Settings {
+                edit: SettingsEdit::SaveTemplate { template },
+            } => {
+                s.modify
+                    .templates
+                    .insert(template.name.clone(), template.clone());
+            }
+            EditCommand::Settings {
+                edit: SettingsEdit::DeleteTemplate { name },
+            } => {
+                s.modify.templates.remove(name);
+            }
+            _ => {}
+        }
         s.calls.push("edit".into());
         // The core's undo names of the track input edits.
         let label = match &cmd {
@@ -2381,6 +2458,31 @@ impl DocSession for FakeSession {
             s.snap.undo_label = Some(label.into());
         }
         Ok(s.snap.clone())
+    }
+    fn edit_filtered(
+        &self,
+        cmd: EditCommand,
+        filter: Option<ViewFilterRow>,
+    ) -> Result<DocSnapshot, VizError> {
+        let snap = self.edit(cmd.clone())?;
+        self.st().modify.filtered.push((cmd, filter));
+        Ok(snap)
+    }
+    fn modify_templates(&self) -> Result<Vec<ModifyTemplateRow>, VizError> {
+        let mut s = self.st();
+        s.modify.template_reads += 1;
+        if let Some(e) = s.modify.read_error.clone() {
+            return Err(e);
+        }
+        Ok(s.modify.templates.values().cloned().collect())
+    }
+    fn last_modify(&self) -> Result<Option<ModifyRow>, VizError> {
+        let mut s = self.st();
+        s.modify.last_reads += 1;
+        if let Some(e) = s.modify.read_error.clone() {
+            return Err(e);
+        }
+        Ok(s.modify.last.clone())
     }
     fn set_lane_mute(&self, seq: u64, lane: u64, mute: bool) -> Result<DocSnapshot, VizError> {
         let mut s = self.st();

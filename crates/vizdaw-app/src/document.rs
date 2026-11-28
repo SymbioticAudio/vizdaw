@@ -169,6 +169,11 @@ pub struct DocumentModel {
     pub(crate) surface_acting: bool,
     /// MIDI learn: the banner, the maps and their sheet (slice 9d).
     pub learn: crate::learn::LearnModel,
+    /// The Select and Modify panel (slice 10b).
+    pub(crate) select_modify: crate::select_modify::model::SelectModifyModel,
+    /// The app's nudge steps, as the UI last handed them before a command
+    /// (the nudges' arm reads them; Swift passes `host.nudge`).
+    pub(crate) nudge_settings: crate::editing_prefs::NudgeSettings,
 }
 
 /// What the arrangement reads of one track, read when first asked for.
@@ -303,6 +308,8 @@ impl DocumentModel {
             sent_count_in: None,
             surface_acting: false,
             learn,
+            select_modify: Default::default(),
+            nudge_settings: Default::default(),
         };
         model.refresh_project_info();
         // The time left reads the core's free space from the start.
@@ -337,6 +344,8 @@ impl DocumentModel {
         }
         if moved {
             self.waves.cache.document_changed();
+            // Templates and Modify Again are read again for this version.
+            self.select_modify.snapshot_moved();
         }
         self.snapshot = s;
         // A selected strip can go with no mixer showing (an Undo of Add
@@ -726,11 +735,22 @@ impl DocumentModel {
         self.text_editors.remove(owner);
     }
 
-    /// Space and the other bare transport keys work: no field is typed in.
-    /// A surface's button is no key (ruling T9-1,
-    /// `M/DocumentModel.swift:582`): it acts regardless.
+    /// Every owner whose name starts with `prefix` gives the keyboard back
+    /// (a panel that resigned key or closed).
+    pub(crate) fn end_text_editing_prefix(&mut self, prefix: &str) {
+        self.text_editors.retain(|o| !o.starts_with(prefix));
+    }
+
+    /// The fields typed in now, by owner name.
+    pub fn text_owners(&self) -> Vec<String> {
+        self.text_editors.iter().cloned().collect()
+    }
+
+    /// Space and the other bare transport keys work: no field is typed in
+    /// and the Modify panel is not key (`M/DocumentModel.swift:582`). A
+    /// surface's button is no key (ruling T9-1): it acts regardless.
     pub fn transport_keys_enabled(&self) -> bool {
-        self.surface_acting || self.text_editors.is_empty()
+        self.surface_acting || (self.text_editors.is_empty() && !self.select_modify.is_key())
     }
 
     /// Return (Return to Start) also waits while the list table has the

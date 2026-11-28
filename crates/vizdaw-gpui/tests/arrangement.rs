@@ -799,6 +799,86 @@ fn a_click_on_empty_space_clears_unless_shift(cx: &mut TestAppContext) {
     assert!(s.selection().events.is_empty());
 }
 
+/// Exact Mode (slice 10b Task 8): the drag is put back and the
+/// document's Select and Modify panel opens on Task "Move" with its amount.
+#[gpui::test]
+fn an_exact_block_drag_in_the_window_opens_the_panel(cx: &mut TestAppContext) {
+    let fake = with_blocks();
+    // The block's events, so the request's dragged events are there.
+    fake.set_events(3, 31, vec![note(1, 0), note(2, BAR / 2)]);
+    let mut s = setup(cx, fake);
+    let doc = s.doc();
+    s.app.update(&mut s.cx, |a, _| {
+        a.store.document_mut(doc).unwrap().set_exact_mode(true);
+    });
+    s.fake.clear_calls();
+    s.press_and_move(ON_CHORDS, (300., ON_CHORDS.1), Modifiers::none());
+    s.release_with((300., ON_CHORDS.1), Modifiers::none());
+    assert_eq!(
+        s.drag_calls(),
+        ["begin_edit(Move Block)", "edit_gesture", "abort_edit"]
+    );
+    assert!(s.fake.edits().is_empty(), "no edit was applied");
+    assert_eq!(s.undo_label(), None);
+    let panels: Vec<_> = s.app.read_with(&s.cx, |a, _| {
+        a.windows()
+            .iter()
+            .filter(|w| w.doc == doc && w.kind == vizdaw_gpui::WindowKind::ModifyPanel)
+            .map(|w| w.kind.name())
+            .collect()
+    });
+    assert_eq!(panels, ["modify_panel"]);
+    let (task, op) = s.model(|d| {
+        let m = d.select_modify();
+        (m.task, m.config.modify.op.clone())
+    });
+    assert_eq!(task.title(), "Move");
+    assert!(
+        matches!(op, vizdaw_ffi::modify::ModifyRow::Move { delta } if delta > 0),
+        "{op:?}"
+    );
+    assert!(s.model(|d| d.modify_acts_on_dragged_events()));
+}
+
+/// A revert that met Busy keeps the drag; the poll's retry puts it back
+/// and only then opens the panel, once.
+#[gpui::test]
+fn a_busy_exact_revert_opens_the_panel_on_the_poll(cx: &mut TestAppContext) {
+    let fake = with_blocks();
+    fake.set_events(3, 31, vec![note(1, 0), note(2, BAR / 2)]);
+    let mut s = setup(cx, fake);
+    let doc = s.doc();
+    s.app.update(&mut s.cx, |a, _| {
+        a.store.document_mut(doc).unwrap().set_exact_mode(true);
+    });
+    s.fake.clear_calls();
+    s.fake.fail_next(
+        "abort_edit",
+        vizdaw_ffi::VizError::Busy {
+            message: "busy".into(),
+        },
+    );
+    s.press_and_move(ON_CHORDS, (300., ON_CHORDS.1), Modifiers::none());
+    s.release_with((300., ON_CHORDS.1), Modifiers::none());
+    let panels = |s: &mut Setup| {
+        s.app.read_with(&s.cx, |a, _| {
+            a.windows()
+                .iter()
+                .filter(|w| w.kind == vizdaw_gpui::WindowKind::ModifyPanel)
+                .count()
+        })
+    };
+    assert_eq!(panels(&mut s), 0, "no panel over an unreverted document");
+    assert!(s.model(|d| d.gesture_open()));
+    s.cx.executor().advance_clock(Duration::from_millis(200));
+    s.cx.run_until_parked();
+    assert!(!s.model(|d| d.gesture_open()));
+    assert_eq!(panels(&mut s), 1);
+    assert_eq!(s.fake.count("abort_edit"), 1);
+    assert!(s.fake.edits().is_empty());
+    assert_eq!(s.undo_label(), None);
+}
+
 #[gpui::test]
 fn a_drag_moves_a_block_as_one_undo_step(cx: &mut TestAppContext) {
     let mut s = setup(cx, with_blocks());

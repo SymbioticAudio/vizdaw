@@ -55,8 +55,8 @@ use crate::frame_stats::{self, FrameStats};
 use crate::list_editor::{ListEditor, ListState};
 use crate::menu_bar::MenuBar;
 use crate::menus::{
-    self, CloseWindow, FileCommand, MixerMenuItem, PlayStop, RunCommand, Save, SaveAs, StepKey,
-    StopAndReturn,
+    self, CloseWindow, FileCommand, MixerMenuItem, PlayStop, RunCommand, RunModifyTemplate, Save,
+    SaveAs, StepKey, StopAndReturn,
 };
 use crate::mixer_view::{self, MixerView};
 use crate::panes::{self, HostState, PaneDrag};
@@ -392,7 +392,10 @@ impl DocumentWindow {
                     let host = match kind {
                         WindowKind::Document => Some(PopoverHost::Document),
                         WindowKind::Mixer => Some(PopoverHost::MixerWindow),
-                        WindowKind::Plugin | WindowKind::Other | WindowKind::PluginManager => None,
+                        WindowKind::Plugin
+                        | WindowKind::Other
+                        | WindowKind::PluginManager
+                        | WindowKind::ModifyPanel => None,
                     };
                     if host.is_some_and(|h| d.record().shows_popover_in(h)) {
                         d.set_record_popover(false);
@@ -409,7 +412,8 @@ impl DocumentWindow {
                     WindowKind::Mixer
                     | WindowKind::Plugin
                     | WindowKind::Other
-                    | WindowKind::PluginManager => s.remove_window(token),
+                    | WindowKind::PluginManager
+                    | WindowKind::ModifyPanel => s.remove_window(token),
                 }
                 cx.notify();
             });
@@ -535,6 +539,9 @@ impl DocumentWindow {
                     // What this document's session took from the surfaces
                     // runs here, in its own window, whichever is in front.
                     this.run_surface_steps(steps, window, cx);
+                    // A drag's Exact Mode revert that met Busy succeeded on
+                    // this tick: its panel opens now.
+                    this.present_modify_if_wanted(cx);
                     // A job the poll ended may close a project the store
                     // made (or open one): outside this window's update.
                     if this.app.read(cx).store.settling() {
@@ -720,8 +727,11 @@ impl DocumentWindow {
         let doc = self.doc;
         let (result, lane) = self.app.update(cx, |s, cx| {
             cx.notify();
+            // The nudges read the app's Settings › Editing steps.
+            let nudge = s.editing.nudge().clone();
             s.store
                 .with_document(doc, |d, _| {
+                    d.set_nudge_settings(nudge);
                     (
                         commands::perform_from_menu(&action.id, d),
                         d.selected_lane(),
@@ -749,6 +759,11 @@ impl DocumentWindow {
                         let _ = DocumentWindow::open_mixer(&app, doc, cx);
                     });
                 }
+                // A Modify panel task: the document's panel, after this
+                // update, as the Mixer window.
+                if ran.open_modify_panel {
+                    cx.defer(move |cx| crate::modify_panel::open_modify_panel(doc, cx));
+                }
                 if let Some(focus) = ran.focus {
                     self.focus_field(focus.field(), window, cx);
                 }
@@ -774,6 +789,26 @@ impl DocumentWindow {
         self.run_command(&RunCommand::new(action.id.clone()), window, cx);
         // A step moves the transport: the readouts read it now.
         self.after_transport(window, cx);
+    }
+
+    /// Modify › Templates › ‹name›: runs that template on this window's
+    /// document; a refusal is the status line.
+    pub fn run_modify_template(
+        &mut self,
+        action: &RunModifyTemplate,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let doc = self.doc;
+        self.app.update(cx, |s, cx| {
+            cx.notify();
+            s.store.with_document(doc, |d, _| {
+                if let Err(status) = d.run_modify_template(&action.name) {
+                    d.set_status(Some(status));
+                }
+            })
+        });
+        cx.notify();
     }
 
     /// A Mixer menu item, on this window's document and its selected
@@ -1095,6 +1130,21 @@ impl DocumentWindow {
             cx.notify();
             s.store.with_document(doc, |d, _| f(d))
         })
+    }
+
+    /// The document asked for its Select and Modify panel (an Exact Mode
+    /// drag, at once or on the tick after a Busy revert): it opens after
+    /// this update.
+    pub(crate) fn present_modify_if_wanted(&mut self, cx: &mut Context<Self>) {
+        let doc = self.doc;
+        let wanted = self.app.update(cx, |s, _| {
+            s.store
+                .document_mut(doc)
+                .is_some_and(DocumentModel::take_modify_present)
+        });
+        if wanted {
+            cx.defer(move |cx| crate::modify_panel::open_modify_panel(doc, cx));
+        }
     }
 
     /// Track `lane` of the shown sequence, as last fetched.
@@ -1505,7 +1555,7 @@ impl DocumentWindow {
         self._poll = Self::start_polling(self.doc, window, cx);
     }
 
-    fn save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
         self.commit_rename(window, cx);
         match self.save_choice(false, cx) {
             SaveChoice::Save => self.save_then_close(false, window, cx),
@@ -1514,7 +1564,7 @@ impl DocumentWindow {
         }
     }
 
-    fn save_as(&mut self, _: &SaveAs, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn save_as(&mut self, _: &SaveAs, window: &mut Window, cx: &mut Context<Self>) {
         self.commit_rename(window, cx);
         if self.save_choice(true, cx) == SaveChoice::Panel {
             self.prompt_save_as(false, window, cx);
@@ -1965,6 +2015,7 @@ impl DocumentWindow {
             .on_action(cx.listener(Self::run_command))
             .on_action(cx.listener(Self::step_key))
             .on_action(cx.listener(Self::run_mixer_item))
+            .on_action(cx.listener(Self::run_modify_template))
             .on_action(cx.listener(Self::play_stop))
             .on_action(cx.listener(Self::stop_and_return))
             .on_action(cx.listener(Self::save))

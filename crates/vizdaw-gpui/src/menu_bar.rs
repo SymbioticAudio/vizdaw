@@ -202,6 +202,22 @@ impl MenuBar {
                         })
                         .into_any_element()
                 }
+                ItemSpec::Template { name, enabled } => {
+                    let action = menus::RunModifyTemplate {
+                        name: name.clone().into(),
+                    };
+                    Self::row(row, name, None, *enabled, None, scope)
+                        .when(*enabled, |d| {
+                            d.on_click(cx.listener(move |this, _, window, cx| {
+                                if let Some(bar) = this.menu_bar_mut() {
+                                    bar.close();
+                                }
+                                window.dispatch_action(Box::new(action.clone()), cx);
+                                cx.notify();
+                            }))
+                        })
+                        .into_any_element()
+                }
                 ItemSpec::Mixer { op, title, enabled } => {
                     let op = *op;
                     Self::row(row, title, None, *enabled, None, scope)

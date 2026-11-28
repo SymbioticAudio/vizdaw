@@ -114,6 +114,7 @@ fn app_ran(status: Option<String>) -> Ran {
         status,
         focus: None,
         open_mixer_window: false,
+        open_modify_panel: false,
     }
 }
 

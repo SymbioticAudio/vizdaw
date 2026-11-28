@@ -788,3 +788,23 @@ fn the_windows_keys_do_nothing_while_a_file_panel_is_up(cx: &mut TestAppContext)
         })
     );
 }
+
+/// Swift `S/ListEditorPane.swift:102`: the bar's Modify… opens Change
+/// Values, Apply hiding the kinds the list hides.
+#[gpui::test]
+fn the_list_bars_modify_opens_change_values_with_the_lists_filter(cx: &mut TestAppContext) {
+    let mut s = list_view(cx);
+    s.click("button", "Show");
+    s.click("menuitem", "Note");
+    let filter = s.model(|d| d.list_filter().view_filter());
+    assert!(filter.is_some(), "the list hides notes");
+    s.click("button", "Modify\u{2026}");
+    let doc = s.doc();
+    let open = s
+        .app
+        .read_with(&s.cx, |a, _| a.modify_panel_of(doc).is_some());
+    assert!(open, "the panel opens");
+    let (task, got) = s.model(|d| (d.select_modify().task, d.select_modify().filter().cloned()));
+    assert_eq!(task, vizdaw_app::select_modify::PanelTask::Change);
+    assert_eq!(got, filter);
+}
