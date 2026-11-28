@@ -72,7 +72,7 @@ item (false: keys, the Keys settings and the control channel only).
 | editors.piano_roll | Editors | Piano Roll | ⌘1 | true | S5 | S5 |
 | editors.list | Editors | List | ⌘2 | true | S4 | S4 |
 | editors.strip_chart | Editors | Strip Chart | ⌘3 | true | S10c (`gpui_strip_chart_opens_draws_rows_and_saves_them`) || S10c (CI run 46121632090; on screen: L34) |
-| editors.drum_grid | Editors | Drum Grid | ⌘4 | true | | |
+| editors.drum_grid | Editors | Drum Grid | ⌘4 | true | S10d (`gpui_drum_grid_paints_and_erases_by_element`) | |
 | editors.audio_editor | Editors | Audio Editor | ⌘5 | true | | |
 | editors.piano_roll_window | Editors | Open Piano Roll in Window | ⌥⌘1 | true | | |
 | editors.list_window | Editors | Open List in Window | ⌥⌘2 | true | | |
@@ -127,11 +127,11 @@ item (false: keys, the Keys settings and the control channel only).
 
 | ID | Menu | Title | Shortcut | Menu item | Mac | Linux |
 |---|---|---|---|---|---|---|
-| drum.add_row | Drum | Add Drum Row |  | true | | |
-| drum.show_velocity | Drum | Show Velocity |  | true | | |
-| drum.split_row | Drum | Split Row to Own Track |  | true | | |
-| drum.remove_row | Drum | Remove Drum Row |  | true | | |
-| drum.timeline | Drum | Timeline View |  | true | | |
+| drum.add_row | Drum | Add Drum Row |  | true | S10d (e2e) | |
+| drum.show_velocity | Drum | Show Velocity |  | true | S10d | |
+| drum.split_row | Drum | Split Row to Own Track |  | true | S10d | |
+| drum.remove_row | Drum | Remove Drum Row |  | true | S10d | |
+| drum.timeline | Drum | Timeline View |  | true | S10d (e2e) | |
 
 ### Transport
 
@@ -504,7 +504,7 @@ a group of by-eye steps the GPUI app must pass.
 | List editor and Select and Modify (plan 4c) | S4 (List editor), S10b (Select and Modify), S10c (Strip Chart Line and Automation Target: `gpui_modify_strip_chart_line_sets_velocities`) | S4, S10b (CI run 46095836737), S10c (CI run 46121632090) |
 | Strip Chart and automation (plan 4d) | S10c (Strip Chart, Controllers pane, automation rows in the list, the panel's Strip Chart Line and Automation Target; torn-off windows: later slice; on screen: M28) || S10c (CI run 46121632090; on screen: L34) |
 | Control channel (plan CC) | | |
-| Drum grid (plan 4e) | | |
+| Drum grid (plan 4e) | S10d (Drum Grid, bar, row headers, Drum menu; torn-off windows: later slice; on screen: M29) | |
 | Keys and step entry (plan 4f) | | |
 | Audio playback (plan 5a) | | |
 | Regions in the editors (plan 5b) | | |
@@ -542,7 +542,7 @@ app (they need a window server and `VIZDAW_E2E_APP`).
 |---|---|---|
 | demo_play_screenshot_stop | S3, S4 (List step restored) | S3, S4 (List step restored) |
 | click_play_and_press_space | S3 | S3 |
-| drum_grid_paints_and_erases_by_element | | |
+| drum_grid_paints_and_erases_by_element | S10d (`gpui_drum_grid_paints_and_erases_by_element`, docked pane) | |
 | keys_drive_step_entry_locators_and_bindings | S4, S8a, S9c (bindings half: `gpui_keys_drive_step_entry_and_locators`) | S4, S8a, S9c (CI run 45876230282) |
 | audio_import_plays_and_reports_media | | |
 | regions_normalize_relink_and_trash | | |
