@@ -7,15 +7,16 @@
 use std::sync::Arc;
 
 use gpui::{
-    Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, TestAppContext,
-    VisualTestContext, WindowHandle,
+    Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, ScrollDelta, ScrollEvent,
+    TestAppContext, VisualTestContext, WindowHandle, point, px,
 };
-use vizdaw_app::DocumentStore;
-use vizdaw_app::drum_grid::drum_quantize_choices;
-use vizdaw_app::editor::{DetailEditorKind, EditorTarget, Tool};
+use vizdaw_app::arrangement::RULER_HEIGHT;
+use vizdaw_app::drum_grid::{DrumRowKey, DrumView, MAX_TREE_ITEMS, drum_quantize_choices};
+use vizdaw_app::editor::{DetailEditorKind, EditorTarget, PaneView, Tool};
 use vizdaw_app::testing::{FakeSession, demo_fake, drum_fake, lane_row, roll_fake};
-use vizdaw_ffi::drum::DrumEdit;
-use vizdaw_ffi::edit::{EditCommand, LaneEdit};
+use vizdaw_app::{DocSession as _, DocumentStore};
+use vizdaw_ffi::drum::{DrumEdit, DrumPaintHitRow};
+use vizdaw_ffi::edit::{EditCommand, EventEdit, LaneEdit, LaneRef};
 use vizdaw_ffi::snapshot::LaneRow;
 use vizdaw_ffi::tracks::TrackKindRow;
 use vizdaw_gpui::menus::{self, ItemSpec};
@@ -459,4 +460,391 @@ fn a_saved_drum_grid_last_editor_opens_the_grid(cx: &mut TestAppContext) {
     assert_eq!(s.edits().last(), Some(&mark(31)));
     let saved = s.saved_layout("vizdaw-saved-drum-grid.vizdaw");
     assert_eq!(saved["lastKind"], "drumGrid");
+}
+
+// ---- The canvas (Swift `T/DrumGridViewTests.swift`) ----
+//
+// Points are canvas content points: x from the canvas's left edge, y
+// below the ruler. At the default 96 ticks a point a sixteenth is 40
+// points. The bands: header 0–22, Kick 22–42, Snare 42–62 (to 90 with its
+// velocity lane), Perc's header 62–84, Clap 84–104, the new-track band.
+
+const Q: i64 = 15_360;
+const S16: i64 = Q / 4;
+
+/// Swift's `paint` (`T/DrumGridViewTests.swift:29-35`): row 2 (Snare) of
+/// Drums at velocity 100 unless given.
+fn paint(ticks: &[i64], velocity: u16, row: u64) -> EditCommand {
+    EditCommand::Drum {
+        edit: DrumEdit::Paint {
+            seq: 3,
+            lane: 40,
+            row,
+            hits: ticks
+                .iter()
+                .map(|&tick| DrumPaintHitRow { tick, velocity })
+                .collect(),
+            window: S16,
+            duration: Q / 8,
+        },
+    }
+}
+
+fn snare(ticks: &[i64]) -> EditCommand {
+    paint(ticks, 100 << 9, 2)
+}
+
+/// The grid on Drums with Snare's velocity lane shown.
+fn velocity_grid(cx: &mut TestAppContext) -> Setup {
+    let f = drum_fake();
+    let mut lanes = f.drum_lanes(3).expect("the drum lanes");
+    lanes[0].rows[1].show_velocity = true;
+    f.set_drum_lanes(3, lanes);
+    let mut s = setup(cx, f);
+    s.update_model(|d| {
+        d.open_detail(
+            EditorTarget::Lane { seq: 3, lane: 40 },
+            Some(DetailEditorKind::DrumGrid),
+        )
+    });
+    s.fake.clear_calls();
+    s
+}
+
+/// ⌘ on macOS, ⌃ elsewhere, as `menus::secondary!`.
+fn secondary_mods() -> Modifiers {
+    if cfg!(target_os = "macos") {
+        Modifiers::command()
+    } else {
+        Modifiers::control()
+    }
+}
+
+impl Setup {
+    /// Window point of canvas content point `(x, y)` (below the ruler).
+    fn at(&mut self, x: f32, y: f32) -> gpui::Point<Pixels> {
+        let o = self.control("group", GRID).bounds.origin;
+        point(o.x + px(x), o.y + px(RULER_HEIGHT + y))
+    }
+
+    fn down(&mut self, at: gpui::Point<Pixels>) {
+        self.cx
+            .simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+        self.cx.run_until_parked();
+    }
+
+    fn move_to(&mut self, at: gpui::Point<Pixels>) {
+        self.cx
+            .simulate_mouse_move(at, Some(MouseButton::Left), Modifiers::none());
+        self.cx.run_until_parked();
+    }
+
+    fn up(&mut self, at: gpui::Point<Pixels>) {
+        self.cx
+            .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        self.cx.run_until_parked();
+    }
+
+    /// The session's edit calls (reads left out).
+    fn edit_calls(&self) -> Vec<String> {
+        self.fake
+            .calls()
+            .into_iter()
+            .filter(|c| c.contains("edit"))
+            .collect()
+    }
+
+    fn last_edit_call(&self) -> Option<String> {
+        self.edit_calls().last().cloned()
+    }
+
+    /// The labels of the `button`s under "Drum Grid".
+    fn tree_buttons(&mut self) -> Vec<Element> {
+        let g = self.control("group", GRID);
+        self.elements()
+            .into_iter()
+            .filter(|e| {
+                e.path.len() > g.path.len() && e.path.starts_with(&g.path) && e.role == "button"
+            })
+            .collect()
+    }
+
+    fn tree_labels(&mut self) -> Vec<String> {
+        self.tree_buttons().into_iter().map(|e| e.label).collect()
+    }
+
+    /// Neither a stroke nor a gesture is left.
+    fn no_stroke(&mut self) -> bool {
+        self.model(|d| d.gesture().is_none() && d.drum_stroke().is_none())
+    }
+
+    /// A paint stroke held from (5, 50) to (125, 70), its gesture open.
+    fn mid_stroke(&mut self) -> gpui::Point<Pixels> {
+        let (from, to) = (self.at(5., 50.), self.at(125., 70.));
+        self.down(from);
+        self.move_to(to);
+        assert!(self.model(|d| d.gesture().is_some()), "the gesture opened");
+        to
+    }
+
+    /// After a stroke was cancelled: no undo step, and the release sends
+    /// nothing.
+    fn assert_cancelled(&mut self, to: gpui::Point<Pixels>) {
+        assert_eq!(self.last_edit_call().as_deref(), Some("abort_edit"));
+        assert!(!self.edit_calls().iter().any(|c| c == "end_edit"));
+        assert!(self.no_stroke());
+        let n = self.edit_calls().len();
+        self.up(to);
+        assert_eq!(self.edit_calls().len(), n, "the release sends nothing");
+    }
+}
+
+#[gpui::test]
+fn a_click_on_an_empty_cell_paints_it(cx: &mut TestAppContext) {
+    let mut s = drums_grid(cx);
+    let at = s.at(85., 50.);
+    s.down(at);
+    s.up(at);
+    assert_eq!(s.fake.gesture_edits().last(), Some(&snare(&[2 * S16])));
+    assert_eq!(
+        s.edit_calls(),
+        ["begin_edit(Paint Drum Hits)", "edit_gesture", "end_edit"]
+    );
+    assert_eq!(
+        s.model(|d| d.drum_selected_row()),
+        Some(DrumRowKey { lane: 40, row: 2 })
+    );
+}
+
+#[gpui::test]
+fn a_drag_paints_a_run_and_escape_takes_it_back(cx: &mut TestAppContext) {
+    let mut s = drums_grid(cx);
+    let to = s.mid_stroke();
+    assert_eq!(
+        s.fake.gesture_edits().last(),
+        Some(&snare(&[0, S16, 2 * S16, 3 * S16])),
+        "the stroke stays on its row"
+    );
+    s.keys("escape");
+    s.assert_cancelled(to);
+}
+
+#[gpui::test]
+fn the_eraser_erases_the_hits_it_crosses(cx: &mut TestAppContext) {
+    let mut s = drums_grid(cx);
+    s.update_model(|d| d.set_tool(Tool::Eraser));
+    s.fake.clear_calls();
+    let (from, to) = (s.at(5., 30.), s.at(165., 30.));
+    s.down(from);
+    s.move_to(to);
+    s.up(to);
+    assert_eq!(
+        s.edit_calls().first().map(String::as_str),
+        Some("begin_edit(Erase Drum Hits)")
+    );
+    assert_eq!(
+        s.fake.gesture_edits().last(),
+        Some(&EditCommand::Event {
+            edit: EventEdit::Delete {
+                events: vec![11, 12]
+            }
+        })
+    );
+}
+
+#[gpui::test]
+fn a_shown_velocity_lane_sets_the_velocity_from_the_height(cx: &mut TestAppContext) {
+    let mut s = velocity_grid(cx);
+    // The Snare band is 42–90: its top is 127.
+    let at = s.at(85., 42.);
+    s.down(at);
+    s.up(at);
+    assert_eq!(
+        s.fake.gesture_edits().last(),
+        Some(&paint(&[2 * S16], 127 << 9, 2))
+    );
+    // Header, Kick, Snare with its lane, header, Clap, new-track band.
+    assert_eq!(s.model(|d| d.drum_layout().height), 160.);
+}
+
+#[gpui::test]
+fn cells_and_hits_are_in_the_tree_and_a_click_toggles(cx: &mut TestAppContext) {
+    let mut s = drums_grid(cx);
+    assert_eq!(
+        s.tree_labels().first().map(String::as_str),
+        Some("Kick, bar 1 beat 1, on, velocity 100")
+    );
+    let off = s
+        .tree_buttons()
+        .into_iter()
+        .find(|e| e.label == "Snare, bar 1 beat 1 tick 7680, off")
+        .expect("the empty Snare cell");
+    s.click_at(off.bounds.center(), 1);
+    assert_eq!(s.fake.gesture_edits().last(), Some(&snare(&[2 * S16])));
+    s.update_model(|d| d.update_drum_settings(|g| g.view = DrumView::Timeline));
+    assert_eq!(
+        s.tree_labels(),
+        [
+            "Kick, bar 1 beat 1, on, velocity 100",
+            "Kick, bar 1 beat 2, on, velocity 100",
+            "Snare, bar 1 beat 2, on, velocity 100",
+        ]
+    );
+}
+
+/// Review Focus 1: the detail switched away or closed, the bottom pane
+/// on another view or hidden, the window losing the keyboard, closing,
+/// and the track removed: no open edit and no undo step stays.
+#[gpui::test]
+fn leaving_the_pane_mid_stroke_leaves_no_undo_step(cx: &mut TestAppContext) {
+    let mut s = drums_grid(cx);
+    let to = s.mid_stroke();
+    s.update_model(|d| d.show_detail(DetailEditorKind::List));
+    s.assert_cancelled(to);
+
+    let mut s = drums_grid(cx);
+    let to = s.mid_stroke();
+    s.cx.deactivate_window();
+    s.cx.run_until_parked();
+    s.assert_cancelled(to);
+}
+
+#[gpui::test]
+fn closing_the_detail_mid_stroke_leaves_no_undo_step(cx: &mut TestAppContext) {
+    let mut s = drums_grid(cx);
+    let to = s.mid_stroke();
+    s.update_model(|d| d.close_detail());
+    s.assert_cancelled(to);
+}
+
+#[gpui::test]
+fn another_bottom_view_mid_stroke_leaves_no_undo_step(cx: &mut TestAppContext) {
+    let mut s = drums_grid(cx);
+    let to = s.mid_stroke();
+    s.update_model(|d| d.update_layout(|l| l.views.current_mut().bottom.view = PaneView::Mixer));
+    assert_eq!(
+        s.model(|d| d.detail_kind_name()),
+        "drum_grid",
+        "the detail stays"
+    );
+    s.assert_cancelled(to);
+}
+
+#[gpui::test]
+fn hiding_the_bottom_pane_mid_stroke_leaves_no_undo_step(cx: &mut TestAppContext) {
+    let mut s = drums_grid(cx);
+    let to = s.mid_stroke();
+    s.update_model(|d| d.update_layout(|l| l.views.current_mut().bottom.shown = false));
+    s.assert_cancelled(to);
+}
+
+#[gpui::test]
+fn closing_the_window_mid_stroke_leaves_no_undo_step(cx: &mut TestAppContext) {
+    let mut s = drums_grid(cx);
+    s.mid_stroke();
+    s.window
+        .update(&mut s.cx, |_, window, _| window.remove_window())
+        .unwrap();
+    s.cx.run_until_parked();
+    assert_eq!(s.last_edit_call().as_deref(), Some("abort_edit"));
+    assert!(!s.edit_calls().iter().any(|c| c == "end_edit"));
+}
+
+/// The stroke's track removed under it, with its gesture open and before
+/// the dead zone.
+#[gpui::test]
+fn removing_the_track_mid_stroke_leaves_no_undo_step(cx: &mut TestAppContext) {
+    fn remove_drums(s: &mut Setup) {
+        let mut snap = s.fake.snap();
+        snap.version += 1;
+        snap.lane_revs.retain(|r| r.lane != 40);
+        s.fake.set_idle(Some(snap));
+        s.update_model(|d| {
+            d.idle();
+        });
+    }
+    let mut s = drums_grid(cx);
+    let to = s.mid_stroke();
+    remove_drums(&mut s);
+    s.assert_cancelled(to);
+
+    let mut s = drums_grid(cx);
+    let (from, to) = (s.at(5., 50.), s.at(125., 50.));
+    s.down(from);
+    remove_drums(&mut s);
+    s.move_to(to);
+    s.up(to);
+    assert!(s.edit_calls().is_empty(), "{:?}", s.edit_calls());
+    assert!(s.no_stroke());
+}
+
+/// Review Focus 5.
+#[gpui::test]
+fn a_stroke_reads_the_drum_lanes_once(cx: &mut TestAppContext) {
+    let mut s = drums_grid(cx);
+    let reads = s.fake.drum_lanes_reads();
+    let from = s.at(5., 50.);
+    s.down(from);
+    // 20 moves, all in the first cell (its command does not change).
+    for i in 0..20 {
+        let at = s.at(9. + i as f32, 50.);
+        s.move_to(at);
+    }
+    assert!(s.model(|d| d.gesture().is_some()));
+    assert!(
+        s.fake.drum_lanes_reads() <= reads + 1,
+        "{} reads",
+        s.fake.drum_lanes_reads() - reads
+    );
+}
+
+/// Review Focus 5: the widest zoom.
+#[gpui::test]
+fn the_tree_lists_at_most_2048_cells(cx: &mut TestAppContext) {
+    let mut s = drums_grid(cx);
+    s.update_model(|d| {
+        d.update_drum_settings(|g| {
+            g.ticks_per_point = 61_440.;
+            g.step = 480;
+        })
+    });
+    assert_eq!(s.tree_buttons().len(), MAX_TREE_ITEMS);
+}
+
+#[gpui::test]
+fn a_ruler_drag_selects_the_range_over_the_drum_tracks(cx: &mut TestAppContext) {
+    let mut s = drums_grid(cx);
+    let (from, to) = (s.at(40., -10.), s.at(200., -10.));
+    s.down(from);
+    s.move_to(to);
+    s.up(to);
+    let sel = s.model(|d| d.selection().clone());
+    assert!(sel.time_range.is_some());
+    assert_eq!(
+        sel.lanes,
+        [LaneRef { seq: 3, lane: 40 }, LaneRef { seq: 3, lane: 41 }]
+    );
+    assert!(sel.events.is_empty());
+    assert!(s.edit_calls().is_empty());
+}
+
+#[gpui::test]
+fn the_wheel_zoom_is_saved(cx: &mut TestAppContext) {
+    let mut s = drums_grid(cx);
+    let before = s.model(|d| d.drum_settings().ticks_per_point);
+    let at = s.at(100., 30.);
+    s.cx.simulate_event(ScrollEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.), px(10.))),
+        modifiers: secondary_mods(),
+        ..Default::default()
+    });
+    s.cx.run_until_parked();
+    let after = s.model(|d| d.drum_settings().ticks_per_point);
+    assert_ne!(after, before);
+    let axis = s
+        .window
+        .read_with(&s.cx, |v, _| v.drum_grid().axis().ticks_per_point())
+        .unwrap();
+    assert_eq!(axis, after);
 }

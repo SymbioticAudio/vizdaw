@@ -13,24 +13,30 @@
 //! tracks through `drum_add_row`, `drum_set_quantize`, `drum_nudge` and
 //! `drum_open_lane`.
 
+mod canvas;
+
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
     AnyElement, Bounds, Context, FocusHandle, Focusable as _, InteractiveElement, IntoElement,
-    ParentElement, Pixels, StatefulInteractiveElement, Styled, Window, canvas, div, px, rgb,
+    ParentElement, Pixels, StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
 use vizdaw_app::DocumentModel;
-use vizdaw_app::arrangement::TimeAxis;
+use vizdaw_app::arrangement::{MeterBars, TimeAxis};
 use vizdaw_app::drum_grid::{
-    CHOOSE_TEXT, CHOOSE_TITLE, DrumGridSettings, DrumView, NO_TRACKS_TEXT, NO_TRACKS_TITLE,
-    drum_quantize_choices, drum_quantize_title, lengths_including, nudge_title, stepped_velocity,
+    CHOOSE_TEXT, CHOOSE_TITLE, DrumGridSettings, DrumRowKey, DrumView, NO_TRACKS_TEXT,
+    NO_TRACKS_TITLE, drum_quantize_choices, drum_quantize_title, lengths_including, nudge_title,
+    stepped_velocity,
 };
 use vizdaw_app::editor::{DetailEditorKind, EditorTarget, Tool};
 use vizdaw_app::transport::TransportModel;
-use vizdaw_ffi::drum::DrumLaneRow;
+use vizdaw_ffi::drum::{DrumGridLayoutRow, DrumLaneRow};
+use vizdaw_ffi::events::MeterEntryRow;
+use vizdaw_ffi::selection::TickRange;
 
 use crate::appearance::ThemedCorners as _;
 use crate::arrangement::{bar_button, colors};
@@ -119,9 +125,15 @@ pub struct DrumGridView {
     /// The target the view last scrolled to.
     shown_target: Option<EditorTarget>,
     pub(crate) menu: Option<DrumMenu>,
-    /// The grid left its pane since the last draw: the window starts it
-    /// afresh.
+    /// The grid left its pane since the last draw: the window drops its
+    /// stroke before the view starts afresh.
     detach_pending: bool,
+    /// The press on a row, and the ruler's.
+    press: Option<canvas::Press>,
+    ruler: Option<canvas::RulerDrag>,
+    /// The bands' height at the last prepare (the wheel's vertical
+    /// clamp).
+    content_height: f32,
 }
 
 impl DrumGridView {
@@ -135,6 +147,9 @@ impl DrumGridView {
             shown_target: None,
             menu: None,
             detach_pending: false,
+            press: None,
+            ruler: None,
+            content_height: 0.,
         }
     }
 
@@ -186,6 +201,8 @@ impl DrumGridView {
             return false;
         };
         self.mounted = true;
+        self.content_height = d.drum_layout().height as f32;
+        self.clamp_vertical();
         let tpp = TimeAxis::new(d.drum_settings().ticks_per_point, 0).ticks_per_point();
         if tpp != self.axis.ticks_per_point() {
             self.axis = self.axis.with_zoom(tpp);
@@ -209,6 +226,7 @@ impl DrumGridView {
         self.shown_target = None;
         self.menu = None;
         self.mounted = false;
+        self.drop_press();
     }
 }
 
@@ -228,6 +246,16 @@ pub struct DrumGridState {
     /// The tracks the empty state offers (id, name).
     tracks: Vec<(u64, String)>,
     track: Option<TrackMenu>,
+    /// The bands (the model's, once per row shape and settings).
+    layout: Arc<DrumGridLayoutRow>,
+    selected_row: Option<DrumRowKey>,
+    /// The selected events (a hit's selected outline).
+    selected: Arc<HashSet<u64>>,
+    meter: Vec<MeterEntryRow>,
+    bars: MeterBars,
+    /// The shaded range: the selection's, else a block target's.
+    range: Option<TickRange>,
+    follow: bool,
     /// The playhead's tick, when the transport is on the grid's sequence.
     playhead: Option<f64>,
     playing: bool,
@@ -268,12 +296,23 @@ impl DrumGridState {
             }
             _ => (None, false),
         };
+        let meter = canvas::drum_meter(doc);
         Some(DrumGridState {
             settings: *doc.drum_settings(),
             erasing: doc.tool() == Tool::Eraser,
+            layout: doc.drum_layout(),
             lanes,
             tracks,
             track,
+            selected_row: doc.drum_selected_row(),
+            selected: Arc::new(doc.selection().events.iter().copied().collect()),
+            bars: MeterBars::new(&meter),
+            meter,
+            range: doc
+                .selection()
+                .time_range
+                .or_else(|| doc.drum_focus_range()),
+            follow: doc.layout().follow,
             playhead,
             playing,
         })
@@ -313,7 +352,7 @@ pub(crate) fn render(
     let body = if state.lanes.is_empty() {
         empty_state(&state, &mut scope.container(), cx)
     } else {
-        body(view, &mut scope.container())
+        body(view, &state, &mut scope.container(), cx)
     };
     div()
         .flex()
@@ -329,7 +368,12 @@ pub(crate) fn render(
 
 /// The row headers beside the canvas (`DrumGridContainer`,
 /// `E/DrumRowHeaderView.swift:328-360`).
-fn body(view: &DrumGridView, scope: &mut RegistryScope) -> AnyElement {
+fn body(
+    view: &DrumGridView,
+    state: &DrumGridState,
+    scope: &mut RegistryScope,
+    cx: &mut Context<DocumentWindow>,
+) -> AnyElement {
     let rows = scope.container();
     let headers = div()
         .relative()
@@ -342,25 +386,7 @@ fn body(view: &DrumGridView, scope: &mut RegistryScope) -> AnyElement {
         .border_color(rgb(bar_colors::border()))
         .child(rows.this("group", ROWS_GROUP, true))
         .child(rows.clip());
-    let grid = scope.container();
-    let layout = view.layout.clone();
-    let bounds = canvas(move |bounds, _, _| layout.set(bounds), |_, _, _, _| {})
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full();
-    let canvas = div()
-        .id("drum-grid")
-        .track_focus(&view.focus)
-        .relative()
-        .flex_1()
-        .min_w_0()
-        .h_full()
-        .overflow_hidden()
-        .bg(rgb(colors::canvas()))
-        .child(bounds)
-        .child(grid.this("group", GROUP, true))
-        .child(grid.clip());
+    let canvas = canvas::grid_canvas(view, state, &mut scope.container(), cx);
     div()
         .flex()
         .flex_row()
@@ -737,20 +763,22 @@ impl DocumentWindow {
         cx.notify();
     }
 
-    /// After a draw without the grid: one that left its pane gives back
-    /// the keyboard and starts afresh.
+    /// After a draw without the grid: one that left its pane drops its
+    /// stroke, gives back the keyboard and starts afresh.
     pub(crate) fn drum_detach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !std::mem::take(&mut self.drum_grid.detach_pending) {
             return;
         }
+        self.end_drum_stroke(cx);
         self.drum_grid.unmount();
         self.drum_unfocus(window, cx);
     }
 
     /// While drawing a grid that is mounted but out of sight (the bottom
-    /// pane hidden or showing another view): it keeps no menu and no
-    /// keyboard.
+    /// pane hidden or showing another view): it keeps no press, no
+    /// stroke, no menu and no keyboard.
     pub(crate) fn drum_hidden(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.end_drum_stroke(cx);
         self.drum_grid.close_menu();
         self.drum_unfocus(window, cx);
     }

@@ -357,6 +357,8 @@ impl DocumentWindow {
                     this.roll_deactivated(cx);
                     // A Strip Chart stroke goes without an undo step.
                     this.charts_deactivated(cx);
+                    // So does a Drum Grid stroke.
+                    this.drum_deactivated(cx);
                 }
             }),
         ];
@@ -380,6 +382,7 @@ impl DocumentWindow {
             let roll = &mut this.piano_roll;
             let (pane_chart, controllers_chart) =
                 (&mut this.strip_chart, &mut this.controllers_chart);
+            let drum_grid = &mut this.drum_grid;
             // A sheet's field edit ends with its window: the document's
             // keys come back.
             let sheet_owner = this
@@ -416,6 +419,7 @@ impl DocumentWindow {
                     if kind == WindowKind::Document {
                         DocumentWindow::roll_closing(roll, d);
                         DocumentWindow::charts_closing(pane_chart, controllers_chart, d);
+                        DocumentWindow::drum_closing(drum_grid, d);
                     }
                 });
                 match kind {
@@ -2363,8 +2367,12 @@ impl Render for DocumentWindow {
             }
         }
         match &drummed {
-            Some(g) if g.playing() => window.request_animation_frame(),
-            Some(_) => {}
+            Some(g) => {
+                self.drum_grid.follow(g);
+                if g.playing() {
+                    window.request_animation_frame();
+                }
+            }
             None => self.drum_detach(window, cx),
         }
         // The picker's track went: so does the picker.
