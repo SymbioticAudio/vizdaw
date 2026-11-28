@@ -6225,3 +6225,74 @@ fn gpui_modify_strip_chart_line_sets_velocities() {
     });
     app.quit();
 }
+
+/// README steps 87-88 in the docked pane (10d Ruling 8): Beat's drum
+/// track opens in Editors › Drum Grid; its cells are elements; a click on
+/// an empty cell paints a hit and a click on it again erases it; Drum ›
+/// Add Drum Row and Timeline View run by ID; and the Timeline survives
+/// Save As and reopen.
+#[test]
+#[ignore = "needs a window server and VIZDAW_E2E_APP"]
+fn gpui_drum_grid_paints_and_erases_by_element() {
+    use core_control::ErrorCode;
+    use core_engine::fixtures::{Builder, Q};
+    let home = temp_home();
+    let mut app = App::start(home.path(), false);
+    let mut b = Builder::new();
+    let kit = b.dest("Kit", "builtin:synth", 9).unwrap();
+    let (seq, drums) = b.sequence("Beat", "Drums", Some(kit)).unwrap();
+    b.drum_rows(seq, drums, &[("Kick", 36), ("Snare", 38)])
+        .unwrap();
+    b.notes(seq, drums, &[(0, 36, 0x8000, Q / 4)]).unwrap();
+    let path = home.path().join("Beat.vizdaw");
+    core_model::file::save(&b.finish(), &path).unwrap();
+    let w = app.call("app.open", json!({"path": path}))["window"].clone();
+    app.wait(&w, json!({"condition": "documents_at_least", "count": 1}));
+
+    // 1. No grid yet: the Drum menu's row commands are unavailable.
+    let e = app.call_err("command.run", json!({"id": "drum.split_row", "window": w}));
+    assert_eq!(e.code, ErrorCode::Unavailable, "{e:?}");
+
+    // 2. The Drums block in the Drum Grid, in the bottom pane.
+    let block = wait_in_tree(&mut app, &w, "the Drums block", |n| block_on(n, "Drums"));
+    app.call("ui.click", json!({"window": w, "element": block}));
+    run_in(&mut app, &w, "editors.drum_grid", json!({}));
+    wait_for_editor(&mut app, &w, "the Drum Grid", |e| {
+        e["detail"]["kind"] == "drum_grid"
+    });
+
+    // 3. The Kick's hit at bar 1 is on; a click on the Snare's first cell
+    // paints it, and a click on the hit erases it.
+    wait_for_node(&mut app, &w, "Kick, bar 1 beat 1, on, velocity 64");
+    let cell = wait_for_node(&mut app, &w, "Snare, bar 1 beat 1, off");
+    app.call("ui.click", json!({"window": w, "element": cell["id"]}));
+    wait_for_undo(&mut app, &w, "Paint Drum Hits");
+    let hit = wait_for_node(&mut app, &w, "Snare, bar 1 beat 1, on, velocity 100");
+    app.call("ui.click", json!({"window": w, "element": hit["id"]}));
+    wait_for_undo(&mut app, &w, "Erase Drum Hits");
+
+    // 4. The Drum menu by ID: a row for the next kit note (the core's undo
+    // name is "Add Drum Row" too), then the timeline.
+    run_in(&mut app, &w, "drum.add_row", json!({}));
+    wait_for_undo(&mut app, &w, "Add Drum Row");
+    wait_for_node(&mut app, &w, "Closed Hat, bar 1 beat 1, off");
+    run_in(&mut app, &w, "drum.timeline", json!({"on": true}));
+    wait_for_role_value(&mut app, &w, "menu", "View", "Timeline");
+    wait_in_tree(&mut app, &w, "the timeline's hits only", |t| {
+        let kick = find_node(t, "Kick, bar 1 beat 1, on, velocity 64");
+        let hat = find_node(t, "Closed Hat, bar 1 beat 1, off");
+        (kick.is_some() && hat.is_none()).then_some(())
+    });
+
+    // 5. The Timeline is saved with the project.
+    let saved = home.path().join("Beat 2.vizdaw");
+    run_in(&mut app, &w, "file.save_as", json!({"path": saved}));
+    app.call("command.run", json!({"id": "file.close", "window": w}));
+    let w2 = app.call("app.open", json!({"path": saved}))["window"].clone();
+    app.wait(&w2, json!({"condition": "documents_at_least", "count": 1}));
+    wait_for_editor(&mut app, &w2, "the reopened Drum Grid", |e| {
+        e["detail"]["kind"] == "drum_grid"
+    });
+    wait_for_role_value(&mut app, &w2, "menu", "View", "Timeline");
+    app.quit();
+}
