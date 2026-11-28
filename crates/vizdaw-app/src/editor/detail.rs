@@ -29,10 +29,12 @@ impl DetailEditorKind {
         DetailEditorKind::DrumGrid,
     ];
 
-    /// This app has the editor (the Strip Chart and the Drum Grid come
-    /// in later slices).
+    /// This app has the editor (the Drum Grid comes in a later slice).
     pub fn is_available(self) -> bool {
-        matches!(self, DetailEditorKind::PianoRoll | DetailEditorKind::List)
+        matches!(
+            self,
+            DetailEditorKind::PianoRoll | DetailEditorKind::List | DetailEditorKind::StripChart
+        )
     }
 
     pub fn title(self) -> &'static str {

@@ -192,6 +192,7 @@ fn the_menu_model_follows_the_swift_order() {
         [
             Some("editors.piano_roll"),
             Some("editors.list"),
+            Some("editors.strip_chart"),
             None,
             Some("editors.close_detail"),
             Some("editors.insert_event"),
@@ -669,6 +670,12 @@ fn off_macos_the_command_keys_own_the_control_keys() {
     assert_eq!(
         menus::key_text("editors.piano_roll", &keymap, false).as_deref(),
         Some("⌘1")
+    );
+    // ⌘3 is Ctrl+3 off macOS; no ⌃3 chord exists, so nothing yields.
+    assert_eq!(menus::owner(&c("⌃3"), &keymap, false), Some(c("⌘3")));
+    assert_eq!(
+        menus::key_text("editors.strip_chart", &keymap, false).as_deref(),
+        Some("⌘3")
     );
     assert_eq!(
         menus::key_text("ui.toggle_left", &keymap, false).as_deref(),

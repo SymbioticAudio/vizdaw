@@ -290,23 +290,60 @@ fn a_block_target_at_the_tick_limits_does_not_overflow() {
     }
 }
 
+/// The editors this app has: the Piano Roll, the List and the Strip
+/// Chart (slice 10c); the Drum Grid comes later.
+#[test]
+fn the_strip_chart_is_available() {
+    let available: Vec<_> = DetailEditorKind::ALL
+        .into_iter()
+        .filter(|k| k.is_available())
+        .collect();
+    assert_eq!(
+        available,
+        [
+            DetailEditorKind::PianoRoll,
+            DetailEditorKind::List,
+            DetailEditorKind::StripChart
+        ]
+    );
+}
+
+/// A song saved with a Strip Chart as the last used editor: a
+/// double-click opens it.
+#[test]
+fn a_saved_strip_chart_last_editor_opens_the_chart() {
+    let f = Arc::new(editor_fake());
+    f.set_layout(Some(r#"{"lastKind":"stripChart"}"#));
+    let mut m = model(&f);
+    m.open_detail(block(0, 10), None);
+    assert_eq!(m.detail_kind_name(), "strip_chart");
+}
+
 /// A song saved with an editor this app does not have yet as the last
-/// used one (Strip Chart, Drum Grid): a double-click opens the Piano
-/// Roll, and the saved last-used editor stays.
+/// used one (the Drum Grid): a double-click opens the Piano Roll, and the
+/// saved last-used editor stays.
 #[test]
 fn an_unported_last_editor_opens_the_piano_roll() {
-    for (json, kind) in [
-        ("stripChart", DetailEditorKind::StripChart),
-        ("drumGrid", DetailEditorKind::DrumGrid),
-    ] {
-        let f = Arc::new(editor_fake());
-        f.set_layout(Some(&format!(r#"{{"lastKind":"{json}"}}"#)));
-        let mut m = model(&f);
-        assert_eq!(m.layout().last_kind, kind);
-        m.open_detail(block(0, 10), None);
-        assert_eq!(m.detail_kind_name(), "piano_roll", "{json}");
-        assert_eq!(m.layout().last_kind, kind, "{json} stays the saved one");
-        let v: serde_json::Value = serde_json::from_str(&m.layout().encoded()).unwrap();
-        assert_eq!(v["lastKind"], json);
-    }
+    let (json, kind) = ("drumGrid", DetailEditorKind::DrumGrid);
+    let f = Arc::new(editor_fake());
+    f.set_layout(Some(&format!(r#"{{"lastKind":"{json}"}}"#)));
+    let mut m = model(&f);
+    assert_eq!(m.layout().last_kind, kind);
+    m.open_detail(block(0, 10), None);
+    assert_eq!(m.detail_kind_name(), "piano_roll");
+    assert_eq!(m.layout().last_kind, kind, "the saved one stays");
+    let v: serde_json::Value = serde_json::from_str(&m.layout().encoded()).unwrap();
+    assert_eq!(v["lastKind"], json);
+}
+
+/// `editors.strip_chart` (⌘3) shows the Strip Chart; the torn-off window
+/// comes later.
+#[test]
+fn editors_strip_chart_shows_the_chart() {
+    let f = Arc::new(editor_fake());
+    let mut m = model(&f);
+    assert!(commands::EDITOR_COMMANDS.contains(&"editors.strip_chart"));
+    assert!(!commands::EDITOR_COMMANDS.contains(&"editors.strip_chart_window"));
+    commands::run("editors.strip_chart", &[], &mut m).unwrap();
+    assert_eq!(m.detail_kind_name(), "strip_chart");
 }

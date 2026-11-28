@@ -250,7 +250,10 @@ fn editors_list_opens_the_list_on_the_shown_sequence(cx: &mut TestAppContext) {
         .filter(|e| e.role == "menuitem")
         .map(|e| e.label)
         .collect();
-    assert_eq!(items, ["Piano Roll", "List", "Audio Editor", "Mixer"]);
+    assert_eq!(
+        items,
+        ["Piano Roll", "List", "Strip Chart", "Audio Editor", "Mixer"]
+    );
     assert!(s.element("menuitem", "List").selected);
     s.click("menuitem", "List");
     assert!(s.find("menuitem", "List").is_none(), "the menu closes");

@@ -44,6 +44,7 @@ pub const EDITOR_COMMANDS: &[&str] = &[
     "editors.snap",
     "editors.piano_roll",
     "editors.list",
+    "editors.strip_chart",
     "editors.close_detail",
     "editors.insert_event",
     "editors.nudge_earlier",
@@ -765,9 +766,9 @@ pub(crate) fn on_flag(id: &str, args: &[(String, ArgValue)]) -> Result<Option<bo
     }
 }
 
-/// An editor command: Snap to Grid (`on`, absent toggles), List (opens on
-/// the open detail's target or the selection; nothing to show opens
-/// nothing), Close Detail Editor, Insert Event and the nudges (with the
+/// An editor command: Snap to Grid (`on`, absent toggles), Piano Roll,
+/// List and Strip Chart (each opens on the open detail's target or the
+/// selection; nothing to show opens nothing), Close Detail Editor, Insert Event and the nudges (with the
 /// settings the UI handed the document).
 fn run_editor(
     id: &str,
@@ -782,6 +783,7 @@ fn run_editor(
         }
         "editors.piano_roll" => doc.show_detail(DetailEditorKind::PianoRoll),
         "editors.list" => doc.show_detail(DetailEditorKind::List),
+        "editors.strip_chart" => doc.show_detail(DetailEditorKind::StripChart),
         "editors.insert_event" => {
             if !insert_event_ready(doc) {
                 return Err(unavailable(NO_LIST));

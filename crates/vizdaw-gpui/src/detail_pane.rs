@@ -15,6 +15,7 @@ use crate::list_editor::{self, ListEditor, ListState};
 use crate::piano_roll::{self, PianoRoll, RollState};
 use crate::registry::RegistryScope;
 use crate::shell::DocumentWindow;
+use crate::strip_chart::{self, StripChart, StripChartState};
 use crate::transport_bar::{self, colors};
 
 /// The pane's group in the tree, and its picker's label (Swift
@@ -46,18 +47,19 @@ impl DetailPaneState {
 }
 
 /// The editor area: the open detail, or the empty state. `list` is the
-/// List editor's, when one is open, and `roll` the Piano Roll's. `scope`
-/// is the area's own container.
+/// List editor's, when one is open, `roll` the Piano Roll's and `chart`
+/// the Strip Chart's. `scope` is the area's own container.
 pub(crate) fn render(
     state: &DetailPaneState,
     list: Option<(&ListEditor, &ListState)>,
     roll: Option<(&PianoRoll, RollState)>,
+    chart: Option<(&StripChart, StripChartState)>,
     scope: &mut RegistryScope,
     window: &Window,
     cx: &mut Context<DocumentWindow>,
 ) -> AnyElement {
     match &state.detail {
-        Some((kind, title)) => detail(*kind, title, list, roll, scope, window, cx),
+        Some((kind, title)) => detail(*kind, title, list, roll, chart, scope, window, cx),
         None => empty_state(scope),
     }
 }
@@ -69,11 +71,13 @@ pub(crate) fn divider() -> impl IntoElement {
 
 /// The open detail (Swift `DetailPane`): its title and close button, a
 /// divider, then the editor.
+#[allow(clippy::too_many_arguments)]
 fn detail(
     kind: DetailEditorKind,
     title: &str,
     list: Option<(&ListEditor, &ListState)>,
     roll: Option<(&PianoRoll, RollState)>,
+    chart: Option<(&StripChart, StripChartState)>,
     scope: &mut RegistryScope,
     window: &Window,
     cx: &mut Context<DocumentWindow>,
@@ -111,8 +115,8 @@ fn detail(
                 this.with_model(cx, DocumentModel::close_detail);
             })),
         );
-    let editor = match (kind, list, roll) {
-        (DetailEditorKind::PianoRoll, _, Some((roll, state))) => div()
+    let editor = match (kind, list, roll, chart) {
+        (DetailEditorKind::PianoRoll, _, Some((roll, state)), _) => div()
             .flex()
             .flex_col()
             .flex_1()
@@ -124,13 +128,25 @@ fn detail(
                 window,
                 cx,
             )),
-        (DetailEditorKind::List, Some((editor, state)), _) => div()
+        (DetailEditorKind::List, Some((editor, state)), _, _) => div()
             .flex()
             .flex_col()
             .flex_1()
             .min_h_0()
             .child(list_editor::render(
                 editor,
+                state,
+                &mut scope.container(),
+                window,
+                cx,
+            )),
+        (DetailEditorKind::StripChart, _, _, Some((chart, state))) => div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(strip_chart::render(
+                chart,
                 state,
                 &mut scope.container(),
                 window,

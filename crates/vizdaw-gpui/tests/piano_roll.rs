@@ -1341,7 +1341,7 @@ fn the_key_strip_keeps_to_its_keys(cx: &mut TestAppContext) {
 /// double-click opens the Piano Roll, and a save keeps the saved value.
 #[gpui::test]
 fn an_unported_last_editor_double_click_opens_the_roll(cx: &mut TestAppContext) {
-    for json in ["stripChart", "drumGrid"] {
+    for json in ["drumGrid"] {
         let fake = roll_fake();
         fake.set_layout(Some(&format!(r#"{{"lastKind":"{json}"}}"#)));
         let mut s = setup(cx, fake);
