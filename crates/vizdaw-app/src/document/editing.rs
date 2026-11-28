@@ -199,7 +199,9 @@ impl DocumentModel {
         if self.layout().views.setup(main).bottom.view != PaneView::Editor {
             self.end_pane_edits();
         }
+        let before = self.layout().detail.clone();
         self.editor.open_detail_in(target, kind, main);
+        self.detail_changed(before);
     }
 
     /// ⌘1–⌘4: the detail pane shows `kind`, on its current target or on
@@ -230,8 +232,11 @@ impl DocumentModel {
         self.open_detail(target, None);
     }
 
+    /// Closes the detail; a Strip Chart stroke in it is cancelled.
     pub fn close_detail(&mut self) {
+        let before = self.layout().detail.clone();
         self.editor.close_detail();
+        self.detail_changed(before);
     }
 
     /// The control channel's detail kind ("none" when nothing is open).

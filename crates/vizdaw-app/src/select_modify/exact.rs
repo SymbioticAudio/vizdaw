@@ -15,13 +15,15 @@ use super::{ModifyConfig, PanelTask};
 use crate::arrangement::PPQ;
 
 /// Which gesture a drag came from; only note and block drags go exact
-/// (`M/ExactMode.swift:6-11`). The Strip Chart origin is not ported.
+/// (`M/ExactMode.swift:6-11`). A Strip Chart stroke applies as usual
+/// until its Exact Mode request is ported (slice 10c Task 7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum GestureOrigin {
     Notes,
     Blocks,
     RegionStrip,
     Expression,
+    StripChart,
     #[default]
     Other,
 }

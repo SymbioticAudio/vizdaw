@@ -11,15 +11,22 @@ use support::{
     FakeSession, dest_row, mixer_fake, note_row, roll_fake, slot_row, strip_row, vca_row,
 };
 use vizdaw_app::DocumentModel;
+use vizdaw_app::editor::GESTURE_OPEN;
 use vizdaw_app::editor::{DetailEditorKind, EditorTarget};
+use vizdaw_app::select_modify::GestureOrigin;
 use vizdaw_app::strip_chart::{
-    AutomationTargets, ChartSlot, MAX_ROWS, StripLane, StripMenu, only_target, opening, v32,
+    AutomationTargets, ChartSlot, ERASE_NOTES, MAX_ROWS, StripLane, StripMenu, StripMode, StripOp,
+    StripPoint, erase_command, line_command, only_target, opening, v32,
 };
 use vizdaw_ffi::VizError;
 use vizdaw_ffi::automation::PreviewPointRow;
+use vizdaw_ffi::edit::{EditCommand, LaneRef};
 use vizdaw_ffi::events::{AutomationRow, AutomationTargetRow as T, EventKindRow, EventRow};
 use vizdaw_ffi::mixer::{BusRow, MixerSnapshot, StripKindRow, VcaRow};
+use vizdaw_ffi::modify::SelectModeRow;
+use vizdaw_ffi::selection::SelectionRow;
 use vizdaw_ffi::snapshot::ParamRow;
+use vizdaw_ffi::strip::{LineOpRow, LineRow, LineShapeRow};
 
 const PANE: ChartSlot = ChartSlot::Pane;
 const CONTROLLERS: ChartSlot = ChartSlot::Controllers;
@@ -633,4 +640,239 @@ fn a_busy_first_read_keeps_saved_automation_rows_through_an_edit() {
         vec![auto(T::StripFader { strip: 1 }), StripLane::PitchBend],
         "once read, a gone target's row is dropped"
     );
+}
+
+// MARK: Strokes (Task 4)
+
+const Q: i64 = 15_360;
+
+fn pt(tick: i64, value: i64) -> StripPoint {
+    StripPoint { tick, value }
+}
+
+/// `make(chords())` with the pane's seed 7 and no calls yet.
+fn stroking() -> (Arc<FakeSession>, DocumentModel) {
+    let (f, mut m) = make(chords());
+    m.set_strip_seed_for_test(PANE, 7);
+    f.clear_calls();
+    (f, m)
+}
+
+fn gesture_label(m: &DocumentModel) -> Option<String> {
+    m.gesture().map(|g| g.label.clone())
+}
+
+#[test]
+fn a_draw_drag_is_one_gesture_on_the_shown_lane() {
+    let (f, mut m) = stroking();
+    m.strip_stroke_began(PANE, 0, pt(0, 100), false);
+    assert!(
+        f.calls().is_empty(),
+        "nothing opens before the pointer moves"
+    );
+    m.strip_stroke_moved(PANE, pt(Q, 200));
+    assert_eq!(m.selection().lanes, vec![LaneRef { seq: 3, lane: 31 }]);
+    assert_eq!(gesture_label(&m).as_deref(), Some("Change Velocity"));
+    assert_eq!(m.gesture().unwrap().origin, GestureOrigin::StripChart);
+    let line = LineRow {
+        from: 0,
+        to: Q,
+        start: 100,
+        end: 200,
+        step: Q / 8,
+        shape: LineShapeRow::Straight,
+    };
+    assert_eq!(
+        f.gesture_edits().last(),
+        Some(&line_command(
+            StripLane::Velocity,
+            LineOpRow::Set,
+            line,
+            false
+        ))
+    );
+    m.strip_stroke_ended(PANE, pt(Q, 200));
+    assert!(m.gesture().is_none());
+    assert_eq!(f.calls().last().map(String::as_str), Some("end_edit"));
+    assert!(m.strip_stroke(PANE).is_none());
+}
+
+#[test]
+fn a_click_in_draw_mode_draws_one_point() {
+    let (f, mut m) = stroking();
+    m.set_strip_row(PANE, 0, StripLane::Controller(1));
+    f.clear_calls();
+    m.strip_stroke_began(PANE, 0, pt(Q, 5), false);
+    m.strip_stroke_ended(PANE, pt(Q, 5));
+    let line = LineRow {
+        from: Q,
+        to: Q,
+        start: 5,
+        end: 5,
+        step: Q / 8,
+        shape: LineShapeRow::Straight,
+    };
+    assert_eq!(
+        f.gesture_edits().last(),
+        Some(&line_command(
+            StripLane::Controller(1),
+            LineOpRow::Draw,
+            line,
+            false
+        ))
+    );
+    let calls = f.calls();
+    assert_eq!(
+        calls.first().map(String::as_str),
+        Some("begin_edit(Draw Controllers)")
+    );
+    assert_eq!(calls.last().map(String::as_str), Some("end_edit"));
+    // A click in Modify mode does nothing.
+    m.update_strip_settings(|s| s.mode = StripMode::Modify);
+    f.clear_calls();
+    m.strip_stroke_began(PANE, 0, pt(Q, 5), false);
+    m.strip_stroke_ended(PANE, pt(Q, 5));
+    assert!(f.calls().is_empty(), "{:?}", f.calls());
+    assert!(m.strip_stroke(PANE).is_none());
+}
+
+#[test]
+fn a_modify_line_keeps_the_selected_lanes_and_option_refines() {
+    let (f, mut m) = stroking();
+    m.set_selection(SelectionRow {
+        time_range: None,
+        lanes: vec![LaneRef { seq: 3, lane: 32 }],
+        events: vec![3],
+    });
+    let sets = f.count("set_selection");
+    m.update_strip_settings(|s| {
+        s.mode = StripMode::Modify;
+        s.op = StripOp::Add;
+    });
+    m.strip_stroke_began(PANE, 0, pt(0, -5), true);
+    m.strip_stroke_moved(PANE, pt(Q, 5));
+    assert_eq!(f.count("set_selection"), sets, "the selection's lanes stay");
+    let lanes: Vec<_> = m.gesture().unwrap().lanes.iter().copied().collect();
+    assert_eq!(lanes, vec![(3, 32)]);
+    match f.gesture_edits().last() {
+        Some(EditCommand::SelectAndModify { mode, .. }) => assert_eq!(*mode, SelectModeRow::Refine),
+        other => panic!("no line: {other:?}"),
+    }
+    m.strip_stroke_cancelled(PANE);
+    assert!(m.gesture().is_none());
+}
+
+#[test]
+fn a_refused_stroke_leaves_the_selection_alone() {
+    // Another editor's gesture is open, so the draw is refused and the
+    // selection keeps its tracks.
+    let (f, mut m) = stroking();
+    let before = SelectionRow {
+        time_range: None,
+        lanes: vec![LaneRef { seq: 3, lane: 32 }],
+        events: vec![3],
+    };
+    m.set_selection(before.clone());
+    assert!(m.begin_gesture_from("Other", vec![(3, 32)], GestureOrigin::Notes));
+    let sets = f.count("set_selection");
+    m.strip_stroke_began(PANE, 0, pt(0, 100), false);
+    m.strip_stroke_moved(PANE, pt(Q, 200));
+    assert_eq!(m.status(), Some(GESTURE_OPEN));
+    assert_eq!(f.count("set_selection"), sets, "no selection change");
+    assert_eq!(m.selection(), &before);
+    assert_eq!(gesture_label(&m).as_deref(), Some("Other"));
+    assert!(m.strip_stroke(PANE).is_none());
+    // Its release ends nothing of the other gesture.
+    m.strip_stroke_ended(PANE, pt(Q, 200));
+    assert_eq!(gesture_label(&m).as_deref(), Some("Other"));
+    m.cancel_gesture();
+}
+
+#[test]
+fn a_new_stroke_cancels_one_whose_mouse_up_was_lost() {
+    let (f, mut m) = stroking();
+    m.strip_stroke_began(PANE, 0, pt(0, 1), false);
+    m.strip_stroke_moved(PANE, pt(Q, 2));
+    assert!(m.gesture().is_some());
+    m.strip_stroke_began(PANE, 0, pt(2 * Q, 3), false);
+    assert_eq!(f.calls().last().map(String::as_str), Some("abort_edit"));
+    assert!(m.gesture().is_none());
+    m.strip_stroke_moved(PANE, pt(3 * Q, 4));
+    assert_eq!(
+        gesture_label(&m).as_deref(),
+        Some("Change Velocity"),
+        "the new stroke draws"
+    );
+    m.strip_stroke_ended(PANE, pt(3 * Q, 4));
+    assert!(m.gesture().is_none());
+    assert_eq!(f.calls().last().map(String::as_str), Some("end_edit"));
+    assert!(!f.edit_is_open());
+}
+
+#[test]
+fn escape_leaves_no_undo_step() {
+    let (f, mut m) = stroking();
+    m.strip_stroke_began(PANE, 0, pt(0, 1), false);
+    m.strip_stroke_moved(PANE, pt(Q, 2));
+    m.strip_stroke_cancelled(PANE);
+    assert_eq!(f.calls().last().map(String::as_str), Some("abort_edit"));
+    assert!(m.gesture().is_none() && m.strip_stroke(PANE).is_none());
+    assert!(!f.edit_is_open());
+}
+
+#[test]
+fn erase_on_a_note_row_says_why() {
+    let (f, mut m) = stroking();
+    m.update_strip_settings(|s| s.mode = StripMode::Erase);
+    f.clear_calls();
+    m.strip_stroke_began(PANE, 0, pt(0, 1), false);
+    m.strip_stroke_moved(PANE, pt(Q, 2));
+    assert_eq!(m.status(), Some(ERASE_NOTES));
+    assert_eq!(
+        ERASE_NOTES,
+        "Erase works on controller, program and automation rows."
+    );
+    assert!(f.calls().is_empty() && m.gesture().is_none());
+    m.set_strip_row(PANE, 0, StripLane::Controller(7));
+    m.strip_stroke_began(PANE, 0, pt(0, 1), false);
+    m.strip_stroke_moved(PANE, pt(Q, 2));
+    assert_eq!(gesture_label(&m).as_deref(), Some("Erase Events"));
+    assert_eq!(
+        f.gesture_edits().last(),
+        erase_command(StripLane::Controller(7), 0, Q).as_ref()
+    );
+    m.strip_stroke_ended(PANE, pt(Q, 2));
+    assert_eq!(f.calls().last().map(String::as_str), Some("end_edit"));
+}
+
+#[test]
+fn a_chart_that_stops_showing_drops_its_stroke() {
+    let (f, mut m) = stroking();
+    m.strip_stroke_began(PANE, 0, pt(0, 1), false);
+    m.strip_stroke_moved(PANE, pt(Q, 2));
+    assert!(m.gesture().is_some());
+    m.show_detail(DetailEditorKind::List);
+    assert_eq!(f.calls().last().map(String::as_str), Some("abort_edit"));
+    assert!(m.gesture().is_none() && m.strip_stroke(PANE).is_none());
+    // A press while the pane shows another editor draws nothing.
+    f.clear_calls();
+    m.strip_stroke_began(PANE, 0, pt(0, 1), false);
+    m.strip_stroke_moved(PANE, pt(Q, 2));
+    assert!(m.strip_stroke(PANE).is_none() && f.calls().is_empty());
+
+    m.show_detail(DetailEditorKind::StripChart);
+    m.strip_stroke_began(PANE, 0, pt(0, 1), false);
+    m.strip_stroke_moved(PANE, pt(Q, 2));
+    assert!(m.gesture().is_some());
+    m.close_detail();
+    assert_eq!(f.calls().last().map(String::as_str), Some("abort_edit"));
+    assert!(m.gesture().is_none() && m.strip_stroke(PANE).is_none());
+    assert!(!f.edit_is_open());
+
+    // A stroke that never opened goes too.
+    m.show_detail(DetailEditorKind::StripChart);
+    m.strip_stroke_began(PANE, 0, pt(0, 1), false);
+    assert!(m.strip_stroke(PANE).is_some());
+    m.open_detail(chords(), Some(DetailEditorKind::PianoRoll));
+    assert!(m.strip_stroke(PANE).is_none());
 }

@@ -5,14 +5,23 @@
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use vizdaw_ffi::edit::{EditCommand, LaneRef};
 use vizdaw_ffi::events::{AutomationTargetRow, EventKindRow, EventRow, MeterEntryRow};
+use vizdaw_ffi::selection::SelectionRow;
+use vizdaw_ffi::strip::LineOpRow;
 
 use super::{
-    AutomationTargets, MAX_ROWS, StripChartSettings, StripLane, StripMode, StripPoint, StripValue,
-    v32,
+    AutomationTargets, MAX_ROWS, StripChartSettings, StripLane, StripMode, StripOp, StripPoint,
+    StripValue, compress_command, erase_command, line_command, stroke_label, stroke_line,
+    stroke_op, v32,
 };
 use crate::document::DocumentModel;
-use crate::editor::{DetailEditorKind, DetailState, EditorTarget, controllers_key};
+use crate::editor::{DetailEditorKind, DetailState, EditorTarget, GESTURE_OPEN, controllers_key};
+use crate::select_modify::GestureOrigin;
+
+/// An Erase stroke on a row with no series to erase
+/// (`M/StripChartModel.swift:104`).
+pub const ERASE_NOTES: &str = "Erase works on controller, program and automation rows.";
 
 /// Which chart: the bottom pane's, or the right pane's Controllers (no
 /// window slot: torn-off editors come later, Ruling 12).
@@ -40,6 +49,9 @@ pub struct StripStroke {
     pub seed: u64,
     /// Its gesture is open.
     pub open: bool,
+    /// The serial of the gesture it opened: a stroke whose gesture went
+    /// (its track removed) never touches another one.
+    pub serial: Option<u64>,
 }
 
 /// One chart's own state; not saved.
@@ -370,5 +382,255 @@ impl DocumentModel {
                 ramp: true,
             })
             .collect()
+    }
+}
+
+/// A fresh random-line seed: a counter through splitmix64, xored with the
+/// clock, so two strokes always differ (as `next_seed` of Select and
+/// Modify).
+fn fresh_seed() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    let n = COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    let mut z = n.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    z ^ (now & 0xFFFF_0000_0000_0000)
+}
+
+// MARK: Strokes
+
+impl DocumentModel {
+    /// The stroke in progress in `slot`'s chart.
+    pub fn strip_stroke(&self, slot: ChartSlot) -> Option<&StripStroke> {
+        self.strip_chart(slot).stroke.as_ref()
+    }
+
+    /// Every later stroke in `slot` seeds its random line with `seed`.
+    pub fn set_strip_seed_for_test(&mut self, slot: ChartSlot, seed: u64) {
+        self.strip_chart_mut(slot).seed = Some(seed);
+    }
+
+    /// `slot`'s chart is on screen: the pane's while its detail is a
+    /// Strip Chart; the Controllers' while it has a track.
+    fn strip_showing(&self, slot: ChartSlot) -> bool {
+        match slot {
+            ChartSlot::Pane => self
+                .layout()
+                .detail
+                .as_ref()
+                .is_some_and(|d| d.kind == DetailEditorKind::StripChart),
+            ChartSlot::Controllers => self.strip_state(slot).is_some(),
+        }
+    }
+
+    /// The open gesture is `s`'s own.
+    fn owns(&self, s: &StripStroke) -> bool {
+        s.open && s.serial.is_some() && self.gesture_serial() == s.serial
+    }
+
+    /// The pointer went down on row `row` at `p` (`selected_only`: ⌥, Alt
+    /// off macOS). A stroke still held (its release was lost) is
+    /// cancelled first; nothing opens before the pointer moves
+    /// (`M/StripChartModel.swift:333-342`).
+    pub fn strip_stroke_began(
+        &mut self,
+        slot: ChartSlot,
+        row: usize,
+        p: StripPoint,
+        selected_only: bool,
+    ) {
+        if self.strip_stroke(slot).is_some() {
+            self.strip_stroke_cancelled(slot);
+        }
+        if !self.strip_showing(slot) || self.strip_lane(slot).is_none() {
+            return;
+        }
+        let Some(&lane) = self.strip_rows(slot).get(row) else {
+            return;
+        };
+        let set = *self.strip_settings();
+        let seed = self.strip_chart(slot).seed.unwrap_or_else(fresh_seed);
+        self.strip_chart_mut(slot).stroke = Some(StripStroke {
+            row,
+            lane,
+            start: p,
+            current: p,
+            points: vec![p],
+            mode: set.mode,
+            compress: set.mode == StripMode::Modify && set.op == StripOp::Compress,
+            selected_only,
+            seed,
+            open: false,
+            serial: None,
+        });
+    }
+
+    /// The pointer moved past the view's dead zone: the first move opens
+    /// the gesture, each one re-sends the stroke's full command
+    /// (`M/StripChartModel.swift:344-358`).
+    pub fn strip_stroke_moved(&mut self, slot: ChartSlot, p: StripPoint) {
+        let Some(mut s) = self.strip_chart_mut(slot).stroke.take() else {
+            return;
+        };
+        if !self.strip_showing(slot) {
+            if self.owns(&s) {
+                self.cancel_gesture();
+            }
+            return;
+        }
+        s.current = p;
+        s.points.push(p);
+        if s.open {
+            // Its gesture went under it (its track was removed).
+            if !self.owns(&s) {
+                return;
+            }
+        } else if !self.open_stroke(slot, &mut s) {
+            return;
+        }
+        let cmd = self.stroke_command(&s);
+        self.strip_chart_mut(slot).stroke = Some(s);
+        self.update_gesture(cmd);
+    }
+
+    /// The pointer went up at `p`: the stroke's final command closes its
+    /// gesture as one undo step. A click in Draw or Erase is a one-tick
+    /// gesture; in Modify it does nothing
+    /// (`M/StripChartModel.swift:360-370`).
+    pub fn strip_stroke_ended(&mut self, slot: ChartSlot, p: StripPoint) {
+        let Some(mut s) = self.strip_chart_mut(slot).stroke.take() else {
+            return;
+        };
+        if !self.strip_showing(slot) {
+            if self.owns(&s) {
+                self.cancel_gesture();
+            }
+            return;
+        }
+        s.current = p;
+        if s.points.last() != Some(&p) {
+            s.points.push(p);
+        }
+        if s.open {
+            if !self.owns(&s) {
+                return;
+            }
+        } else if s.mode == StripMode::Modify || !self.open_stroke(slot, &mut s) {
+            return;
+        }
+        let cmd = self.stroke_command(&s);
+        self.end_gesture(cmd);
+    }
+
+    /// Escape, or the chart went away: no undo step
+    /// (`M/StripChartModel.swift:372-376`).
+    pub fn strip_stroke_cancelled(&mut self, slot: ChartSlot) {
+        if let Some(s) = self.strip_chart_mut(slot).stroke.take()
+            && self.owns(&s)
+        {
+            self.cancel_gesture();
+        }
+    }
+
+    /// The pane's detail changed from `before`: a stroke of a pane that no
+    /// longer shows that Strip Chart (another editor, another target, or
+    /// none) is cancelled (Review Focus 1).
+    pub(crate) fn detail_changed(&mut self, before: Option<DetailState>) {
+        if self.strip_stroke(ChartSlot::Pane).is_none() {
+            return;
+        }
+        let now = self.layout().detail.as_ref();
+        let same = match (before.as_ref(), now) {
+            (Some(b), Some(n)) => b.kind == n.kind && b.target == n.target,
+            _ => false,
+        };
+        if !same || !self.strip_showing(ChartSlot::Pane) {
+            self.strip_stroke_cancelled(ChartSlot::Pane);
+        }
+    }
+
+    /// The stroke's command (`M/StripChartModel.swift:378-392`): the
+    /// bar's settings now, with the stroke's own mode.
+    fn stroke_command(&self, s: &StripStroke) -> Option<EditCommand> {
+        let mut set = *self.strip_settings();
+        set.mode = s.mode;
+        match s.mode {
+            StripMode::Erase => erase_command(s.lane, s.start.tick, s.current.tick),
+            StripMode::Modify if s.compress => Some(compress_command(
+                s.lane,
+                s.start,
+                s.current,
+                set.step,
+                s.selected_only,
+            )),
+            _ => {
+                let line = stroke_line(s.start, s.current, &s.points, &set, s.seed);
+                Some(line_command(
+                    s.lane,
+                    stroke_op(s.lane, &set),
+                    line,
+                    s.selected_only,
+                ))
+            }
+        }
+    }
+
+    /// Opens the stroke's gesture on its tracks (Plan 4d Ruling 22,
+    /// `M/StripChartModel.swift:362-393`): Modify keeps the selection's
+    /// tracks when there are any, else the shown track. Only a stroke
+    /// that opened moves the selection to its track.
+    fn open_stroke(&mut self, slot: ChartSlot, s: &mut StripStroke) -> bool {
+        let Some(lane) = self.strip_lane(slot) else {
+            return false;
+        };
+        if s.mode == StripMode::Erase && s.lane.erase_rule(0, 0).is_none() {
+            self.status = Some(ERASE_NOTES.into());
+            return false;
+        }
+        let sel = self.selection().clone();
+        let keep = s.mode == StripMode::Modify && !sel.lanes.is_empty();
+        let lanes: Vec<(u64, u64)> = if keep {
+            sel.lanes.iter().map(|r| (r.seq, r.lane)).collect()
+        } else {
+            vec![lane]
+        };
+        let mut set = *self.strip_settings();
+        set.mode = s.mode;
+        let label = if s.mode == StripMode::Erase {
+            "Erase Events"
+        } else {
+            let op = if s.compress {
+                LineOpRow::Compress
+            } else {
+                stroke_op(s.lane, &set)
+            };
+            stroke_label(s.lane, op)
+        };
+        let pending = self.gesture().is_some();
+        if !self.begin_gesture_from(label, lanes, GestureOrigin::StripChart) {
+            if pending {
+                self.status = Some(GESTURE_OPEN.into());
+            }
+            return false;
+        }
+        let r = LaneRef {
+            seq: lane.0,
+            lane: lane.1,
+        };
+        if !keep && sel.lanes != [r] {
+            self.set_selection(SelectionRow {
+                time_range: sel.time_range,
+                lanes: vec![r],
+                events: sel.events,
+            });
+        }
+        s.open = true;
+        s.serial = self.gesture_serial();
+        true
     }
 }
