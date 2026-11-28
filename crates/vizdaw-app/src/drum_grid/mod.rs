@@ -1,10 +1,13 @@
 //! The Drum Grid's logic (Swift `DrumGrid.swift`, `DrumGridModel.swift`,
 //! `DrumCommands.swift`; Plan 4e): the bar's settings and length choices,
-//! and the grid's labels and messages. The grid's records and rules are
+//! the grid's labels and messages, and what the pane's grid shows. The grid's records and rules are
 //! the core's (`vizdaw_ffi::drum`). No GPUI; the view is the GPUI crate's.
 
+mod model;
 mod settings;
 mod text;
+
+pub use model::{DrumGridModel, DrumRowKey, drum_grid_offers};
 
 pub use settings::{DrumGridSettings, DrumView, LENGTHS, lengths_including, stepped_velocity};
 pub use text::{

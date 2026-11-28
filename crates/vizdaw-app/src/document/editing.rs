@@ -12,8 +12,8 @@ use super::{DocumentModel, empty_selection};
 use crate::alerts::error_message;
 use crate::arrangement::bar_at;
 use crate::editor::{
-    DetailEditorKind, EditorLayout, EditorModel, EditorTarget, GESTURE_OPEN, MainView, PaneView,
-    Tool,
+    DetailEditorKind, DetailState, EditorLayout, EditorModel, EditorTarget, GESTURE_OPEN, MainView,
+    PaneView, Tool,
 };
 
 impl DocumentModel {
@@ -200,6 +200,11 @@ impl DocumentModel {
             self.end_pane_edits();
         }
         let before = self.layout().detail.clone();
+        // Opening a track in the Drum Grid gives it a drum layout first
+        // (`M/EditorModel.swift:413`).
+        if self.editor.opening_kind(kind) == DetailEditorKind::DrumGrid {
+            self.prepare_drum_grid(target);
+        }
         self.editor.open_detail_in(target, kind, main);
         self.detail_changed(before);
     }
@@ -230,6 +235,13 @@ impl DocumentModel {
             end: block.end,
         };
         self.open_detail(target, None);
+    }
+
+    /// The pane's detail changed from `before`: the Strip Chart's and the
+    /// Drum Grid's follow.
+    pub(crate) fn detail_changed(&mut self, before: Option<DetailState>) {
+        self.strip_detail_changed(before.clone());
+        self.drum_detail_changed(before.as_ref());
     }
 
     /// Closes the detail; a Strip Chart stroke in it is cancelled.

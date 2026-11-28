@@ -8,7 +8,7 @@ mod support;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use support::{FakeSession, editor_fake, roll_fake};
+use support::{FakeSession, edit_calls, editor_fake, roll_fake};
 use vizdaw_app::DocumentModel;
 use vizdaw_app::arrangement::{
     ArrangementFrame, ArrangementHit, BlockDragState, Geometry, MachineEvent, Modifiers, Point,
@@ -324,14 +324,6 @@ fn open(exact: bool) -> (Arc<FakeSession>, DocumentModel) {
     open_with(exact, editor_fake())
 }
 
-/// The session calls of a drag: begins, gesture edits, ends and aborts.
-fn drag_calls(f: &FakeSession) -> Vec<String> {
-    f.calls()
-        .into_iter()
-        .filter(|c| c.starts_with("begin_edit") || c == "edit_gesture" || c.ends_with("_edit"))
-        .collect()
-}
-
 /// Whether the panel asked to be shown, and is open.
 fn presented(m: &mut DocumentModel) -> bool {
     m.take_modify_present() && m.select_modify().is_open()
@@ -344,7 +336,7 @@ fn an_exact_drag_leaves_no_undo_step_and_opens_the_panel() {
     m.update_gesture(Some(move200()));
     m.end_gesture(Some(move200()));
     assert_eq!(
-        drag_calls(&f),
+        edit_calls(&f),
         ["begin_edit(Move Notes)", "edit_gesture", "abort_edit"],
         "previewed, then put back"
     );
@@ -396,7 +388,7 @@ fn only_note_and_block_drags_go_exact() {
         let (f, mut m) = open(true);
         assert!(m.begin_gesture_from("Drag", vec![CHORDS], origin));
         m.end_gesture(Some(move200()));
-        assert_eq!(drag_calls(&f).last().unwrap(), "abort_edit", "{origin:?}");
+        assert_eq!(edit_calls(&f).last().unwrap(), "abort_edit", "{origin:?}");
         assert!(presented(&mut m), "{origin:?} opens the panel");
     }
 }
@@ -491,12 +483,12 @@ fn a_busy_revert_keeps_the_gesture_and_the_retry_opens_the_panel() {
     m.end_gesture(Some(mv(&[1], 300, None)));
     // The fake logs only the calls that went through: the Busy abort is
     // not in it.
-    assert_eq!(drag_calls(&f), ["begin_edit(Move Notes)", "edit_gesture"]);
+    assert_eq!(edit_calls(&f), ["begin_edit(Move Notes)", "edit_gesture"]);
     assert!(f.edit_is_open());
     m.tick();
     assert!(m.gesture().is_none());
     assert_eq!(
-        drag_calls(&f),
+        edit_calls(&f),
         ["begin_edit(Move Notes)", "edit_gesture", "abort_edit"]
     );
     assert!(presented(&mut m), "the revert succeeded on the retry");
@@ -543,13 +535,13 @@ fn escape_on_a_busy_abort_is_retried_by_the_tick() {
     m.update_gesture(None);
     m.end_gesture(Some(move200()));
     assert_eq!(
-        drag_calls(&f),
+        edit_calls(&f),
         ["begin_edit(Move Notes)", "edit_gesture"],
         "a reverting gesture takes no more edits (the Busy abort is not logged)"
     );
     m.tick();
     assert!(m.gesture().is_none());
-    assert_eq!(drag_calls(&f).last().unwrap(), "abort_edit");
+    assert_eq!(edit_calls(&f).last().unwrap(), "abort_edit");
     assert!(!presented(&mut m));
     assert_eq!(f.count("abort_edit"), 1);
     assert!(!f.edit_is_open());
@@ -628,7 +620,7 @@ fn an_arrangement_block_drag_goes_exact() {
     v.drag(&mut m, Point { x: 300., y: 70. });
     v.up(&mut m, Point { x: 300., y: 70. });
     assert_eq!(
-        drag_calls(&f),
+        edit_calls(&f),
         ["begin_edit(Move Block)", "edit_gesture", "abort_edit"]
     );
     assert!(presented(&mut m));
@@ -726,7 +718,7 @@ fn a_piano_roll_note_drag_goes_exact_but_a_pencil_click_does_not() {
     };
     v.down(&mut m, q, Modifiers::NONE);
     v.up(&mut m, q, Modifiers::NONE);
-    assert_eq!(drag_calls(&f).last().unwrap(), "end_edit", "pencil applies");
+    assert_eq!(edit_calls(&f).last().unwrap(), "end_edit", "pencil applies");
     assert!(!presented(&mut m));
 }
 

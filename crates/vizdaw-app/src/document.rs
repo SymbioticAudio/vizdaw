@@ -177,6 +177,8 @@ pub struct DocumentModel {
     /// The bottom pane's and the Controllers' Strip Charts, and the
     /// automation targets they share (slice 10c).
     pub(crate) strip_charts: crate::strip_chart::StripCharts,
+    /// The bottom pane's Drum Grid (slice 10d).
+    pub(crate) drum_grid: crate::drum_grid::DrumGridModel,
 }
 
 /// What the arrangement reads of one track, read when first asked for.
@@ -314,6 +316,7 @@ impl DocumentModel {
             select_modify: Default::default(),
             nudge_settings: Default::default(),
             strip_charts: Default::default(),
+            drum_grid: Default::default(),
         };
         model.refresh_project_info();
         // The time left reads the core's free space from the start.
@@ -413,6 +416,10 @@ impl DocumentModel {
         }
         // A waiting learn's banner and the open maps sheet follow the core.
         if self.learn_tick() {
+            arrived = true;
+        }
+        // A failed drum tracks read shows once (Ruling 11).
+        if self.take_drum_failure() {
             arrived = true;
         }
         pending || arrived
